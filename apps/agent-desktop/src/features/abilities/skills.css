@@ -1,0 +1,21 @@
+.skills-page { display: flex; flex-direction: column; gap: 16px; }
+.skills-actions, .skill-card__heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.skill-card { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 20px; min-width: 0; }
+.skill-card__heading { justify-content: space-between; }
+.skill-card__heading h3, .skill-editor h3 { min-width: 0; margin: 0; font-size: var(--font-size-section-title); line-height: var(--line-height-ui); overflow-wrap: anywhere; }
+.skill-card__heading label { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-secondary); font-size: var(--font-size-control); }
+.skill-card > p { margin: 0; line-height: var(--line-height-body); }
+.skills-page > .skills-help { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--color-primary-soft); }
+.skill-path { display: block; }
+.skills-help, .skill-path { color: var(--color-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.skill-source { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; margin: 0; padding: 14px; background: var(--color-background); border-radius: 8px; font: 12px/1.6 Consolas, monospace; }
+.skill-picker { position: relative; }
+.skill-picker__menu { position: absolute; bottom: 36px; left: 0; width: 280px; max-height: 280px; overflow-y: auto; padding: 8px; border-radius: 10px; background: var(--color-surface); border: 1px solid var(--color-border); box-shadow: 0 8px 24px #0004; z-index: 50; }
+.skill-picker__menu button { display: block; width: 100%; text-align: left; padding: 9px; border: 0; background: transparent; color: inherit; cursor: pointer; border-radius: 6px; }
+.skill-picker__menu strong { font-size: 12px; overflow-wrap: anywhere; }
+.skill-picker__menu button:hover { background: #8882; }
+.skill-picker__menu small { display: block; margin-top: 3px; color: var(--color-text-secondary); font-size: 11px; line-height: 1.5; }
+.skill-picker__menu p { font-size: 12px; padding: 5px; }
+.skill-editor label { display: grid; gap: 6px; margin: 0; color: var(--color-text-secondary); font-size: var(--font-size-control); font-weight: 600; }
+.skill-editor input, .skill-editor textarea { width: 100%; padding: 9px; border: 1px solid var(--color-border); background: var(--color-background); color: var(--color-text); font: inherit; border-radius: 6px; box-sizing: border-box; }
+.skill-editor__body { min-height: 220px; resize: vertical; font-family: monospace; }

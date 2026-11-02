@@ -1,0 +1,37 @@
+# Windows releases
+
+This project uses the public repository `ZCchou/agent` for both source and distribution. Source checkout alone includes no production updater signing identity.
+
+## Prerequisites
+
+Use Windows, Node.js 24.14.0, Rust 1.98.1/MSVC and the `agent` Conda environment with Python 3.12. Install the locked dependencies described in the root README. Microsoft Edge is required for UI tests.
+
+The tracked updater public key in `apps/agent-desktop/src-tauri/tauri.conf.json` is intentionally empty. Before publishing updates, generate an independent Tauri signing key outside the repository, configure its public key, and supply the matching private key through `TAURI_SIGNING_PRIVATE_KEY`. Never commit private keys. Set the private key as a repository Actions secret before running an official build. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is currently supplied as an empty string by the workflow; use a key and workflow configuration that agree.
+
+Feeds are `https://raw.githubusercontent.com/ZCchou/agent/main/updates/preview.json` and `stable.json`. Feed signatures and installers must use the new key. Update checks stop before making requests while no public key is configured.
+
+## Local packaging
+
+Run `.\tools\release-windows.bat` from the root. This builds and verifies the Python sidecar, runs quality gates and builds an NSIS installer. `-InstallerSmokeTest` adds installer checks. A local unsigned packaging check can use `-SkipTests -SkipDependencyInstall -AllowDirty` only after separately passing those checks; it is not an official release. Authenticode signing uses `AGENT_WINDOWS_CERTIFICATE_THUMBPRINT` and remains separate from updater signing.
+
+Artifacts and manifests are written beneath `.artifacts/releases/v<version>/windows-x86_64/`. The canonical distributable installer is `agent-<version>-windows-x86_64-setup.exe`.
+
+## Official workflow and publication
+
+The release workflow is manually dispatched and uploads verified artifacts. It does not automatically create a release or tag. Keep a new release tag unused until publication.
+
+```powershell
+gh workflow run windows-release.yml --repo ZCchou/agent --ref main -f release_tag=v0.14.3-preview.1 -f update_channel=preview
+```
+
+After the workflow succeeds, download its artifacts. The `tools/release_windows.py publish-public` operation takes `--directory`, `--config` and `--workflow-run`. It validates signatures, manifests, the public repository, and the successful workflow commit before creating a draft release at that exact source commit. It uploads and verifies asset sizes and digests before publishing, then advances only the chosen signed channel feed atomically. Existing tags/releases and equal or older channel versions are rejected.
+
+Use `prepare-public` and `validate-public` with the same directory/config arguments for offline package preparation and inspection. Do not distribute diagnostic sidecars, private keys or unfiltered build output. Review the public directory before publication.
+
+## Local offline checks
+
+Run the commands in the root README with test-specific `TEMP`, `TMP`, `AGENT_DATA_DIR` and `CARGO_TARGET_DIR` paths. Rebuild the sidecar before Host tests. CI defines `core-check`, `frontend-check` and `windows-host-check`; required branch checks must be configured separately in GitHub.
+
+## Installer and live-model acceptance
+
+Mock UI tests and sidecar protocol checks do not establish actual desktop startup, safe upgrade behavior or provider compatibility. Before distributing an official installer, verify install/uninstall and restart on Windows, preservation of this application's own data across upgrades, approval behavior, update signature rejection and the intended live provider workflows. Record results without credentials or private content.

@@ -1,0 +1,58 @@
+{
+  "contract_id": "unified-invocation-v3.3",
+  "version": "3.3.1",
+  "settings_schema_version": 16,
+  "core_schema_version": 17,
+  "ipc_version": 14,
+  "core_version": "0.12.1",
+  "build_id": "schema17-route-health-output-budget-v1",
+  "policy_version": "route-health-policy-v1",
+  "output_budget_policy": {
+    "version": "invocation-output-budget-v1",
+    "purposes": {
+      "intent_analysis": {"initial_tokens": 256},
+      "vision_analysis": {"initial_tokens": 4096, "retry_tokens": 8192},
+      "web_research": {"initial_tokens": 4096},
+      "reasoning_analysis": {"initial_tokens": 8192},
+      "final_response": {"uses_model_limit": true}
+    },
+    "ceiling_order": ["model_limit", "protocol_limit", "remaining_context_tokens"],
+    "retry_condition": "zero_visible_output_and_max_output_tokens"
+  },
+  "model_authorities": ["enabled", "allow_automatic_routing", "global_default"],
+  "start_statuses": ["accepted", "waiting_permission", "waiting_budget", "preflight_rejected"],
+  "project_file_intents": ["unavailable", "available", "required_read", "required_write"],
+  "step_statuses": ["queued", "running", "completed", "skipped", "failed", "cancelled", "interrupted", "unknown_outcome", "stale"],
+  "invocation_kinds": ["model", "host_search"],
+  "native_search_modes": ["off", "auto", "required"],
+  "native_search_transports": ["none", "server_managed", "client_continuation"],
+  "protocols": ["memory", "ollama", "openai_chat", "openai_responses", "anthropic_messages", "tavily_v1", "searxng_json"],
+  "adapters": ["fake.deterministic", "ollama.chat", "openai.chat", "openai.responses", "kimi.openai_chat", "deepseek.openai_chat", "deepseek.responses", "deepseek.anthropic_web", "anthropic.messages", "tavily.search", "searxng.search"],
+  "adapter_protocols": {
+    "fake.deterministic": "memory", "ollama.chat": "ollama", "openai.chat": "openai_chat",
+    "openai.responses": "openai_responses", "kimi.openai_chat": "openai_chat",
+    "deepseek.openai_chat": "openai_chat", "deepseek.responses": "openai_responses",
+    "deepseek.anthropic_web": "anthropic_messages", "anthropic.messages": "anthropic_messages",
+    "tavily.search": "tavily_v1", "searxng.search": "searxng_json"
+  },
+  "capability_keys": ["text", "vision", "function_tools", "native_web_search", "reasoning"],
+  "support_statuses": ["declared", "verified", "unsupported", "unknown"],
+  "health_statuses": ["ready", "degraded", "cooling_down", "configuration_blocked"],
+  "health_key_fields": ["target_kind", "provider_or_backend_id", "model_id", "route_id", "capability_signature", "route_fingerprint"],
+  "web_requirements": ["off", "optional", "required"],
+  "web_evidence_requirements": ["optional", "required"],
+  "web_relations": ["new_topic", "follow_up", "correction", "continuation"],
+  "source_provenance": ["structured", "opaque", "none", "unknown"],
+  "web_evidence_statuses": ["not_evaluated", "provider_reference", "traceable_sources", "missing", "invalid", "legacy_unknown"],
+  "web_grounding_statuses": ["not_required", "grounded", "ungrounded_fallback", "failed"],
+  "activation_conditions": ["always", "when_web_required", "when_vision_required", "when_web_evidence_missing"],
+  "step_types": ["intent_analysis", "vision_analysis", "web_research", "reasoning_analysis", "final_response", "grounding_fallback"],
+  "terminal_events": ["run.invocation_completed", "run.invocation_failed"],
+  "temporary_failure_policy": {
+    "first": {"status": "degraded"}, "second": {"status": "degraded"},
+    "third": {"status": "cooling_down", "seconds": 60},
+    "fourth": {"status": "cooling_down", "seconds": 300},
+    "fifth_and_later": {"status": "cooling_down", "seconds": 900}
+  },
+  "error_codes": ["web_source_route_unavailable", "web_evidence_missing", "web_evidence_invalid", "web_grounding_fallback_unavailable", "route_temporarily_cooling_down", "route_configuration_blocked"]
+}

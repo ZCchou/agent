@@ -1,0 +1,410 @@
+const common = {
+  buttonAudit: {
+    actionFailed: "操作失败，请重试。",
+    saveFailed: "保存失败，已保留你的修改，请重试。",
+    removeModelTitle: "移除 {{model}}？",
+    removeModelDescription: "有 {{count}} 个对话使用此模型，移除后需要选择其他模型。仍要移除吗？",
+    projectCreatedContinue: "项目已创建。请重试以完成后续步骤。",
+    oneModelRequired: "项目至少需要保留一个可用模型。",
+    openConversation: "打开对话",
+    refresh: "刷新",
+    windowFailed: "窗口操作失败，请重试。",
+    skillRefreshFailed: "技能已保存，但列表刷新失败。请点击刷新重新加载。",
+    finishEditing: "请先完成或取消编辑，再移除此注册。",
+  },
+  skills: {
+"create":"创建技能","edit":"编辑技能","name":"技能名称","purpose":"适用场景","instructions":"技能正文（Markdown）","save":"保存技能","cancel":"取消编辑","editHelp":"名称使用小写字母、数字和连字符。更新前保留旧文件；外部修改冲突时需重新加载。智能体也可通过 skills.save 创建和更新技能。",
+  "draftFull": "草稿空间不足，请先缩短内容，再添加技能。",
+  "description": "导入本地 SKILL.md 技能包，在聊天中选择使用，或让模型按需加载。",
+  "refresh": "刷新",
+  "import": "导入技能文件夹",
+  "help": "选择包含 SKILL.md 的文件夹，文件头需有 YAML 格式的 name 和 description。文件保留原位置，外部编辑会在下次使用时读取。导入不会执行脚本；移除注册不会删除源文件。",
+  "error": "技能操作失败。",
+  "empty": "尚未导入技能。",
+  "enable": "启用 {{name}}",
+  "enabled": "已启用",
+  "automatic": "允许自动或手动调用 · ${{name}}",
+  "explicit": "仅手动选择 · ${{name}}",
+  "view": "查看技能说明",
+  "remove": "移除注册",
+  "choose": "选择技能",
+  "loading": "正在加载技能…",
+  "loadError": "暂时无法加载技能，仍可发送消息。",
+  "pickerEmpty": "没有可用技能，请在「系统功能 → 技能」中导入文件夹。"
+},
+  navigation: {
+    newChat: "新建聊天",
+    chats: "普通聊天",
+    resources: "聊天与项目",
+    chat: "聊天",
+    projects: "项目",
+    models: "模型",
+    abilities: "技能",
+    memory: "全局行为指令",
+    reminders: "主动提醒",
+    approvals: "授权确认",
+    settings: "设置",
+    diagnostics: "诊断",
+    systemFeatures: "系统功能",
+  },
+  brand: { tagline: "一起思考、规划与行动。" },
+  actions: { retry: "重试", close: "关闭", cancel: "取消", back: "返回", create: "创建", edit: "编辑", delete: "删除", rename: "重命名", restore: "恢复", save: "保存", saving: "正在保存…" },
+  window: { minimize: "最小化", maximize: "最大化或还原", close: "关闭" },
+
+  topbar: {
+    model: {
+      auto: "本地 / API 模型",
+      demo: "内置演示模型 · 本地",
+    },
+
+    profile: "个人设置",
+  },
+  projects: {
+    new: "新建项目", loading: "正在加载项目…", error: "无法加载项目。",
+    empty: { title: "还没有项目", description: "创建项目，将相关对话组织在一起。" },
+    drawer: { title: "新建项目", name: "项目名称", category: "主要用途", error: "项目创建失败。", chooseDirectory: "创建后选择项目工作目录（可跳过）" },
+    categories: { casual: "日常与轻量", research: "学习与研究", work: "办公与执行", writing: "内容写作", coding: "软件开发", gaming: "游戏与互动", other: "通用" },
+    detail: {
+      back: "← 所有项目",
+      description: "管理项目工作、行为策略和授权的电脑访问。",
+      works: "工作",
+      newWork: "新建工作",
+      empty: "还没有工作",
+      emptyDescription: "从这里开始工作，或者从普通聊天派生。",
+      noDirectory: "尚未授权目录",
+      authorize: "授权目录",
+      purposeBehavior: "默认工作方式：{{purpose}}。它只改变分析、修改和验证方式，不会扩大文件或模型权限。",
+      read: "读取文件",
+      readWrite: "读取与写入文件",
+      none: "无",
+    },
+  },
+  chatGroups: {
+    new: "新建聊天组",
+    prompt: "聊天组名称",
+    renamePrompt: "重命名聊天组",
+    confirmDelete: "删除这个聊天组吗？其中的聊天将变为未分组。",
+    ungrouped: "未分组",
+  },
+  conversation: {
+    newChat: "新聊天",
+    newWork: "新工作",
+    chatOnly: "仅聊天",
+    projectWork: "项目工作",
+  },
+  sidebar: {
+    resize: "调整侧边栏宽度",
+    resizeHint: "左右拖动调整宽度；双击恢复默认宽度",
+    newChatInGroup: "在此聊天组中新建聊天",
+    manageResource: "管理会话",
+    moreActions: "更多操作",
+    conversationTitle: "会话标题",
+    chooseChatGroup: "聊天组",
+    chooseProject: "目标项目",
+    ungrouped: "未分组",
+    move: "移动",
+    moveToGroup: "移动到聊天组",
+    moveToProject: "移动到项目",
+    copyToProject: "复制到项目",
+    openProjects: "打开项目列表",
+    openDirectory: "打开目录",
+    copyWorkWarning: "将复制完整聊天历史到目标项目，副本使用目标项目环境，之后双方独立发展。",
+    deleteConversationWarning: "删除后会移入设置中的回收站，并保留 30 天。",
+    confirmDeleteConversation: "将“{{title}}”移入回收站吗？",
+    confirmDeleteProject: "将项目“{{name}}”及其中 {{workCount}} 个工作、{{messageCount}} 条消息移入回收站吗？授权将暂时停用。",
+    confirmDeleteProjectAgain: "再次确认：移动项目“{{name}}”到回收站？",
+    moveWorkWarning: "移动后，此工作将改用目标项目的类别策略、授权目录和项目级能力；聊天记录会完整保留。",
+    confirmMoveWork: "确定将此工作从“{{source}}”移动到“{{target}}”吗？\n\n迁移后将改用目标项目的类别策略、授权目录和项目级能力；聊天记录会完整保留。",
+    errors: {
+      directoryNotAuthorized: "请先在项目页面授权工作目录，再打开目录。",
+      openDirectoryFailed: "目录无法打开，可能已移动、删除或授权不可用。请重新授权后重试。",
+      renameFailed: "名称保存失败，已保留你的修改，请重试。",
+      deleteFailed: "删除失败，请重试。",
+      saveCollapse: "侧边栏折叠状态保存失败。",
+      saveWidth: "侧边栏宽度保存失败，已恢复原宽度。",
+      moveFailed: "会话移动失败，已恢复原位置。",
+      reorderFailed: "顺序保存失败，已恢复原顺序。",
+      copyFailed: "工作复制失败。",
+      loadChats: "聊天资源加载失败，点击重试",
+      loadProjects: "项目资源加载失败，点击重试",
+    },
+  },
+  approvals: {
+    error: "无法加载授权确认。",
+    empty: "没有待确认操作",
+    emptyDescription: "需要确认的文件写入会显示在这里。",
+    approve: "批准",
+    reject: "拒绝",
+    status: { pending: "待确认", approved: "已批准", rejected: "已拒绝", expired: "已过期", cancelled_project_move: "因项目迁移而取消", cancelled_project_deleted: "因项目进入回收站而取消" },
+  },
+
+  core: {
+    online: "Agent Core 在线",
+    offline: "Agent Core 离线",
+
+    operational:
+      "所有系统运行正常",
+
+    openDiagnostics:
+      "打开诊断",
+    rebuildSidecar: "Sidecar 版本过旧，请重新构建",
+  },
+
+  models: {
+    loading: "正在加载模型设置…", add: "添加模型服务", test: "测试连接并列出模型",
+    testing: "正在测试…", services: "模型服务", servicesDescription: "连接并选择普通聊天和项目工作使用的模型。",
+    serviceCount: "{{count}} 个服务", currentDefault: "当前默认", endpoint: "服务地址", credential: "访问凭据",
+    testToLoad: "测试连接后加载模型", modelsFound: "发现 {{count}} 个可用模型",
+    defaultDescription: "新会话默认协调模型；已绑定协调模型和固定模型的会话不会被静默替换。",
+    routingSyncPending: "设置已保存，将在 Core 恢复后应用。",
+    provider: "模型服务", model: "具体模型", availableModels: "可用模型", viewModels: "查看模型",
+    modelListDescription: "当前由该服务报告的模型。", setAsDefault: "设为全局默认", noModels: "该服务没有返回可用模型。",
+    addDescription: "连接本地 Ollama 服务或兼容 OpenAI 接口的在线服务。", namePlaceholder: "例如：本机 Ollama",
+    ollamaUrlHint: "本地地址允许使用 HTTP。", onlineUrlHint: "远程服务必须使用 HTTPS。",
+    apiKeyHint: "密钥由 Windows 安全保存，界面无法读取明文。",
+    providerKinds: { fake: "内置本地模型", ollama: "Ollama · 本地", openai_compatible: "兼容 OpenAI · 在线" },
+    status: { idle: "尚未测试", loading: "连接中", ok: "可用", error: "不可用", disabled: "配置未完成" },
+    presets: { moonshotCn: "月之暗面 Kimi（国内）", custom: "自定义 OpenAI-compatible" },
+    localService: "本地模型服务", onlineService: "在线模型服务", customService: "自定义兼容接口",
+    apiBaseUrlHint: "填写准确的 API Base URL；根地址可安全尝试 /v1。",
+    presetUrlHint: "该官方地址由所选厂商预设管理。", testAndContinue: "测试并继续",
+    manageModels: "管理模型", modelCounts: "检测到 {{discovered}} 个 · 允许 {{enabled}} 个",
+    searchModels: "搜索模型", onlyEnabled: "只看已允许", allowUse: "允许使用",
+    allowAutomatic: "允许自动调用", allowAutomaticHint: "允许自动模式将此模型用于协调、图片、联网或推理步骤，可能产生费用。",
+    automaticModelCount: "允许自动调用 {{count}} 个",
+    followDefault: "跟随默认：{{model}}",
+    disableAutomaticReferencedConfirm: "此模型被 {{count}} 个会话引用。关闭自动调用后，已有请求不会中断，但后续发送可能需要重新授权或选择模型。",
+    probeTools: "检测文件能力",
+    toolMode: { native: "原生工具", structured: "结构化兼容", text_only: "只能聊天", unknown: "文件能力未知" },
+    catalogStatus: { available: "可用", unavailable: "服务已不再报告", unverified: "尚未验证" },
+    catalogSource: { discovered: "自动检测", manual: "手动添加" },
+    manualModel: "手动添加模型 ID", manualModelPlaceholder: "输入准确的模型 ID", addManual: "添加模型",
+    projectModelScope: "本项目可用模型", inheritGlobalModels: "继承全局允许模型",
+    restrictProjectModels: "限制此项目的模型", allowedInProject: "本项目允许使用",
+    delete: "删除", enableProvider: "启用服务", disableProvider: "停用服务", removeManual: "移除",
+    disableReferencedConfirm: "有 {{count}} 个会话固定使用此模型。禁止后这些会话不会自动换模，下次发送前必须重新选择。仍要禁止吗？",
+    disableProviderReferencedConfirm: "有 {{count}} 个会话固定使用此服务。停用后这些会话不会自动换到其他服务，下次发送前必须重新选择。仍要停用吗？",
+    deleteProviderReferencedConfirm: "有 {{count}} 个会话固定使用此服务。删除后这些会话必须重新选择模型。仍要删除吗？",
+    keyStored: "API Key 已由 Windows 安全保存",
+    noKey: "未保存 API Key", name: "名称", type: "服务类型",
+    baseUrl: "服务地址", apiKey: "API Key（保存后不可回读）", save: "保存服务",
+    projectPolicy: "模型访问策略", localOnly: "仅允许本地模型", allowOnline: "允许在线模型",
+    projectKnowledge: "项目知识", noKnowledge: "还没有已发布的项目知识。",
+    modelId: "模型 ID", defaultModel: "全局默认模型", chooseDefault: "选择默认模型",
+    chooseCompatibleModel: "请选择此会话可用的模型",
+    contextKnown: "上下文：{{count}} tokens", contextUnknown: "模型窗口未知 · 暂按 8,192 处理",
+    contextLength: "上下文窗口", maxOutputTokens: "最大输出 tokens",
+    inputPrice: "输入价格 / 百万 tokens（美元）", outputPrice: "输出价格 / 百万 tokens（美元）",
+    qualityScore: "路由质量分（0–100）", routingPriority: "路由偏好（-10–10）",
+    apiProtocol: "API 协议", apiProtocolHint: "按服务文档选择；agent 不会自动试遍不同协议。",
+    contextLimitHint: "留空时使用保守值；请填写模型服务商公布的参数。",
+    advancedParameters: "高级参数",
+    nativeSearch: { declared: "原生搜索可用", verified: "原生搜索已验证", unsupported: "当前协议不支持", temporary_error: "原生搜索暂时不可用", unknown: "原生搜索待确认", not_applicable: "无原生搜索协议" },
+    sourceProvenance: { structured: "来源：可核验", opaque: "来源：不透明", none: "来源：无", unknown: "来源：待确认" },
+    sourceProvenanceHint: "该原生搜索路线能否返回带有效网址的结构化来源。要求最新或明确搜索时，只使用可核验来源路线。",
+    vision: { declared: "图片：预设支持", verified: "图片：已验证", unsupported: "图片：不支持", temporary_error: "图片：临时失败", unknown: "图片：待确认" },
+    resetVision: "重置图片能力确认",
+    resetRouteHealth: "重置运行健康",
+    routeHealth: {
+      ready: "运行状态：正常",
+      degraded: "运行状态：最近调用不稳定",
+      cooling_down: "运行状态：冷却中（约{{seconds}}秒）",
+      configuration_blocked: "运行状态：配置阻塞",
+    },
+    probeNativeSearch: "诊断原生搜索",
+    probeNativeSearchCostHint: "发送一次真实搜索诊断，可能产生模型服务费用",
+    nativeSearchCount: "原生搜索 {{count}} 可用",
+    externalSearchConfigured: "外接搜索 已配置",
+    externalSearchNotConfigured: "外接搜索 未配置",
+    enableNativeSearchTitle: "允许 agent 使用联网搜索",
+    enableNativeSearchDescription: "需要时只向模型服务发送精简查询。网页内容始终作为不可信外部数据处理。此确认只需一次。",
+    enableNativeSearch: "了解并允许",
+    configureExternalSearch: "配置外接搜索",
+    routing: { title: "自动模型选择", description: "新会话固定一个协调模型；必要时最多调用两个只读专用模型。", preset: "路由策略", balanced: "均衡", quality: "质量优先", economy: "经济", localFirst: "本地优先", callBudget: "每条消息调用上限", specialistBudget: "自动专用步骤上限", extraCost: "额外在线预算（美元）", allowUnknownPrice: "允许自动调用价格未知的在线模型" },
+    contextSource: { discovered: "自动检测", manual: "手动填写", fallback: "保守值" },
+    confirm: {
+      disableAutomaticTitle: "关闭 {{model}} 的自动调用？",
+      disableModelTitle: "停用模型 {{model}}？", disableProviderTitle: "停用 {{provider}}？",
+      deleteProviderTitle: "删除 {{provider}}？", deleteProviderDescription: "该模型服务及其目录配置将从 agent 中移除。",
+      disable: "确认停用",
+    },
+    pin: "固定", archive: "归档", knowledgeTitle: "知识标题", knowledgeContent: "知识内容",
+  },
+  pages: {
+    chat: {
+      title: "聊天",
+      description:
+        "与 agent 对话。",
+    },
+
+    projects: {
+      title: "项目",
+      description:
+        "组织长期对话、上下文、文件和项目偏好。",
+    },
+
+    models: {
+      title: "模型",
+      description:
+        "管理本地模型、API 服务和默认模型。",
+    },
+
+    abilities: {
+      title: "技能",
+      description:
+        "管理本地技能，并在聊天中使用。",
+    },
+
+    memory: {
+      title: "全局行为指令",
+      description:
+        "设置所有对话共同遵循的指令。自动长期记忆尚未开放。",
+      globalInstructions: {
+        title: "全局行为指令",
+        description: "控制所有对话中的回答风格、上下文理解和协作方式。",
+        scope: "应用范围：全部对话",
+        enabledLabel: "启用全局行为指令",
+        enabled: "已启用",
+        disabled: "已停用",
+        placeholder: "例如：先给结论，再给依据；涉及最新信息时主动判断是否需要联网。",
+        characters: "字符数：{{count}} / {{max}}",
+        revision: "版本：{{revision}}",
+        boundary: "此内容只影响回答风格和协作方式，不会授予文件、联网或工具权限，也不能绕过审批和安全规则。",
+        reset: "重置为默认",
+        resetConfirm: "确定要恢复 agent 的默认行为指令吗？未保存的编辑将丢失。",
+        errors: { load: "无法加载全局行为指令。", save: "保存失败，之前的设置仍然有效。", reset: "重置失败，之前的设置仍然有效。" },
+      },
+    },
+
+    reminders: {
+      title: "主动提醒",
+      description:
+        "主动提醒尚在规划中，目前未开放。",
+    },
+
+    approvals: {
+      title: "授权确认",
+      description:
+        "查看需要你明确授权的操作。",
+    },
+
+    settings: {
+      title: "设置",
+      description:
+        "管理长期生效的偏好和配置。",
+    },
+
+    diagnostics: {
+      title: "诊断",
+      description:
+        "检查 Agent Core 和应用运行状态。",
+    },
+  },
+
+  settings: {
+    updater: {
+      retryDraft: "重试恢复草稿",
+      "title": "软件更新",
+      "current": "当前版本：{{version}}",
+      "channel": "更新通道",
+      "preview": "预览版",
+      "stable": "稳定版",
+      "auto": "启动时自动检查更新",
+      "progress": "下载进度",
+      "bytes": "{{count}} 字节",
+      "check": "检查更新",
+      "download": "下载更新",
+      "install": "安装并重启",
+      "retry": "重试",
+      "returnChat": "返回对话",
+      "installHint": "所有运行中的任务结束后才能安装。重启后将恢复未发送的草稿和附件。",
+      "found": "发现新版本 {{version}}。",
+      "open": "查看更新",
+      "restore": "恢复已保存的草稿",
+      "restoreConflict": "更新前的草稿可供恢复。当前草稿已保留。",
+      "restoreError": "无法读取或确认更新草稿，已保存的草稿仍保留，可在下次启动时恢复。",
+      "missing": "部分已保存附件不可用，请在发送前检查恢复的草稿。",
+      "states": {
+        "idle": "检查是否有新版本。",
+        "checking": "正在检查更新…",
+        "no_update": "已是最新版本。",
+        "available": "新版本 {{version}} 可供下载。",
+        "downloading": "正在下载更新…",
+        "ready": "更新已验证，可以安装。",
+        "installing": "正在安装更新…",
+        "error": "未能完成更新。",
+        "channel_unavailable": "此通道尚未发布版本。"
+      },
+      "errors": {
+        "app_update_busy": "请等待正在运行的任务结束后，再次安装。",
+        "network": "网络请求失败，请检查连接后重试。",
+        "signature_invalid": "更新签名无效，请重新检查新版本后下载。",
+        "feed_invalid": "更新信息无效，请稍后重新检查。",
+        "not_ready": "请先下载并验证更新。",
+        "stale": "此更新已失效，请重新检查更新。",
+        "core_unavailable": "Core 不可用，请恢复连接后重试。",
+        "draft_failed": "无法保存草稿，草稿已保留。请等待附件处理完成后重试。",
+        "install_failed": "安装失败，草稿和已验证的更新均已保留，请重试安装。",
+        "unknown": "更新失败，请重试。"
+      }
+    },
+    moreSettings: "更多设置",
+    webSearch: {
+      title: "联网与搜索", description: "管理搜索服务、隐私、默认路径和连接状态。", open: "打开",
+      master: "全局联网总开关", privacy: "开启后，搜索查询会发送给所选服务；不会自动发送完整会话、附件或项目文件。",
+      enabled: "已开启", disabled: "已关闭", addBackend: "添加搜索服务", backendName: "服务名称", backendType: "服务类型",
+      baseUrl: "API Base URL", apiKey: "API Key（仅保存于 Windows 凭据管理器）", default: "默认搜索服务", test: "测试连接",
+      healthAvailable: "连接正常", healthUnavailable: "连接失败", healthUntested: "尚未测试连接",
+      enableBackend: "启用服务", disableBackend: "停用服务",
+      safeSearch: "安全搜索", language: "默认语言（如 zh-CN 或 auto）", region: "默认地区（如 TW 或 auto）",
+      makeDefault: "设为默认", empty: "还没有外接搜索服务。", projectAccess: "项目联网权限", projectOff: "禁止联网", projectOn: "允许联网搜索",
+      projectAccessHint: "仅允许此项目的工作搜索公开网页；不会自动发送项目文件、附件或完整对话。每个工作仍需单独选择联网模式。",
+      errors: { load: "联网设置加载失败。", save: "联网设置保存失败。", test: "搜索服务连接测试失败。" },
+    },
+    remoteImages: {
+      title: "远程图片", description: "控制 Agent 回复是否可以从外部网站加载图片。",
+      label: "允许加载", enabled: "已允许", disabled: "需要审批",
+      hint: "开启后，所有对话中的 HTTPS 远程图片都会自动展示。外部网站可能获得你的 IP 地址和访问时间。",
+      error: "远程图片设置保存失败，已继续使用之前的设置。",
+    },
+    trash: {
+      title: "回收站", description: "项目、普通聊天和工作会保留 30 天。",
+      open: "打开回收站",
+      contents: "已删除的内容",
+      itemCount: "共 {{count}} 项",
+      loading: "正在加载回收站…",
+      empty: "回收站为空", emptyAction: "清空回收站", permanent: "永久删除",
+      emptyDescription: "删除的普通聊天、工作和项目会显示在这里。",
+      confirmEmpty: "永久删除回收站中的全部内容吗？此操作无法撤销。",
+      confirmPermanent: "永久删除“{{title}}”吗？此操作无法撤销。",
+      restoreFailed: "无法恢复；项目工作需要先恢复所属项目。",
+      error: "回收站加载或操作失败。", expires: "{{date}} 后永久删除",
+      project: "项目 · {{workCount}} 个工作 · {{messageCount}} 条消息",
+      conversation: "{{kind}} · {{messageCount}} 条消息",
+    },
+    language: {
+      title: "界面语言",
+
+      description:
+        "选择 agent 应用界面使用的语言。",
+
+      label: "语言",
+
+      system:
+        "跟随系统",
+
+      english:
+        "English",
+
+      chinese:
+        "简体中文",
+
+      hint:
+        "修改界面语言不会改变当前聊天中 Agent 的回答语言。",
+      error:
+        "界面语言设置保存失败，已继续使用之前的设置。",
+    },
+  },
+};
+
+export default common;

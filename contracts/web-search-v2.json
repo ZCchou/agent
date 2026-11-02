@@ -1,0 +1,29 @@
+{
+  "policy_version": "web-search-policy-v2",
+  "routes": ["none", "native", "host_tool", "host_presearch", "specialist"],
+  "native_adapters": [
+    "none", "openai_responses_web_search", "kimi_builtin_web_search",
+    "anthropic_messages_web_search", "host_search_bridge"
+  ],
+  "native_statuses": [
+    "declared", "verified", "unsupported", "temporary_error", "not_applicable"
+  ],
+  "conversation_modes": ["inherit", "off", "auto"],
+  "operation_statuses": [
+    "prepared", "dispatched", "searching", "reading_sources", "completed",
+    "failed", "cancelled", "interrupted", "unknown_outcome"
+  ],
+  "events": [
+    "run.web_search_started", "run.web_search_completed", "run.web_search_failed"
+  ],
+  "errors": [
+    "web_privacy_consent_required", "project_web_consent_required",
+    "external_search_setup_required", "native_search_protocol_unsupported",
+    "web_search_not_enabled", "project_web_access_denied",
+    "native_web_search_unsupported", "search_backend_not_configured",
+    "search_authentication_failed", "search_rate_limited", "search_quota_exhausted",
+    "search_timeout", "search_budget_exceeded", "search_unknown_outcome",
+    "search_result_invalid", "web_url_blocked", "web_content_too_large",
+    "web_citation_invalid"
+  ]
+}

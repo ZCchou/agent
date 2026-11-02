@@ -1,0 +1,45 @@
+{
+  "compaction_target": { "provider_profile_id": "allowed-local", "model_id": "larger-context" },
+  "attachment_references": [
+    { "attachment_id": "historical-notes", "source_start": 4, "source_end": 8 },
+    { "attachment_id": "historical-image" }
+  ],
+  "range_example": { "text": "😀序言\n目标片段尾部", "selected_text": "目标片段" },
+  "search_pages": [
+    { "matches": ["文档/notes.txt"], "inspected_files": 10000, "next_cursor": "opaque-snapshot-page", "complete": false, "truncated": true, "stop_reason": "files" },
+    { "matches": [], "inspected_files": 2, "next_cursor": null, "complete": true, "truncated": false, "stop_reason": null }
+  ],
+  "change_set": {
+    "id": "change-fixture", "operation_id": "tool-fixture", "run_id": "run-fixture",
+    "conversation_id": "conversation-fixture", "project_id": "project-fixture",
+    "title": "Create documentation", "risk": "routine", "approval_mode": "human",
+    "mutations": [
+      { "kind": "mkdir", "path": "文档" },
+      { "kind": "create_text", "path": "文档/notes.txt", "content": "synthetic" }
+    ],
+    "status": "rollback_conflicted", "expires_at_epoch_ms": 1900000000000,
+    "recovery_point_id": "snapshot-fixture", "execution_id": "execution-fixture",
+    "recovery_error_code": "rollback_incomplete", "recovery_affected_paths": ["文档/notes.txt"],
+    "undo_state": "unavailable",
+    "plan": {
+      "plan_id": "plan-fixture", "plan_hash": "39f5a2f707213b6dce9c4c8c2bbf4664b480664ed9665f3b4757f5b1434e8fea",
+      "policy_version": 1, "root_generation": 7, "effective_risk": "routine",
+      "steps": [
+        { "operation_id": "mkdir-docs", "mutation": { "kind": "mkdir", "path": "文档" }, "depends_on": [], "preconditions": {
+          ".": { "kind": "directory", "identity": "fedcba9876543210:fedcba98765432100123456789abcdef", "sha256": null },
+          "文档": { "kind": "missing", "identity": null, "sha256": null }
+        } },
+        { "operation_id": "write-notes", "mutation": { "kind": "create_text", "path": "文档/notes.txt", "content": "synthetic" }, "depends_on": ["mkdir-docs"], "preconditions": {
+          ".": { "kind": "directory", "identity": "fedcba9876543210:fedcba98765432100123456789abcdef", "sha256": null },
+          "文档": { "kind": "missing", "identity": null, "sha256": null },
+          "文档/notes.txt": { "kind": "missing", "identity": null, "sha256": null }
+        } }
+      ]
+    }
+  },
+  "approval": {
+    "approve": true, "plan_id": "plan-fixture",
+    "plan_hash": "39f5a2f707213b6dce9c4c8c2bbf4664b480664ed9665f3b4757f5b1434e8fea",
+    "approved_operation_ids": ["mkdir-docs", "write-notes"]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "contract_id": "unified-invocation-v3",
+  "version": 3,
+  "settings_schema_version": 13,
+  "core_schema_version": 15,
+  "ipc_version": 11,
+  "core_version": "0.9.0",
+  "build_id": "schema15-unified-invocation-v3",
+  "invocation_kinds": ["model", "host_search"],
+  "native_search_modes": ["off", "auto", "required"],
+  "attachment_import_states": ["accepted", "rejected"],
+  "protocols": ["memory", "ollama", "openai_chat", "openai_responses", "anthropic_messages", "tavily_v1", "searxng_json"],
+  "adapters": ["fake.deterministic", "ollama.chat", "openai.chat", "openai.responses", "kimi.openai_chat", "deepseek.openai_chat", "deepseek.responses", "deepseek.anthropic_web", "anthropic.messages", "tavily.search", "searxng.search"],
+  "adapter_protocols": {
+    "fake.deterministic": "memory",
+    "ollama.chat": "ollama",
+    "openai.chat": "openai_chat",
+    "openai.responses": "openai_responses",
+    "kimi.openai_chat": "openai_chat",
+    "deepseek.openai_chat": "openai_chat",
+    "deepseek.responses": "openai_responses",
+    "deepseek.anthropic_web": "anthropic_messages",
+    "anthropic.messages": "anthropic_messages",
+    "tavily.search": "tavily_v1",
+    "searxng.search": "searxng_json"
+  },
+  "capability_keys": ["text", "vision", "function_tools", "native_web_search", "reasoning"],
+  "artifact_kinds": ["text.utf8", "image.normalized", "document.text", "document.page_image", "audio.transcript", "archive.manifest"],
+  "invocation_statuses": ["prepared", "dispatched", "streaming", "completed", "failed", "cancelled", "interrupted", "unknown_outcome", "stale"],
+  "errors": ["attachment_type_unsupported", "attachment_signature_mismatch", "attachment_processing_failed", "attachment_artifact_invalid", "attachment_processor_unavailable", "invocation_spec_invalid", "invocation_spec_stale", "invocation_protocol_mismatch", "invocation_payload_invalid", "capability_combination_unsupported", "execution_step_unknown_outcome"],
+  "events": ["run.planning_started", "run.plan_ready", "run.waiting_permission", "run.waiting_budget", "run.step_started", "run.step_completed", "run.step_failed", "run.synthesis_started", "run.invocation_prepared", "run.invocation_dispatched", "run.invocation_completed", "run.invocation_failed"]
+}

@@ -1,0 +1,35 @@
+{
+  "version": "context-baselines-v2",
+  "offline_gate": {
+    "suite": "context-eval-v2",
+    "minimum_cases": 48,
+    "minimum_assertions": 240,
+    "path": "synthetic SQLite repository -> real assembler -> capture provider",
+    "pass_condition": "No normal failures; every required mutation produces behavioral assertion failures",
+    "required_mutations": [
+      "drop_history", "inject_foreign_source", "upgrade_external_trust",
+      "drop_selected_attachment", "ignore_context_limit", "leave_compaction_running"
+    ],
+    "not_measured": ["real-provider answer quality", "real-provider memory quality", "comparative policy quality"]
+  },
+  "baselines": [
+    {
+      "id": "lexical-v1",
+      "description": "Pre-v2 production context assembler; comparison descriptor, not executed by the offline gate"
+    },
+    {
+      "id": "recent-turn-truncation",
+      "description": "Keep only the newest complete turns; comparison descriptor, not executed by the offline gate"
+    },
+    {
+      "id": "full-history",
+      "description": "Full history where the provider window permits; comparison descriptor, not executed by the offline gate"
+    }
+  ],
+  "selected_policy": {
+    "id": "context-default-v1",
+    "target_ratio": 0.55,
+    "physical_order": "recent_history_before_retrieval",
+    "reason": "Frozen implementation candidate; release requires the deterministic and provider acceptance gates."
+  }
+}

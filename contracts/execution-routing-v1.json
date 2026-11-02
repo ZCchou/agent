@@ -1,0 +1,58 @@
+{
+  "contract_version": "execution-routing-v1",
+  "policy_version": "execution-routing-policy-v1",
+  "ipc_version": 9,
+  "settings_schema_version": 11,
+  "core_schema_version": 13,
+  "build_id": "schema13-execution-routing-v1",
+  "selection_modes": ["fixed", "automatic"],
+  "routing_presets": ["quality", "balanced", "economy", "local_first"],
+  "plan_statuses": [
+    "resolving", "waiting_permission", "waiting_budget", "planned",
+    "executing", "synthesizing", "completed", "failed", "cancelled",
+    "interrupted", "stale"
+  ],
+  "step_kinds": [
+    "intent_analysis", "vision_analysis", "web_research",
+    "reasoning_analysis", "final_response"
+  ],
+  "step_statuses": [
+    "queued", "running", "completed", "failed", "cancelled",
+    "interrupted", "unknown_outcome"
+  ],
+  "events": [
+    "run.planning_started", "run.plan_ready", "run.waiting_permission",
+    "run.waiting_budget", "run.step_started", "run.step_completed",
+    "run.step_failed", "run.synthesis_started"
+  ],
+  "reason_codes": [
+    "fixed_selection", "coordinator_reused", "automatic_single_model",
+    "native_search_specialist", "intent_analysis",
+    "routing_intent_not_needed", "deterministic_conservative_fallback",
+    "execution_plan_resolving"
+  ],
+  "errors": [
+    "no_compatible_execution_plan", "coordinator_model_unavailable",
+    "capability_combination_unsupported", "routing_permission_required",
+    "routing_budget_confirmation_required", "routing_budget_exceeded",
+    "routing_price_unknown", "execution_plan_stale", "execution_step_failed",
+    "execution_step_unknown_outcome", "execution_artifact_budget_exceeded",
+    "routing_intent_invalid", "model_capability_unverified",
+    "automatic_routing_not_available"
+  ],
+  "defaults": {
+    "new_conversation_mode": "automatic",
+    "routing_preset": "balanced",
+    "max_model_calls_per_message": 3,
+    "max_specialist_steps": 2,
+    "max_extra_online_cost_usd": "0.20",
+    "allow_unknown_price_automatic": false
+  },
+  "hard_limits": {
+    "max_model_calls_per_message": 6,
+    "max_specialist_steps": 2,
+    "max_extra_online_cost_usd": "5.00",
+    "max_artifact_bytes": 65536,
+    "max_plan_artifact_bytes": 131072
+  }
+}

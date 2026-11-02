@@ -1,0 +1,19 @@
+{
+  "policy_version": "web-search-policy-v1",
+  "routes": ["none", "native", "host_tool", "host_presearch"],
+  "operation_statuses": [
+    "prepared", "dispatched", "searching", "reading_sources", "completed",
+    "failed", "cancelled", "interrupted", "unknown_outcome"
+  ],
+  "events": [
+    "run.web_search_started", "run.web_search_completed", "run.web_search_failed"
+  ],
+  "errors": [
+    "web_search_not_enabled", "project_web_access_denied",
+    "native_web_search_unsupported", "search_backend_not_configured",
+    "search_authentication_failed", "search_rate_limited", "search_quota_exhausted",
+    "search_timeout", "search_budget_exceeded", "search_unknown_outcome",
+    "search_result_invalid", "web_url_blocked", "web_content_too_large",
+    "web_citation_invalid"
+  ]
+}

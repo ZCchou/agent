@@ -1,0 +1,123 @@
+# =========================================================
+# OS / IDE
+# =========================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/
+.idea/
+
+
+# =========================================================
+# Node / React / Vite
+# =========================================================
+
+node_modules/
+dist/
+.vite/
+test-results/
+playwright-report/
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# =========================================================
+# Rust / Tauri
+# =========================================================
+
+target/
+
+apps/agent-desktop/src-tauri/target/
+
+# Generated Python sidecar binaries.
+# They should be rebuilt through tools/build-python-sidecar.bat.
+apps/agent-desktop/src-tauri/binaries/*.exe
+
+
+# =========================================================
+# Python
+# =========================================================
+
+__pycache__/
+*.py[cod]
+*.pyo
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+venv/
+env/
+
+*.egg-info/
+
+build/
+dist/
+
+# PyInstaller temporary/spec output
+*.spec
+!services/agent-core/agent-core.spec
+
+
+# =========================================================
+# agent generated files
+# =========================================================
+
+revision_results/
+logs/
+.artifacts/
+.superpowers/
+开发设计文档（不提交git）/
+*.log
+*.jsonl
+
+# Local development database accidentally created at the repository root.
+/agent.db
+/agent.db-shm
+/agent.db-wal
+
+
+# =========================================================
+# Environment / Secrets
+# =========================================================
+
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+
+secrets/
+credentials/
+
+
+# =========================================================
+# Temporary files
+# =========================================================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+~$*
+
+# Local product/design documents (explicitly excluded from source control)
+/开发设计文档（不提交git）/
+# Local isolated worktrees
+.worktrees/
+
+# Local runtime state and credentials
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pfx
+*.p12

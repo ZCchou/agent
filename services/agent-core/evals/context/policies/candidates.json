@@ -1,0 +1,26 @@
+{
+  "version": "context-eval-policy-matrix-v1",
+  "target_ratios": [
+    0.25,
+    0.4,
+    0.55,
+    0.7
+  ],
+  "physical_orders": [
+    "retrieval_before_recent_history",
+    "recent_history_before_retrieval"
+  ],
+  "selection": {
+    "reject_on": [
+      "scope_leak",
+      "hard_budget_exceeded",
+      "critical_fact_missing"
+    ],
+    "minimum_non_critical_recall": 0.95,
+    "tie_breakers": [
+      "lowest_input_target",
+      "highest_common_prefix_ratio",
+      "lowest_average_input_tokens"
+    ]
+  }
+}

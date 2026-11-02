@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent:reliability-repair:v1",
+  "title": "agent reliability contracts",
+  "version": { "product": "0.14.2", "ipc": 16, "schema": 23, "build_id": "schema23-skills-v1" },
+  "policy": {
+    "compaction": { "output_ceiling": 8192, "max_provider_calls": 3, "deadline_seconds": 120, "first_output_seconds": 60, "chunk_seconds": 30, "safety_margin_min_tokens": 128, "safety_margin_fraction": 0.05 },
+    "search": { "max_files": 10000, "max_entries": 20000, "max_depth": 128, "max_read_bytes": 67108864, "max_file_bytes": 1048576, "max_duration_ms": 2000, "max_parallel": 2, "max_queued": 8, "snapshot_ttl_seconds": 60, "max_snapshots": 32, "max_snapshot_bytes": 16777216 },
+    "journal_version": 1,
+    "snapshot_version": 2
+  },
+  "$defs": {
+    "CompactionTargetRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider_profile_id", "model_id"],
+      "properties": { "provider_profile_id": {"type": "string", "minLength": 1}, "model_id": {"type": "string", "minLength": 1} }
+    },
+    "CompactionTarget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider_profile_id", "model_id", "protocol_id", "context_window", "max_output_tokens"],
+      "properties": {
+        "provider_profile_id": {"type": "string"}, "model_id": {"type": "string"}, "protocol_id": {"type": "string"},
+        "context_window": {"type": ["integer", "null"]}, "max_output_tokens": {"type": ["integer", "null"]}
+      }
+    },
+    "CompactionClaim": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_id", "claim_token", "target"],
+      "properties": {
+        "attempt_id": {"type": "string", "minLength": 1}, "claim_token": {"type": "string", "minLength": 1},
+        "target": {"$ref": "#/$defs/CompactionTarget"}
+      },
+      "description": "Core-internal capability for CAS writes; never accepted from WebView or a provider."
+    },
+    "AttachmentReference": {
+      "type": "object", "additionalProperties": false, "required": ["attachment_id"],
+      "properties": {
+        "attachment_id": {"type": "string", "minLength": 1},
+        "source_start": {"type": "integer", "minimum": 0}, "source_end": {"type": "integer", "minimum": 1}
+      },
+      "description": "Offsets count Unicode code points in extracted text; end is exclusive and greater than start. Core resolves source within this conversation; client paths and hashes never grant authority."
+    },
+    "SearchPage": {
+      "type": "object", "required": ["matches", "inspected_files", "next_cursor", "complete", "truncated", "stop_reason"],
+      "properties": {
+        "matches": {"type": "array", "items": {"type": "string"}}, "inspected_files": {"type": "integer", "minimum": 0},
+        "next_cursor": {"type": ["string", "null"], "maxLength": 256},
+        "complete": {"type": "boolean"}, "truncated": {"type": "boolean"},
+        "stop_reason": {"enum": [null, "files", "entries", "depth", "bytes", "deadline", "cancelled", "authorization_changed"]}
+      },
+      "description": "complete describes the scan, independent of pagination. Cached pages never continue a truncated scan."
+    },
+    "FileMutation": {
+      "type": "object", "required": ["kind", "path"],
+      "properties": {
+        "kind": {"enum": ["create_text", "patch_text", "overwrite_text", "mkdir", "copy", "move", "delete"]},
+        "path": {"type": "string", "minLength": 1}, "source_path": {"type": ["string", "null"]},
+        "content": {"type": ["string", "null"]}, "old_text": {"type": ["string", "null"]}, "new_text": {"type": ["string", "null"]},
+        "replace_all": {"type": "boolean"}, "expected_hash": {"type": ["string", "null"]}, "expected_after_hash": {"type": ["string", "null"]}
+      },
+      "description": "Same mutation vocabulary as existing Host. Hashes in a plan are captured by Host, never authorized by client assertions."
+    },
+    "PlannedMutation": {
+      "type": "object", "required": ["operation_id", "mutation", "depends_on", "preconditions"],
+      "properties": {
+        "operation_id": {"type": "string", "minLength": 1}, "mutation": {"$ref": "#/$defs/FileMutation"},
+        "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "preconditions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object", "required": ["kind", "identity", "sha256"],
+            "properties": {
+              "kind": {"enum": ["missing", "directory", "file"]},
+              "identity": {"type": ["string", "null"], "pattern": "^[0-9a-f]{16}:[0-9a-f]{32}$"},
+              "sha256": {"type": ["string", "null"]}
+            }
+          },
+          "description": "Host-captured pre-state keyed by normalized relative path, including root '.'. Identity is volume:file hex text to preserve precision across JavaScript. These observations cannot be submitted as approval authority."
+        }
+      }
+    },
+    "ChangeSetPlan": {
+      "type": "object", "required": ["plan_id", "plan_hash", "policy_version", "root_generation", "steps", "effective_risk"],
+      "properties": {
+        "plan_id": {"type": "string", "minLength": 1}, "plan_hash": {"type": "string", "minLength": 1},
+        "policy_version": {"type": "integer", "minimum": 1}, "root_generation": {"type": "integer", "minimum": 0},
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/PlannedMutation"}},
+        "effective_risk": {"enum": ["routine", "medium", "high", "forbidden"]}
+      },
+      "description": "Immutable canonical Host plan, stable under permutation of equivalent input. Approvals bind the hash, policy, root generation and captured preconditions."
+    },
+    "ChangeSetApproval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["approve", "plan_id", "plan_hash", "approved_operation_ids"],
+      "properties": {
+        "approve": {"type": "boolean"}, "plan_id": {"type": "string", "minLength": 1}, "plan_hash": {"type": "string", "minLength": 1},
+        "approved_operation_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      },
+      "description": "Approval binds Host-issued plan and dependency-closed subset. Array indices cannot authorize operations."
+    },
+    "RecoveryOutcome": { "enum": ["completed", "rolled_back", "recovery_required", "rollback_conflicted"] },
+    "ChangeSetRecoveryFields": {
+      "type": "object",
+      "properties": {
+        "execution_id": {"type": ["string", "null"]},
+        "recovery_error_code": {"enum": [null, "rollback_incomplete", "recovery_scope_mismatch", "recovery_unverified", "recovery_storage_full", "recovery_damaged"]},
+        "recovery_affected_paths": {"type": "array", "items": {"type": "string"}}
+      },
+      "description": "Optional fields on ChangeSetView, including legacy records. A recovery request sends only change_set_id; Host derives current grant and filesystem authority. Affected paths are relative, errors contain no file body, and rollback_conflicted maps to rollback_incomplete."
+    }
+  }
+}

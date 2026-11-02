@@ -1,0 +1,23 @@
+{
+  "contract_id": "execution-routing-v2",
+  "version": 2,
+  "settings_schema_version": 12,
+  "core_schema_version": 14,
+  "ipc_version": 10,
+  "core_version": "0.8.0",
+  "build_id": "schema14-invocation-routing-v2",
+  "route_roles": ["primary", "vision", "native_search"],
+  "protocols": ["memory", "ollama", "openai_chat", "openai_responses", "anthropic_messages"],
+  "capability_keys": ["text", "vision", "function_tools", "native_web_search", "reasoning"],
+  "capability_statuses": ["declared", "verified", "unsupported", "temporary_error", "unknown"],
+  "errors": ["invocation_route_unavailable", "invocation_route_stale", "capability_signature_unknown", "capability_signature_unsupported", "native_search_protocol_unsupported", "native_search_temporarily_unavailable", "no_compatible_execution_plan", "execution_step_unknown_outcome"],
+  "events": ["run.planning_started", "run.plan_ready", "run.step_started", "run.step_completed", "run.step_failed", "run.synthesis_started"],
+  "official_routes": [
+    {"route_id":"deepseek.openai_chat","preset_id":"deepseek","role":"primary","protocol":"openai_chat","adapter_id":"openai_chat","capabilities":["text","function_tools","reasoning"]},
+    {"route_id":"deepseek.responses","preset_id":"deepseek","role":"vision","protocol":"openai_responses","adapter_id":"openai_responses","capabilities":["text","vision","reasoning"]},
+    {"route_id":"deepseek.anthropic_web","preset_id":"deepseek","role":"native_search","protocol":"anthropic_messages","adapter_id":"anthropic_messages_web_search","endpoint_base_url":"https://api.deepseek.com/anthropic","capabilities":["text","native_web_search"]},
+    {"route_id":"openai.responses","preset_id":"openai","role":"primary","protocol":"openai_responses","adapter_id":"openai_responses_web_search","capabilities":["text","vision","function_tools","native_web_search","reasoning"]},
+    {"route_id":"kimi.openai_chat","preset_id":"moonshot","role":"primary","protocol":"openai_chat","adapter_id":"kimi_builtin_web_search","capabilities":["text","vision","function_tools","native_web_search","reasoning"]},
+    {"route_id":"ollama.generate","preset_id":"ollama","role":"primary","protocol":"ollama","adapter_id":"ollama","capabilities":["text","vision","function_tools","reasoning"]}
+  ]
+}

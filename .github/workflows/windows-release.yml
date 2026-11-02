@@ -1,0 +1,136 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Immutable binary tag (for example v0.14.1-preview.1)"
+        required: true
+        type: string
+      update_channel:
+        description: "Updater distribution channel"
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - stable
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.14.0"
+          cache: npm
+          cache-dependency-path: apps/agent-desktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Python build environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: agent
+          python-version: "3.12"
+          auto-activate-base: false
+
+      - name: Install Node dependencies
+        working-directory: apps/agent-desktop
+        run: npm ci
+
+      - name: Ensure the configured Microsoft Edge channel is installed
+        shell: pwsh
+        working-directory: apps/agent-desktop
+        run: |
+          $edgePaths = @(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+          )
+          if (-not ($edgePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
+            npx.cmd playwright install msedge
+            if ($LASTEXITCODE -ne 0) { throw "Microsoft Edge installation failed." }
+          }
+
+      - name: Import optional Windows signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            Write-Host "No optional Authenticode certificate configured. Updater signing remains mandatory."
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "agent-release.pfx"
+          $certificate = $null
+          try {
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            if (-not $certificate.Thumbprint) { throw "The signing certificate could not be imported." }
+            "AGENT_WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+            "AGENT_WINDOWS_TIMESTAMP_URL=http://timestamp.digicert.com" >> $env:GITHUB_ENV
+          } catch {
+            if ($certificate -and $certificate.Thumbprint) {
+              $importedPath = "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
+              if (Test-Path -LiteralPath $importedPath) { Remove-Item -LiteralPath $importedPath -Force }
+            }
+            throw
+          } finally {
+            if (Test-Path -LiteralPath $certificatePath) { [IO.File]::Delete($certificatePath) }
+          }
+
+      - name: Check release helpers with offline fixtures
+        shell: pwsh
+        run: |
+          conda run --no-capture-output -n agent python -m unittest discover -s tools/tests -v
+          if ($LASTEXITCODE -ne 0) { throw "Release helper tests failed." }
+
+      - name: Build and verify Windows release
+        shell: pwsh
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          UPDATE_CHANNEL_INPUT: ${{ inputs.update_channel }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          $releaseTag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { $env:RELEASE_TAG_INPUT }
+          $channel = if ($env:GITHUB_REF_TYPE -eq "tag") {
+            if ($releaseTag -match '-preview\.[1-9]\d*$') { "preview" } else { "stable" }
+          } else { $env:UPDATE_CHANNEL_INPUT }
+          .\tools\release-windows.ps1 -SkipDependencyInstall -InstallerSmokeTest -ReleaseTag $releaseTag -UpdateChannel $channel
+
+      - name: Upload verified release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-windows-${{ github.ref_name }}
+          path: .artifacts/releases/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing certificate from runner
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AGENT_WINDOWS_CERTIFICATE_THUMBPRINT)) { exit 0 }
+          $certificatePath = "Cert:\CurrentUser\My\$env:AGENT_WINDOWS_CERTIFICATE_THUMBPRINT"
+          if (Test-Path -LiteralPath $certificatePath) { Remove-Item -LiteralPath $certificatePath -Force }

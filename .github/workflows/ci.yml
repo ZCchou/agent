@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-check:
+    name: core-check
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: services/agent-core
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Isolate test data and temporary files
+        run: |
+          $jobRoot = Join-Path $env:RUNNER_TEMP "agent-core-check"
+          foreach ($entry in @{ TEMP = "tmp"; TMP = "tmp"; AGENT_DATA_DIR = "data"; CARGO_TARGET_DIR = "target" }.GetEnumerator()) {
+            $path = Join-Path $jobRoot $entry.Value
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            "$($entry.Key)=$path" >> $env:GITHUB_ENV
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/agent-core/requirements-build.lock
+
+      - name: Install locked Core and development dependencies
+        run: |
+          python -m pip install -r requirements-build.lock
+          if ($LASTEXITCODE -ne 0) { throw "Locked Python dependency installation failed." }
+          python -m pip install --no-build-isolation --no-deps -e ".[dev]"
+          if ($LASTEXITCODE -ne 0) { throw "Core development installation failed." }
+
+      - name: Run offline Core tests
+        run: python -m pytest
+
+      - name: Verify context evaluation and negative mutations
+        run: python evals/context/run_context_eval.py --verify-mutations
+
+  frontend-check:
+    name: frontend-check
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: apps/agent-desktop
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Isolate test data and temporary files
+        run: |
+          $jobRoot = Join-Path $env:RUNNER_TEMP "agent-frontend-check"
+          foreach ($entry in @{ TEMP = "tmp"; TMP = "tmp"; AGENT_DATA_DIR = "data"; CARGO_TARGET_DIR = "target" }.GetEnumerator()) {
+            $path = Join-Path $jobRoot $entry.Value
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            "$($entry.Key)=$path" >> $env:GITHUB_ENV
+          }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.14.0"
+          cache: npm
+          cache-dependency-path: apps/agent-desktop/package-lock.json
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Ensure the configured Microsoft Edge channel is installed
+        run: |
+          $edgePaths = @(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+          )
+          if (-not ($edgePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
+            npx.cmd playwright install msedge
+            if ($LASTEXITCODE -ne 0) { throw "Microsoft Edge installation failed." }
+          }
+
+      - name: Run frontend unit tests, mock UI tests, and production build
+        run: npm run check
+
+  windows-host-check:
+    name: windows-host-check
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Isolate test data and build output
+        run: |
+          $jobRoot = Join-Path $env:RUNNER_TEMP "agent-windows-host-check"
+          foreach ($entry in @{ TEMP = "tmp"; TMP = "tmp"; AGENT_DATA_DIR = "data"; CARGO_TARGET_DIR = "target" }.GetEnumerator()) {
+            $path = Join-Path $jobRoot $entry.Value
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            "$($entry.Key)=$path" >> $env:GITHUB_ENV
+          }
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Python build environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: agent
+          python-version: "3.12"
+          auto-activate-base: false
+
+      - name: Build the real frozen Python Sidecar and run Core tests
+        run: .\tools\build-python-sidecar.bat
+
+      - name: Verify the frozen Sidecar compatibility handshake
+        run: .\tools\verify-python-sidecar.ps1
+
+      - name: Check Rust formatting
+        working-directory: apps/agent-desktop/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Run Windows Host tests
+        working-directory: apps/agent-desktop/src-tauri
+        run: cargo test --locked
+
+      - name: Run strict Clippy
+        working-directory: apps/agent-desktop/src-tauri
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings

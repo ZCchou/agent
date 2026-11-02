@@ -1,0 +1,48 @@
+{
+  "contract_id": "unified-invocation-v3.4",
+  "version": 4,
+  "settings_schema_version": 18,
+  "core_schema_version": 23,
+  "ipc_version": 16,
+  "core_version": "0.14.2",
+  "build_id": "schema23-skills-v1",
+  "tool_contract_version": "tool-contract-v2",
+  "capability_contract_version": "capability-v1",
+  "route_manifest_version": "route-manifest-v5",
+  "tool_transports": ["native_function_call", "structured_json", "none"],
+  "invocation_kinds": ["model", "host_search"],
+  "native_search_modes": ["off", "auto", "required"],
+  "source_provenance": ["structured", "opaque", "none", "unknown"],
+  "protocols": ["memory", "ollama", "openai_chat", "openai_responses", "anthropic_messages", "tavily_v1", "searxng_json"],
+  "capability_keys": ["text_generation", "vision_input", "reasoning", "function_calling", "web_search", "structured_web_evidence", "file_read", "file_write"],
+  "artifact_kinds": ["text.utf8", "image.normalized", "document.text", "document.page_image", "audio.transcript", "archive.manifest"],
+  "adapters": ["fake.deterministic", "ollama.chat", "openai.chat", "openai.responses", "kimi.chat.openai", "kimi.web.builtin", "kimi.web.formula", "kimi.openai_chat", "kimi.formula_search", "deepseek.chat.openai", "deepseek.openai_chat", "deepseek.responses", "deepseek.anthropic_web", "openai.responses.web", "host.search", "host.file", "anthropic.messages", "tavily.search", "searxng.search"],
+  "adapter_protocols": {
+    "fake.deterministic": "memory", "ollama.chat": "ollama", "openai.chat": "openai_chat",
+    "openai.responses": "openai_responses", "kimi.chat.openai": "openai_chat",
+    "kimi.web.builtin": "openai_chat", "kimi.web.formula": "openai_chat",
+    "kimi.openai_chat": "openai_chat", "kimi.formula_search": "openai_chat",
+    "deepseek.chat.openai": "openai_chat", "deepseek.openai_chat": "openai_chat", "deepseek.responses": "openai_responses",
+    "deepseek.anthropic_web": "anthropic_messages", "openai.responses.web": "openai_responses",
+    "host.search": "searxng_json", "host.file": "memory",
+    "anthropic.messages": "anthropic_messages",
+    "tavily.search": "tavily_v1", "searxng.search": "searxng_json"
+  },
+  "errors": [
+    "tool_transport_unavailable", "tool_contract_unverified", "tool_schema_mismatch",
+    "model_tool_contract_failed", "web_search_not_executed", "web_evidence_missing",
+    "context_snapshot_conflict", "native_search_continuation_unsupported",
+    "capability_combination_unsupported", "invocation_protocol_mismatch", "structured_search_route_unavailable",
+    "capability_unsupported", "route_not_configured", "credential_invalid", "provider_rate_limited",
+    "provider_unavailable", "provider_invalid_response", "capability_verification_failed", "evidence_missing"
+  ],
+  "events": [
+    "run.invocation_prepared", "run.invocation_dispatched", "run.invocation_retrying", "run.invocation_completed",
+    "run.invocation_failed", "run.web_search_completed", "run.web_evidence_evaluated",
+    "run.grounding_fallback_started", "run.grounding_fallback_completed",
+    "capability.started", "capability.text_delta", "capability.reasoning_delta",
+    "capability.tool_call", "capability.web_search_started", "capability.web_search_result",
+    "capability.source", "capability.file_read", "capability.file_write",
+    "capability.usage", "capability.completed", "capability.failed"
+  ]
+}

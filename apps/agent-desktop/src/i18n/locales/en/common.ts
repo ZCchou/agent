@@ -1,0 +1,410 @@
+const common = {
+  buttonAudit: {
+    actionFailed: "The action failed. Try again.",
+    saveFailed: "Could not save. Your changes have been kept. Retry.",
+    removeModelTitle: "Remove {{model}}?",
+    removeModelDescription: "{{count}} conversation(s) use this model and must choose another model after removal. Remove it anyway?",
+    projectCreatedContinue: "The project was created. Retry to finish the remaining step.",
+    oneModelRequired: "Keep at least one model enabled for this project.",
+    openConversation: "Open conversation",
+    refresh: "Refresh",
+    windowFailed: "Window action failed. Try again.",
+    skillRefreshFailed: "The skill was saved, but the list could not refresh. Use Refresh to reload.",
+    finishEditing: "Finish or cancel editing before removing this registration.",
+  },
+  skills: {
+"create":"Create skill","edit":"Edit skill","name":"Skill name","purpose":"When to use","instructions":"Instructions (Markdown)","save":"Save skill","cancel":"Cancel editing","editHelp":"Names use lowercase letters, digits and hyphens. Existing files are backed up before updates; external changes require reloading. The agent can also create and update skills through skills.save.",
+  "draftFull": "Not enough space to insert this skill. Shorten the draft first.",
+  "description": "Import local SKILL.md packages, then choose one in chat or let the model load a relevant skill.",
+  "refresh": "Refresh",
+  "import": "Import skill folder",
+  "help": "Choose a folder containing SKILL.md with YAML name and description. Files stay in their original folder; external edits are read on the next use. Importing does not run scripts. Remove registration keeps source files.",
+  "error": "Skill operation failed.",
+  "empty": "No skills imported yet.",
+  "enable": "Enable {{name}}",
+  "enabled": "Enabled",
+  "automatic": "Automatic or explicit use · ${{name}}",
+  "explicit": "Explicit selection only · ${{name}}",
+  "view": "View instructions",
+  "remove": "Remove registration",
+  "choose": "Choose a skill",
+  "loading": "Loading skills…",
+  "loadError": "Could not load skills. You can still send your message.",
+  "pickerEmpty": "No enabled skills. Import a folder in System features → Skills."
+},
+  navigation: {
+    newChat: "New Chat",
+    chats: "Chats",
+    resources: "Chats and projects",
+    chat: "Chat",
+    projects: "Projects",
+    models: "Models",
+    abilities: "Skills",
+    memory: "Global behavior instructions",
+    reminders: "Reminders",
+    approvals: "Approvals",
+    settings: "Settings",
+    diagnostics: "Diagnostics",
+    systemFeatures: "System features",
+  },
+  brand: { tagline: "Think. Plan. Do. Together." },
+  actions: { retry: "Retry", close: "Close", cancel: "Cancel", back: "Back", create: "Create", edit: "Edit", delete: "Delete", rename: "Rename", restore: "Restore", save: "Save", saving: "Saving…" },
+  window: { minimize: "Minimize", maximize: "Maximize or restore", close: "Close" },
+
+  topbar: {
+    model: {
+      auto: "Local / API Model",
+      demo: "Built-in Demo · Local",
+    },
+
+    profile: "Profile settings",
+  },
+  projects: {
+    new: "New Project", loading: "Loading projects…", error: "Projects could not be loaded.",
+    empty: { title: "No projects yet", description: "Create a project to keep related conversations together." },
+    drawer: { title: "New Project", name: "Project name", category: "Primary use", error: "The project could not be created.", chooseDirectory: "Choose a project work directory after creation (optional)" },
+    categories: { casual: "Everyday & light", research: "Study & research", work: "Office & execution", writing: "Content writing", coding: "Software development", gaming: "Games & interaction", other: "General" },
+    detail: {
+      back: "← All projects",
+      description: "Project work, behavior, and authorized computer access.",
+      works: "Work",
+      newWork: "New Work",
+      empty: "No work yet",
+      emptyDescription: "Start work here or derive it from a standard chat.",
+      noDirectory: "No directory authorized",
+      authorize: "Authorize directory",
+      purposeBehavior: "Default work style: {{purpose}}. It changes analysis, editing, and verification—not file or model permissions.",
+      read: "file reading",
+      readWrite: "file reading and writing",
+      none: "none",
+    },
+  },
+  chatGroups: {
+    new: "New chat group",
+    prompt: "Chat group name",
+    renamePrompt: "Rename chat group",
+    confirmDelete: "Delete this group? Its chats will become ungrouped.",
+    ungrouped: "Ungrouped",
+  },
+  conversation: {
+    newChat: "New chat",
+    newWork: "New work",
+    chatOnly: "Chat only",
+    projectWork: "Project work",
+  },
+  sidebar: {
+    resize: "Resize sidebar",
+    resizeHint: "Drag left or right to resize; double-click to reset",
+    newChatInGroup: "New chat in this group",
+    manageResource: "Manage conversation",
+    moreActions: "More actions",
+    conversationTitle: "Conversation title",
+    chooseChatGroup: "Chat group",
+    chooseProject: "Target project",
+    ungrouped: "Ungrouped",
+    move: "Move",
+    moveToGroup: "Move to chat group",
+    moveToProject: "Move to project",
+    copyToProject: "Copy to project",
+    openProjects: "Open projects",
+    openDirectory: "Open directory",
+    copyWorkWarning: "The complete history will be copied into the target project. The copy uses that project's environment and then develops independently.",
+    deleteConversationWarning: "This item will remain in the Trash section of Settings for 30 days.",
+    confirmDeleteConversation: "Move “{{title}}” to Trash?",
+    confirmDeleteProject: "Move “{{name}}”, {{workCount}} work items, and {{messageCount}} messages to Trash? Its grant will be suspended.",
+    confirmDeleteProjectAgain: "Confirm again: move project “{{name}}” to Trash?",
+    moveWorkWarning: "Moving changes this work to the target project's behavior, authorized directory, and project capabilities. Its chat history is preserved.",
+    confirmMoveWork: "Move this work from {{source}} to {{target}}?\n\nIt will use the target project's behavior, authorized directory, and project capabilities. Its chat history is preserved.",
+    errors: {
+      directoryNotAuthorized: "Authorize a work directory on the project page before opening it.",
+      openDirectoryFailed: "The directory could not be opened. It may have moved, been deleted, or lost authorization. Authorize it again and retry.",
+      renameFailed: "The name could not be saved. Your edit is kept; please retry.",
+      deleteFailed: "The item could not be deleted. Please retry.",
+      saveCollapse: "The sidebar state could not be saved.",
+      saveWidth: "The sidebar width could not be saved. Its previous width was restored.",
+      moveFailed: "The conversation could not be moved. Its previous position was restored.",
+      reorderFailed: "The order could not be saved. Its previous order was restored.",
+      copyFailed: "The work could not be copied.",
+      loadChats: "Chat resources failed to load. Click to retry.",
+      loadProjects: "Project resources failed to load. Click to retry.",
+    },
+  },
+  approvals: {
+    error: "Approvals could not be loaded.",
+    empty: "No approvals",
+    emptyDescription: "File writes that need confirmation will appear here.",
+    approve: "Approve",
+    reject: "Reject",
+    status: { pending: "Pending", approved: "Approved", rejected: "Rejected", expired: "Expired", cancelled_project_move: "Cancelled after project move", cancelled_project_deleted: "Cancelled after project deletion" },
+  },
+
+  core: {
+    online: "Agent Core Online",
+    offline: "Agent Core Offline",
+
+    operational:
+      "All systems operational",
+
+    openDiagnostics:
+      "Open diagnostics",
+    rebuildSidecar: "Sidecar is stale; rebuild required",
+  },
+
+  models: {
+    loading: "Loading model settings…", add: "Add provider", test: "Test and list models",
+    testing: "Testing…", services: "Model services", servicesDescription: "Connect and choose the models used by conversations and project work.",
+    serviceCount: "{{count}} services", currentDefault: "Default", endpoint: "Service address", credential: "Credential",
+    testToLoad: "Test connection to load models", modelsFound: "{{count}} models available",
+    defaultDescription: "Default coordinator for new conversations. Bound and fixed conversations are not silently changed.",
+    routingSyncPending: "Settings were saved and will be applied when Core reconnects.",
+    provider: "Model service", model: "Model", availableModels: "Available models", viewModels: "View models",
+    modelListDescription: "Models currently reported by this service.", setAsDefault: "Set as default", noModels: "No models were reported by this service.",
+    addDescription: "Connect a local Ollama service or an OpenAI-compatible API.", namePlaceholder: "For example: Local Ollama",
+    ollamaUrlHint: "Local HTTP addresses are supported.", onlineUrlHint: "Remote services must use HTTPS.",
+    apiKeyHint: "The key is stored by Windows and cannot be read by the interface.",
+    providerKinds: { fake: "Built-in local model", ollama: "Ollama · Local", openai_compatible: "OpenAI-compatible · Online" },
+    status: { idle: "Not tested", loading: "Connecting", ok: "Available", error: "Unavailable", disabled: "Setup incomplete" },
+    presets: { moonshotCn: "Moonshot Kimi (China)", custom: "Custom OpenAI-compatible" },
+    localService: "Local model service", onlineService: "Online model service", customService: "Custom compatible endpoint",
+    apiBaseUrlHint: "Enter the exact API base URL. A root address may be safely tested with /v1.",
+    presetUrlHint: "This official address is managed by the selected preset.", testAndContinue: "Test and continue",
+    manageModels: "Manage models", modelCounts: "{{discovered}} detected · {{enabled}} allowed",
+    searchModels: "Search models", onlyEnabled: "Allowed only", allowUse: "Allow use",
+    allowAutomatic: "Allow automatic calls", allowAutomaticHint: "Allow automatic mode to use this model for coordination, vision, web, or reasoning steps. Charges may apply.",
+    automaticModelCount: "{{count}} allowed for automatic calls",
+    followDefault: "Follow default: {{model}}",
+    disableAutomaticReferencedConfirm: "This model is referenced by {{count}} conversations. Existing requests continue, but future sends may require authorization or another model.",
+    probeTools: "Test file tools",
+    toolMode: { native: "Native tools", structured: "Structured compatibility", text_only: "Chat only", unknown: "File support unknown" },
+    catalogStatus: { available: "Available", unavailable: "No longer reported", unverified: "Unverified" },
+    catalogSource: { discovered: "Detected", manual: "Manually added" },
+    manualModel: "Manual model ID", manualModelPlaceholder: "Enter the exact model ID", addManual: "Add model",
+    projectModelScope: "Models available to this project", inheritGlobalModels: "Inherit globally allowed models",
+    restrictProjectModels: "Restrict this project", allowedInProject: "Allowed in this project",
+    delete: "Delete", enableProvider: "Enable service", disableProvider: "Disable service", removeManual: "Remove",
+    disableReferencedConfirm: "{{count}} conversation(s) are fixed to this model. They will not silently fall back and must choose another model before sending. Disable it anyway?",
+    disableProviderReferencedConfirm: "{{count}} conversation(s) are fixed to this provider. They will not silently switch providers and must choose another model before sending. Disable it anyway?",
+    deleteProviderReferencedConfirm: "{{count}} conversation(s) are fixed to this provider and must choose another model after deletion. Delete it anyway?",
+    keyStored: "API key stored securely by Windows",
+    noKey: "No API key is stored", name: "Name", type: "Provider type",
+    baseUrl: "Base URL", apiKey: "API key (cannot be read back)", save: "Save provider",
+    projectPolicy: "Model access", localOnly: "Local models only", allowOnline: "Allow online models",
+    projectKnowledge: "Project knowledge", noKnowledge: "No published project knowledge yet.",
+    modelId: "Model ID", defaultModel: "Global default model", chooseDefault: "Choose a default",
+    chooseCompatibleModel: "Choose a model available to this conversation",
+    contextKnown: "Context: {{count}} tokens", contextUnknown: "Context window unknown · using 8,192",
+    contextLength: "Context window", maxOutputTokens: "Maximum output tokens",
+    inputPrice: "Input price / 1M tokens (USD)", outputPrice: "Output price / 1M tokens (USD)",
+    qualityScore: "Routing quality score (0–100)", routingPriority: "Routing preference (-10–10)",
+    apiProtocol: "API protocol", apiProtocolHint: "Choose the protocol documented by the service. agent will not probe every protocol automatically.",
+    contextLimitHint: "Leave blank to use the conservative fallback. Use values published by the model provider.",
+    advancedParameters: "Advanced parameters",
+    nativeSearch: { declared: "Native search available", verified: "Native search verified", unsupported: "Current protocol unsupported", temporary_error: "Native search temporarily unavailable", unknown: "Native search needs confirmation", not_applicable: "No native search protocol" },
+    sourceProvenance: { structured: "Sources: verifiable", opaque: "Sources: opaque", none: "Sources: none", unknown: "Sources: unconfirmed" },
+    sourceProvenanceHint: "Whether this native-search route returns structured sources with valid URLs. Current or explicitly searched information only uses verifiable-source routes.",
+    vision: { declared: "Images: preset support", verified: "Images: verified", unsupported: "Images: unsupported", temporary_error: "Images: temporary failure", unknown: "Images: confirmation needed" },
+    resetVision: "Reset image capability",
+    resetRouteHealth: "Reset runtime health",
+    routeHealth: {
+      ready: "Runtime: ready",
+      degraded: "Runtime: recently unstable",
+      cooling_down: "Runtime: cooling down (about {{seconds}}s)",
+      configuration_blocked: "Runtime: configuration blocked",
+    },
+    probeNativeSearch: "Diagnose native search",
+    probeNativeSearchCostHint: "Sends one real search diagnostic and may incur provider charges",
+    nativeSearchCount: "Native search available for {{count}}",
+    externalSearchConfigured: "External search configured",
+    externalSearchNotConfigured: "External search not configured",
+    enableNativeSearchTitle: "Allow agent to use web search",
+    enableNativeSearchDescription: "Only a minimized query is sent when needed. Web pages remain untrusted external data. This confirmation is shown once.",
+    enableNativeSearch: "Acknowledge and allow",
+    configureExternalSearch: "Configure external search",
+    routing: { title: "Automatic model selection", description: "New conversations keep one coordinator model and use at most two read-only specialists when required.", preset: "Routing preset", balanced: "Balanced", quality: "Quality first", economy: "Economy", localFirst: "Local first", callBudget: "Calls per message", specialistBudget: "Automatic specialist limit", extraCost: "Extra online budget (USD)", allowUnknownPrice: "Automatically use online models with unknown pricing" },
+    contextSource: { discovered: "Detected", manual: "Manual", fallback: "Conservative fallback" },
+    confirm: {
+      disableAutomaticTitle: "Disable automatic calls for {{model}}?",
+      disableModelTitle: "Disable {{model}}?", disableProviderTitle: "Disable {{provider}}?",
+      deleteProviderTitle: "Delete {{provider}}?", deleteProviderDescription: "This model service and its catalog configuration will be removed from agent.",
+      disable: "Disable",
+    },
+    pin: "Pin", archive: "Archive", knowledgeTitle: "Knowledge title", knowledgeContent: "Knowledge content",
+  },
+  pages: {
+    chat: {
+      title: "Chat",
+      description:
+        "Talk with agent.",
+    },
+
+    projects: {
+      title: "Projects",
+      description:
+        "Organize conversations, context, files, and long-term preferences.",
+    },
+
+    models: {
+      title: "Models",
+      description:
+        "Choose local models, API providers, and model defaults.",
+    },
+
+    abilities: {
+      title: "Skills",
+      description:
+        "Manage local skills and use them in chat.",
+    },
+
+    memory: {
+      title: "Global behavior instructions",
+      description:
+        "Set instructions shared across conversations. Automatic long-term memory is not available yet.",
+      globalInstructions: {
+        title: "Global behavior instructions",
+        description: "Control response style, context handling, and collaboration across every conversation.",
+        scope: "Applies to: all conversations",
+        enabledLabel: "Enable global behavior instructions",
+        enabled: "Enabled",
+        disabled: "Disabled",
+        placeholder: "For example: lead with the conclusion; proactively judge when current information needs web research.",
+        characters: "Characters: {{count}} / {{max}}",
+        revision: "Revision: {{revision}}",
+        boundary: "This only affects response style and collaboration. It cannot grant file, web, or tool access or bypass approval and safety rules.",
+        reset: "Reset to default",
+        resetConfirm: "Restore agent's default behavior instructions? Unsaved edits will be lost.",
+        errors: { load: "Could not load global behavior instructions.", save: "Save failed; the previous settings remain active.", reset: "Reset failed; the previous settings remain active." },
+      },
+    },
+
+    reminders: {
+      title: "Reminders",
+      description:
+        "Reminders are planned and are not available yet.",
+    },
+
+    approvals: {
+      title: "Approvals",
+      description:
+        "Review actions that need your permission.",
+    },
+
+    settings: {
+      title: "Settings",
+      description:
+        "Control your persistent preferences.",
+    },
+
+    diagnostics: {
+      title: "Diagnostics",
+      description:
+        "Inspect Agent Core and application health.",
+    },
+  },
+
+  settings: {
+    updater: {
+      retryDraft: "Retry saved draft",
+      "title": "Software update",
+      "current": "Current version: {{version}}",
+      "channel": "Update channel",
+      "preview": "Preview",
+      "stable": "Stable",
+      "auto": "Check automatically on startup",
+      "progress": "Download progress",
+      "bytes": "{{count}} bytes",
+      "check": "Check for updates",
+      "download": "Download update",
+      "install": "Install and restart",
+      "retry": "Retry",
+      "returnChat": "Return to chat",
+      "installHint": "Installation waits until all running work is finished. Your unsent draft and attachments are restored after restart.",
+      "found": "Update {{version}} is available.",
+      "open": "Open updates",
+      "restore": "Restore saved draft",
+      "restoreConflict": "A saved update draft is available. Your current draft has been kept.",
+      "restoreError": "The saved update draft could not be loaded or acknowledged. It remains saved for the next startup.",
+      "missing": "Some saved attachments are unavailable. Review your restored draft before sending.",
+      "states": {
+        "idle": "Check for a new version.",
+        "checking": "Checking for updates…",
+        "no_update": "You are up to date.",
+        "available": "Version {{version}} is available.",
+        "downloading": "Downloading update…",
+        "ready": "The verified update is ready to install.",
+        "installing": "Installing update…",
+        "error": "The update could not be completed.",
+        "channel_unavailable": "No release is published for this channel yet."
+      },
+      "errors": {
+        "app_update_busy": "Wait for running work to finish, then install again.",
+        "network": "Network request failed. Check your connection and retry.",
+        "signature_invalid": "The update signature is invalid. Download again after checking for a new release.",
+        "feed_invalid": "The update feed is invalid. Try checking again later.",
+        "not_ready": "Download and verify the update before installing.",
+        "stale": "This update is no longer current. Check for updates again.",
+        "core_unavailable": "The Core is unavailable. Restore the Core connection and retry.",
+        "draft_failed": "Your draft could not be saved. It has been kept; retry when attachments finish processing.",
+        "install_failed": "Installation failed. Your draft and verified download have been kept. Retry installation.",
+        "unknown": "The update failed. Please retry."
+      }
+    },
+    moreSettings: "More settings",
+    webSearch: {
+      title: "Web & Search", description: "Manage search services, privacy, defaults, and connection status.", open: "Open",
+      master: "Global web-search switch", privacy: "When enabled, search queries are sent to the selected service. Full conversations, attachments, and project files are not sent automatically.",
+      enabled: "Enabled", disabled: "Disabled", addBackend: "Add search service", backendName: "Service name", backendType: "Service type",
+      baseUrl: "API Base URL", apiKey: "API key (stored only in Windows Credential Manager)", default: "Default search service", test: "Test connection",
+      healthAvailable: "Connection healthy", healthUnavailable: "Connection failed", healthUntested: "Not tested yet",
+      enableBackend: "Enable service", disableBackend: "Disable service",
+      safeSearch: "Safe search", language: "Default language (for example en or auto)", region: "Default region (for example US or auto)",
+      makeDefault: "Make default", empty: "No external search service is configured.", projectAccess: "Project web access", projectOff: "Web access disabled", projectOn: "Allow web search",
+      projectAccessHint: "Allows work in this project to search public pages. Project files, attachments, and the full conversation are not sent automatically; each work still chooses its own web mode.",
+      errors: { load: "Could not load web-search settings.", save: "Could not save web-search settings.", test: "Search service connection test failed." },
+    },
+    remoteImages: {
+      title: "Remote images", description: "Control whether Agent replies may load images from external websites.",
+      label: "Allow loading", enabled: "Allowed", disabled: "Ask first",
+      hint: "When enabled, HTTPS images in every conversation load automatically. External sites may learn your IP address and access time.",
+      error: "The remote image setting could not be saved. The previous setting is still active.",
+    },
+    trash: {
+      title: "Trash", description: "Projects, chats, and work are retained for 30 days.",
+      open: "Open Trash",
+      contents: "Deleted items",
+      itemCount: "{{count}} items",
+      loading: "Loading Trash…",
+      empty: "Trash is empty", emptyAction: "Empty Trash", permanent: "Delete permanently",
+      emptyDescription: "Deleted chats, work, and projects will appear here.",
+      confirmEmpty: "Permanently delete everything in Trash? This cannot be undone.",
+      confirmPermanent: "Permanently delete “{{title}}”? This cannot be undone.",
+      restoreFailed: "Could not restore. Project work requires its parent project to be restored first.",
+      error: "Trash could not be loaded or changed.", expires: "Permanently deleted after {{date}}",
+      project: "Project · {{workCount}} work items · {{messageCount}} messages",
+      conversation: "{{kind}} · {{messageCount}} messages",
+    },
+    language: {
+      title: "Interface Language",
+
+      description:
+        "Choose the language used by the agent interface.",
+
+      label: "Language",
+
+      system:
+        "System Default",
+
+      english:
+        "English",
+
+      chinese:
+        "简体中文",
+
+      hint:
+        "Changing the interface language does not change how the Agent responds in a conversation.",
+      error:
+        "The language setting could not be saved. Your previous setting is still active.",
+    },
+  },
+};
+
+export default common;

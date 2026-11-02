@@ -1,0 +1,22 @@
+{
+  "contract_version": "multimodal-images-v1",
+  "ipc_version": 8,
+  "settings_schema_version": 10,
+  "core_schema_version": 12,
+  "build_id": "schema12-multimodal-images-v1",
+  "accepted_input_media_types": ["image/png", "image/jpeg", "image/webp", "image/gif"],
+  "model_media_types": ["image/png", "image/jpeg"],
+  "normalization_version": "image-normalization-v1",
+  "vision_sources": ["provider", "official_manifest", "user_confirmed", "runtime", "unknown"],
+  "vision_statuses": ["declared", "verified", "unsupported", "temporary_error", "unknown"],
+  "errors": [
+    "model_vision_unsupported",
+    "model_vision_confirmation_required",
+    "multimodal_protocol_unsupported",
+    "multimodal_route_unsupported",
+    "image_format_unsupported",
+    "image_payload_too_large",
+    "image_normalization_failed",
+    "image_integrity_failed"
+  ]
+}

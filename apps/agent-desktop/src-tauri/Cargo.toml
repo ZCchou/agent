@@ -1,0 +1,60 @@
+[package]
+name = "agent-desktop"
+version = "0.14.2"
+description = "Local-first desktop agent with auditable model, tool, vision, and web routing"
+authors = ["agent contributors"]
+license = "MIT"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "agent_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-shell = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+regex = "1"
+tauri-plugin-store = "2"
+sys-locale = "0.3.2"
+tokio = { version = "1", features = ["time", "net"] }
+rfd = "0.15"
+keyring = { version = "3", features = ["windows-native"] }
+url = "2"
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "deflate", "stream"] }
+bytes = "1"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+kamadak-exif = "0.6"
+minisign-verify = "0.2.5"
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_Security", "Win32_System_Threading"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
