@@ -39,7 +39,11 @@ python tools/rag_runtime_bundle.py .artifacts/rag-runtime-cpu/rag-runtime --dest
 
 发行脚本会暂存完整组件目录并放入 Tauri 资源及便携输出。组件清单记录全部文件哈希、worker 源码和设备依赖锁身份，过期缓存会阻止发行并要求重建。CPU 组件约占 3.5 GB，复制和首次校验需要时间及额外暂存空间。
 
-CUDA 通过 `build-rag-runtime.ps1 -Device cuda` 构建匹配的离线目录，发行时使用 `release-windows.ps1 -RagRuntimeDirectory <目录>`。当前采用整套发行组件替换方式，应用内辅助模型页负责 CPU/CUDA 选择与探测，独立 CUDA 运行组件的图形化安装入口仍待补充。
+完整发行包默认随安装器携带 CUDA 版运行组件，同一套组件提供 CPU 和 NVIDIA CUDA 两种执行方式。应用默认选 CPU，用户可在辅助模型页切换 CUDA。用户端安装、加载运行组件期间均使用随包文件。
+
+打包机预先准备 `build-rag-runtime.ps1 -Device cuda` 生成的目录，或在发行时通过 `-RagRuntimeDirectory <目录>` 指定已有目录。发行校验要求完整包使用 CUDA 组件，CPU-only 组件会被拒绝。CUDA 执行需要电脑已有兼容的 NVIDIA 显卡驱动。CPU 精简包通过 `release-windows.ps1 -RagRuntimeDevice cpu` 显式选择。
+
+构建机首次准备依赖时需要可用的依赖源或预装构建环境。已有组件目录会直接校验并打包。模型权重由用户从本地文件导入。
 
 ## 验证范围
 

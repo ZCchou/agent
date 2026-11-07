@@ -23,12 +23,16 @@ def verify_build_identity(manifest: dict, repository: Path) -> None:
         raise ValueError("Inference runtime source or dependency identity differs from this release. Rebuild the runtime.")
 
 
-def verify(root: Path) -> dict:
+def verify(root: Path, required_device: str | None = None) -> dict:
     root = Path(root).resolve()
     manifest = json.loads((root / "runtime.json").read_text(encoding="utf-8-sig"))
     if manifest.get("schema_version") != 1 or manifest.get("protocol_version") != 1 \
             or manifest.get("executable") != "rag-worker.exe" or manifest.get("device_bundle") not in {"cpu", "cuda"}:
         raise ValueError("Unsupported inference runtime manifest")
+    if required_device not in {None, "cpu", "cuda"}:
+        raise ValueError("Unsupported required device")
+    if required_device == "cuda" and manifest["device_bundle"] != "cuda":
+        raise ValueError("The full offline edition requires a runtime supporting both CPU and CUDA.")
     files = manifest.get("files")
     if not isinstance(files, dict) or "rag-worker.exe" not in files:
         raise ValueError("Inference executable is missing")
@@ -58,9 +62,9 @@ def verify(root: Path) -> dict:
     return manifest
 
 
-def stage(source: Path, target: Path, repository: Path | None = None) -> None:
+def stage(source: Path, target: Path, repository: Path | None = None, required_device: str | None = None) -> None:
     source, target = Path(source).resolve(), Path(target).absolute()
-    manifest = verify(source)
+    manifest = verify(source, required_device)
     if repository is not None:
         verify_build_identity(manifest, repository)
     if target.name != "rag-runtime" or target.is_symlink() or (hasattr(target, "is_junction") and target.is_junction()):
@@ -70,7 +74,7 @@ def stage(source: Path, target: Path, repository: Path | None = None) -> None:
     backup = target.with_name("rag-runtime-backup-" + uuid.uuid4().hex)
     try:
         shutil.copytree(source, temporary)
-        verify(temporary)
+        verify(temporary, required_device)
         if target.exists():
             os.replace(target, backup)
         try:
@@ -90,10 +94,11 @@ if __name__ == "__main__":
     parser.add_argument("source", type=Path)
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--repository", type=Path)
+    parser.add_argument("--required-device", choices=["cpu", "cuda"])
     args = parser.parse_args()
     if args.destination:
-        stage(args.source, args.destination, args.repository)
+        stage(args.source, args.destination, args.repository, args.required_device)
     else:
-        manifest = verify(args.source)
+        manifest = verify(args.source, args.required_device)
         if args.repository:
             verify_build_identity(manifest, args.repository)

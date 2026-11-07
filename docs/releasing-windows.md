@@ -16,6 +16,10 @@ Run `.\tools\release-windows.bat` from the root. This builds and verifies the Py
 
 Artifacts and manifests are written beneath `.artifacts/releases/v<version>/windows-x86_64/`. The canonical distributable installer is `agent-<version>-windows-x86_64-setup.exe`.
 
+The default installer includes the complete CUDA-capable inference runtime, which also supports CPU execution. Users can choose CPU or NVIDIA CUDA in the application, with CPU as the default. Runtime files travel inside the installer and portable release. Prepare the runtime on the build machine with `tools/build-rag-runtime.ps1 -Device cuda`, or supply an existing verified directory using `-RagRuntimeDirectory`. First-time dependency preparation belongs to the build machine. The target computer needs a compatible NVIDIA driver for CUDA execution.
+
+Use `-RagRuntimeDevice cpu` to build the smaller CPU-only edition. The full edition rejects a CPU-only runtime during staging and portable packaging.
+
 ## Official workflow and publication
 
 The release workflow is manually dispatched and uploads verified artifacts. It does not automatically create a release or tag. Keep a new release tag unused until publication.

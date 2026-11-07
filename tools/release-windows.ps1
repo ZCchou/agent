@@ -11,7 +11,9 @@ param(
     [ValidateSet("preview", "stable")]
     [string]$UpdateChannel = "preview",
     [string]$ReleaseNotesFile,
-    [string]$RagRuntimeDirectory
+    [string]$RagRuntimeDirectory,
+    [ValidateSet("cpu", "cuda")]
+    [string]$RagRuntimeDevice = "cuda"
 )
 
 Set-StrictMode -Version Latest
@@ -144,14 +146,14 @@ if ($SkipTests) { $sidecarArguments += "--skip-tests" }
 Invoke-Native "Build and verify the Python Core sidecar" $sidecarBuilder $sidecarArguments $root
 
 if (-not $RagRuntimeDirectory) {
-    $RagRuntimeDirectory = Join-Path $root ".artifacts/rag-runtime-cpu/rag-runtime"
+    $RagRuntimeDirectory = Join-Path $root ".artifacts/rag-runtime-$RagRuntimeDevice/rag-runtime"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $RagRuntimeDirectory "runtime.json"))) {
-    & (Join-Path $PSScriptRoot "build-rag-runtime.ps1") -Device cpu -OutputDirectory $RagRuntimeDirectory
-    if ($LASTEXITCODE -ne 0) { throw "CPU inference runtime build failed." }
+    & (Join-Path $PSScriptRoot "build-rag-runtime.ps1") -Device $RagRuntimeDevice -OutputDirectory $RagRuntimeDirectory
+    if ($LASTEXITCODE -ne 0) { throw "$RagRuntimeDevice inference runtime build failed." }
 }
 $stageRuntime = Join-Path $tauri "binaries/rag-runtime"
-Invoke-Native "Verify and stage local inference runtime" "conda" @("run", "--no-capture-output", "-n", "agent", "python", (Join-Path $PSScriptRoot "rag_runtime_bundle.py"), $RagRuntimeDirectory, "--destination", $stageRuntime, "--repository", $root) $root
+Invoke-Native "Verify and stage local inference runtime" "conda" @("run", "--no-capture-output", "-n", "agent", "python", (Join-Path $PSScriptRoot "rag_runtime_bundle.py"), $RagRuntimeDirectory, "--destination", $stageRuntime, "--repository", $root, "--required-device", $RagRuntimeDevice) $root
 
 if (-not $SkipTests) {
     Invoke-Native "Verify context retention and negative mutations" "conda" @("run", "--no-capture-output", "-n", "agent", "python", "evals/context/run_context_eval.py", "--verify-mutations") $core
@@ -239,7 +241,7 @@ if ($updaterSigned) {
 foreach ($file in $releaseFiles) {
     Copy-Item -LiteralPath $file.Source -Destination (Join-Path $OutputDirectory $file.Name) -Force
 }
-Invoke-Native "Include verified inference runtime in portable release" "conda" @("run", "--no-capture-output", "-n", "agent", "python", (Join-Path $PSScriptRoot "rag_runtime_bundle.py"), $stageRuntime, "--destination", (Join-Path $OutputDirectory "rag-runtime"), "--repository", $root) $root
+Invoke-Native "Include verified inference runtime in portable release" "conda" @("run", "--no-capture-output", "-n", "agent", "python", (Join-Path $PSScriptRoot "rag_runtime_bundle.py"), $stageRuntime, "--destination", (Join-Path $OutputDirectory "rag-runtime"), "--repository", $root, "--required-device", $RagRuntimeDevice) $root
 
 if ($InstallerSmokeTest) {
     & (Join-Path $PSScriptRoot "test-windows-installer.ps1") `

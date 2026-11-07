@@ -57,4 +57,6 @@ worker 设置 `HF_HUB_OFFLINE`、`TRANSFORMERS_OFFLINE`、`HF_DATASETS_OFFLINE` 
 
 CPU 使用 `requirements-rag-cpu.lock` 中的 PyTorch CPU wheel 和 ONNX Runtime。CUDA 使用对应 CUDA 12.8 PyTorch wheel 与 ONNX Runtime GPU。CUDA 构建仍需在目标硬件验证驱动、CUDA 和 cuDNN provider。交付时将整个 `rag-runtime` 目录放在 `agent-core.exe` 旁。目录含独立 worker、原生依赖和 `runtime.json`。应用只从该固定位置加载 worker，核对协议版本、全部文件清单和 SHA-256，拒绝新增、缺失或变化的文件。状态轮询复核完整文件 stat 身份并缓存已核验哈希，身份变化或启动/重启 worker 时执行完整 SHA-256 核验。该清单属于受信任安装包，随安装包一同分发。
 
+完整发行默认选择 CUDA 组件，同时提供 CPU 执行。运行组件随安装包整体交付，应用默认设备为 CPU。需要精简包时使用 `release-windows.ps1 -RagRuntimeDevice cpu`。完整包会校验 CUDA 能力标记，避免误装入 CPU-only 组件。电脑的 NVIDIA 驱动兼容性由 CUDA 加载测试确认。
+
 源码模式使用当前 Python 解释器。开发者需要为该解释器安装 CPU 或 CUDA lock。运行测试时的微型随机权重和 ONNX 合成图覆盖适配器数值和 IPC，生产模型质量与完整权重的容量验证需要实际官方模型目录。
