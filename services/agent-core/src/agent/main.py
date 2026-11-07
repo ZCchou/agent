@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -15,6 +17,54 @@ from agent.runtime import ChatRunService
 from agent.storage import CoreDataError, CoreRepository
 
 
+def _read_stdin_chunk(descriptor: int) -> bytes:
+    if os.name != "nt" or stat.S_ISREG(os.fstat(descriptor).st_mode):
+        return os.read(descriptor, 65536)
+    # A blocked Windows pipe read can stall native-library initialization.
+    # Poll available bytes so no descriptor or pipe lock is held while idle.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    peek = ctypes.WinDLL("kernel32", use_last_error=True).PeekNamedPipe
+    peek.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID,
+                     ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
+    peek.restype = wintypes.BOOL
+    handle = msvcrt.get_osfhandle(descriptor)
+    available = wintypes.DWORD()
+    while True:
+        if not peek(handle, None, 0, None, ctypes.byref(available), None):
+            error = ctypes.get_last_error()
+            if error in {38, 109}:
+                return b""
+            raise ctypes.WinError(error)
+        if available.value:
+            return os.read(descriptor, min(65536, available.value))
+        time.sleep(.01)
+
+
+async def _stdin_lines():
+    try:
+        descriptor = sys.stdin.fileno()
+    except (AttributeError, io.UnsupportedOperation):
+        for line in sys.stdin:
+            yield line
+        return
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.setmode(descriptor, os.O_BINARY)
+    pending = b""
+    while True:
+        chunk = await asyncio.to_thread(_read_stdin_chunk, descriptor)
+        if not chunk:
+            if pending:
+                yield pending.decode("utf-8")
+            return
+        pending += chunk
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            yield line.decode("utf-8")
+
+
 async def _run(repository: CoreRepository, logger: logging.Logger) -> None:
     output: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     request_tasks: set[asyncio.Task[None]] = set()
@@ -23,6 +73,8 @@ async def _run(repository: CoreRepository, logger: logging.Logger) -> None:
         await output.put({"v": PROTOCOL_VERSION, "event": event})
 
     service = ChatRunService(repository, emit_event, logger=logger)
+    from agent.rag.bootstrap import install_builtin_skill
+    install_builtin_skill(service.skills)
 
     async def writer() -> None:
         while True:
@@ -55,10 +107,7 @@ async def _run(repository: CoreRepository, logger: logging.Logger) -> None:
 
     writer_task = asyncio.create_task(writer())
     try:
-        while True:
-            line = await asyncio.to_thread(sys.stdin.readline)
-            if line == "":
-                break
+        async for line in _stdin_lines():
             line = line.strip()
             if not line:
                 continue

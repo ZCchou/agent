@@ -1,7 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { classifyImage, classifyLink, markdownUrlTransform, parseProjectDirectoryTarget, parseProjectFileTarget, remoteImageHost } from "./markdownPolicy";
+import { classifyImage, classifyLink, markdownUrlTransform, parseProjectDirectoryTarget, parseProjectFileTarget, parseRagEvidenceTarget, remoteImageHost } from "./markdownPolicy";
 
 describe("markdown resource policy", () => {
+  it("retains a persisted evidence UUID only as a link target", () => {
+    const target = "rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab";
+    expect(parseRagEvidenceTarget(target)).toBe("rag-12345678-1234-4abc-8def-1234567890ab");
+    expect(markdownUrlTransform(target, "href")).toBe(target);
+    expect(markdownUrlTransform(target, "src")).toBe("");
+    expect(classifyLink(target)).toBe("blocked");
+  });
+
+  it.each([
+    "rag-evidence:rag-test", "rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab?x=1",
+    "rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab/", "rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab#L1",
+    " rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab", "rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab\n",
+    "rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab\u0000", "rag-evidence:rag-12345678-1234-4abc-8def-1234567890a%62",
+    "\u0000rag-evidence:rag-12345678-1234-4abc-8def-1234567890ab",
+  ])("rejects malformed evidence target %j", (target) => {
+    expect(parseRagEvidenceTarget(target)).toBeNull();
+    expect(markdownUrlTransform(target, "href")).toBe("");
+  });
   it("allows only absolute web links without embedded credentials", () => {
     expect(classifyLink("https://example.com/docs?q=1")).toBe("external");
     expect(classifyLink("http://example.com")).toBe("external");

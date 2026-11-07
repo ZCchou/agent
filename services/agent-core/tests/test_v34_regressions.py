@@ -152,7 +152,7 @@ def test_automatic_search_prefers_authorized_structured_route_over_opaque_coordi
 def test_structured_tool_prompt_contains_complete_contract_schema() -> None:
     messages = structured_messages([{"role": "user", "content": "list files"}], {"fs.list"})
     instruction = messages[0]["content"]
-    assert "tool-contract-v2" in instruction
+    assert "tool-contract-v3" in instruction
     assert '"name":"fs.list"' in instruction
     assert '"required":["path"]' in instruction
     assert '"additionalProperties":false' in instruction

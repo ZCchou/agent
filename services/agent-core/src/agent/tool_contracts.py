@@ -202,9 +202,26 @@ for _name, _description, _extra, _required in (
         }, "required": ["name", *_required], "additionalProperties": False},
     }})
 
+for _name, _description, _properties, _required in (
+    ("rag.search", "Search authorized, confirmed document versions in the current project.", {
+        "query": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "library_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+        "version_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 8},
+    }, ["query"]),
+    ("rag.read", "Read original evidence returned for the current run, with current authorization checks.", {
+        "evidence_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "offset": {"type": "integer", "minimum": 0},
+        "length": {"type": "integer", "minimum": 1, "maximum": 8000},
+    }, ["evidence_id"]),
+):
+    TOOL_DEFINITIONS.append({"type": "function", "function": {"name": _name,
+        "description": _description, "parameters": {"type": "object", "properties": _properties,
+        "required": _required, "additionalProperties": False}}})
+
 TOOL_NAMES: Final[set[str]] = {item["function"]["name"] for item in TOOL_DEFINITIONS}
 
-TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v2"
+TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v3"
 
 
 class ToolContractRegistry:
@@ -280,7 +297,27 @@ def validate_tool_call(call: ToolCall) -> ToolCall:
         raise CoreDataError("unsupported_tool", "The requested tool is not supported.")
     if not isinstance(call.arguments, dict):
         raise CoreDataError("invalid_tool_call", "Tool arguments must be an object.")
-    if call.name in {"skills.load", "skills.read_resource", "skills.save"}:
+    if call.name == "rag.search":
+        _known_keys(call.arguments, {"query", "library_ids", "version_ids", "limit"})
+        query = call.arguments.get("query")
+        if not isinstance(query, str) or not query.strip() or len(query) > 4000:
+            raise CoreDataError("invalid_tool_call", "RAG query is invalid.")
+        for key, maximum in [("library_ids", 32), ("version_ids", 100)]:
+            values = call.arguments.get(key)
+            if values is not None and (not isinstance(values, list) or not 1 <= len(values) <= maximum
+                    or any(not isinstance(value, str) or not value or len(value) > 128 for value in values)):
+                raise CoreDataError("invalid_tool_call", "RAG filter is invalid.")
+        limit = call.arguments.get("limit", 8)
+        if type(limit) is not int or not 1 <= limit <= 8:
+            raise CoreDataError("invalid_tool_call", "RAG result limit is invalid.")
+    elif call.name == "rag.read":
+        _known_keys(call.arguments, {"evidence_id", "offset", "length"})
+        evidence_id = call.arguments.get("evidence_id")
+        offset, length = call.arguments.get("offset", 0), call.arguments.get("length", 8000)
+        if not isinstance(evidence_id, str) or not evidence_id or len(evidence_id) > 128 \
+                or type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 8000:
+            raise CoreDataError("invalid_tool_call", "RAG evidence range is invalid.")
+    elif call.name in {"skills.load", "skills.read_resource", "skills.save"}:
         keys = {"name"} if call.name == "skills.load" else {"name", "path", "offset", "length"}
         if call.name == "skills.save":
             keys = {"name", "description", "content", "expected_revision"}

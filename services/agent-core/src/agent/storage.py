@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -342,6 +342,22 @@ class CoreRepository:
                 try:
                     migrate_skills(connection)
                     connection.execute("UPDATE schema_info SET version = 23")
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.execute("PRAGMA foreign_keys = ON")
+                version = 23
+            if version == 23:
+                from agent.migrations.v24_rag import migrate as migrate_rag
+                connection.commit()
+                connection.execute("PRAGMA foreign_keys = OFF")
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_rag(connection)
+                    connection.execute("UPDATE schema_info SET version = 24")
                     self._validate_database(connection)
                     connection.commit()
                 except Exception:
@@ -2605,7 +2621,8 @@ class CoreRepository:
                  optional_nonnegative("cached_input_tokens"), estimated_cost, attempt_id),
             )
 
-    def complete_model_run(self, run_id: str, attempt_id: str, content: str) -> dict[str, Any]:
+    def complete_model_run(self, run_id: str, attempt_id: str, content: str,
+                           *, rag_guard: tuple[str, int] | None = None) -> dict[str, Any]:
         # The input-editor limit must not reject an already generated answer.
         content = content.strip()
         if not content:
@@ -2616,6 +2633,13 @@ class CoreRepository:
             raise CoreDataError("invalid_text_encoding", "Text contains an invalid Unicode character.") from error
         now = _utc_now()
         with self._connect() as connection:
+            if rag_guard is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute("""SELECT p.generation FROM rag_projects p
+                    JOIN conversations c ON c.project_id=p.project_id JOIN model_runs r ON r.conversation_id=c.id
+                    WHERE r.id=? AND p.project_id=?""", (run_id, rag_guard[0])).fetchone()
+                if row is None or row["generation"] != rag_guard[1]:
+                    raise CoreDataError("rag_generation_changed", "资料版本或项目绑定已改变，请重新检索。")
             run = connection.execute(
                 "SELECT conversation_id, status FROM model_runs WHERE id = ?", (run_id,)
             ).fetchone()

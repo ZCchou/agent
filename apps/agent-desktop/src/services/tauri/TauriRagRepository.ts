@@ -1,0 +1,36 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { RagRepository } from "../repositories/RagRepository";
+import type { RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
+
+function request<T = unknown>(action: string, params: object = {}): Promise<T> {
+  return invoke<T>("rag_request", { action, params });
+}
+function pathParams(selection: RagPathSelection) {
+  return { path: selection.paths[0], grant_id: selection.grant_id };
+}
+export class TauriRagRepository implements RagRepository {
+  selectPaths(kind: RagPathKind, modelFile = false) { return invoke<RagPathSelection | null>("rag_select_paths", { kind, modelFile }); }
+  revokeSelection(selection: RagPathSelection) { return invoke<void>("rag_revoke_paths", { grantId: selection.grant_id }); }
+  listModels() { return request<RagModelList>("model.list"); }
+  inspectModel(selection: RagPathSelection, profile: RagProfile) { return request<Record<string, unknown>>("model.inspect", { ...pathParams(selection), profile }); }
+  importModel(selection: RagPathSelection, profile: RagProfile, device: string) { return request("model.import", { ...pathParams(selection), profile, device }); }
+  setModelRoot(selection: RagPathSelection) { return request("model.root", pathParams(selection)); }
+  setModelDevice(modelId: string, device: string) { return request("model.device", { model_id: modelId, device }); }
+  removeModel(modelId: string) { return request("model.remove", { model_id: modelId }); }
+  probeModel(modelId: string) { return request("model.probe", { model_id: modelId }); }
+  listLibraries(projectId?: string) { return request<{ libraries: RagLibrary[] }>("library.list", projectId ? { project_id: projectId } : {}); }
+  createLibrary(draft: RagLibraryDraft) { return request("library.create", draft); }
+  updateLibrary(libraryId: string, draft: RagLibraryDraft) { return request("library.update", { library_id: libraryId, ...draft }); }
+  removeLibrary(libraryId: string) { return request("library.remove", { library_id: libraryId }); }
+  bindLibrary(libraryId: string, projectId: string, enabled: boolean) { return request("library.bind", { library_id: libraryId, project_id: projectId, enabled }); }
+  importDocuments(libraryId: string, selection: RagPathSelection) { return request("document.import", { library_id: libraryId, ...selection }); }
+  pasteDocument(libraryId: string, title: string, content: string) { return request("document.paste", { library_id: libraryId, title, content }); }
+  previewDocument(versionId: string, offset = 0, limit = 200) { return request<RagDocumentPreview>("document.preview", { version_id: versionId, offset, limit }); }
+  confirmDocument(confirmation: RagDocumentConfirmation) { return request("document.confirm", confirmation); }
+  withdrawDocument(versionId: string) { return request("document.withdraw", { version_id: versionId }); }
+  listJobs() { return request<{ jobs: RagJob[] }>("job.list"); }
+  cancelJob(jobId: string) { return request("job.cancel", { job_id: jobId }); }
+  buildIndex(libraryId: string, versionIds?: string[]) { return request("index.build", { library_id: libraryId, ...(versionIds ? { version_ids: versionIds } : {}) }); }
+  search(projectId: string, query: string, libraryIds?: string[]) { return request<RagSearchResult>("search", { project_id: projectId, query, ...(libraryIds ? { library_ids: libraryIds } : {}) }); }
+  previewEvidence(projectId: string, evidenceId: string, offset = 0, length = 8000) { return request<Record<string, unknown>>("evidence.preview", { project_id: projectId, evidence_id: evidenceId, offset, length }); }
+}

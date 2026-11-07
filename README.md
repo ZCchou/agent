@@ -24,6 +24,12 @@ npm run tauri dev
 
 Frontend-only preview: run `npm run dev` in `apps/agent-desktop`. Native capabilities require the desktop Host and Python sidecar.
 
+## Local airworthiness RAG
+
+Open **System features → RAG → Auxiliary models** to import complete local embedding and reranking model packages. Create a library, import and confirm document revisions, build an index, then bind its snapshot to a project. Project conversations retrieve evidence automatically, and the built-in `airworthiness-clause-qa` Skill can search and expand sources.
+
+See [RAG setup and operation](docs/local-rag.md) and [supported model package formats](docs/rag-models.md). Build and stage the inference runtime before starting the desktop Host with the new resource configuration.
+
 ## Checks
 
 ```powershell

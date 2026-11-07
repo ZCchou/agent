@@ -56,6 +56,8 @@ export const contextRepository = new TauriContextRepository();
 export const webSearchRepository = new TauriWebSearchRepository();
 export const memoryRepository = new TauriMemoryRepository();
 export const skillRepository = new TauriSkillRepository();
+import { TauriRagRepository } from "./tauri/TauriRagRepository";
+export const ragRepository = new TauriRagRepository();
 
 import { TauriAppUpdateRepository } from "./tauri/TauriAppUpdateRepository";
 export const appUpdateRepository = new TauriAppUpdateRepository();

@@ -1,4 +1,6 @@
+import rag from "./rag";
 const common = {
+  rag,
   buttonAudit: {
     actionFailed: "The action failed. Try again.",
     saveFailed: "Could not save. Your changes have been kept. Retry.",
@@ -33,6 +35,7 @@ const common = {
   "pickerEmpty": "No enabled skills. Import a folder in System features → Skills."
 },
   navigation: {
+    rag: "Local knowledge",
     newChat: "New Chat",
     chats: "Chats",
     resources: "Chats and projects",

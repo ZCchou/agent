@@ -49,6 +49,9 @@
     "externalBin": [
       "binaries/agent-core"
     ],
+    "resources": {
+      "binaries/rag-runtime/": "rag-runtime/"
+    },
     "windows": {
       "allowDowngrades": false,
       "nsis": {

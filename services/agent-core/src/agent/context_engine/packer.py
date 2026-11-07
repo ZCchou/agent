@@ -36,6 +36,7 @@ def pack_context(
     serialization_identity: dict[str, Any] | None = None,
     global_instruction: dict[str, Any] | None = None,
     include_global_instruction: bool = True,
+    rag_evidence: list[dict[str, Any]] | None = None,
 ) -> PackedContext:
     stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_message}]
     dynamic_messages: list[dict[str, Any]] = []
@@ -109,6 +110,29 @@ def pack_context(
         )
 
     used = stable_cost + current_cost
+    if rag_evidence:
+        from agent.rag.grounding import ANSWER_INSTRUCTION
+        stable_messages[0]["content"] += "\n" + ANSWER_INSTRUCTION
+        instruction_cost = estimate_tokens(ANSWER_INSTRUCTION)
+        stable_cost += instruction_cost
+        used += instruction_cost
+        evidence_limit = min(6000, int(input_target * 0.30), max(0, hard_limit - used))
+        evidence_used = 0
+        for source in rag_evidence:
+            rendered = json.dumps({"trust": "external_untrusted", "evidence": source}, ensure_ascii=False)
+            cost = estimate_tokens(rendered)
+            included = evidence_used + cost <= evidence_limit
+            items.append(ContextItem(
+                SourceRef("rag_chunk", source["id"], TrustKind.EXTERNAL_UNTRUSTED,
+                          source_hash=source["text_hash"], source_version=source["version_id"],
+                          derived_from_untrusted=True), ContextSection.RETRIEVAL, Representation.ORIGINAL,
+                cost, included, "rag_evidence" if included else None,
+                None if included else "rag_token_budget", {"title": source["title"], "locator": source["locator"]},
+            ))
+            if included:
+                dynamic_messages.append({"role": "user", "content": rendered})
+                evidence_used += cost
+                used += cost
     selected_turns: list[Any] = []
     excluded_turns: list[Any] = []
     for turn in reversed(history_turns):

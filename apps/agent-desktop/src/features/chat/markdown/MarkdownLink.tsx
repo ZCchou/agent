@@ -1,12 +1,15 @@
 import { ExternalLink, FileText, FolderOpen } from "lucide-react";
 import { type ComponentPropsWithoutRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { classifyLink, parseProjectDirectoryTarget, parseProjectFileTarget, type ProjectDirectoryTarget, type ProjectFileTarget } from "./markdownPolicy";
+import { classifyLink, parseProjectDirectoryTarget, parseProjectFileTarget, parseRagEvidenceTarget, type ProjectDirectoryTarget, type ProjectFileTarget } from "./markdownPolicy";
+import { RagEvidenceLink } from "./RagEvidenceLink";
 
 export function MarkdownLink({ href = "", children, onProjectFile, onProjectDirectory }: ComponentPropsWithoutRef<"a"> & {
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;
 }) {
+  const evidenceId = parseRagEvidenceTarget(href);
+  if (evidenceId) return <RagEvidenceLink evidenceId={evidenceId}>{children}</RagEvidenceLink>;
   const directoryTarget = parseProjectDirectoryTarget(href);
   if (directoryTarget && onProjectDirectory) {
     return <button type="button" className="markdown-link markdown-link--project" title={directoryTarget.path}

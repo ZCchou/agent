@@ -1,0 +1,24 @@
+.rag-page { display: flex; flex-direction: column; gap: 18px; max-width: 1180px; margin-inline: auto; }
+.rag-tabs, .rag-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.rag-tabs [aria-selected="true"] { background: var(--color-primary-soft); border-color: var(--color-primary); }
+.rag-stack { display: flex; flex-direction: column; gap: 14px; }
+.rag-card { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+.rag-card h3, .rag-card h4, .rag-card p { margin: 0; }
+.rag-page label { display: flex; flex-direction: column; gap: 6px; }
+.rag-page input:not([type="checkbox"]), .rag-page select, .rag-page textarea { width: 100%; padding: 9px 11px; color: inherit; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 8px; font: inherit; box-sizing: border-box; }
+.rag-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+.rag-field { max-width: 420px; }
+.rag-path { overflow-wrap: anywhere; font-size: 13px; }
+.rag-document, .rag-job { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding-block: 12px; border-top: 1px solid var(--color-border); }
+.rag-job progress { width: 160px; }
+.rag-page pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }
+.rag-evidence, .rag-passages article { border-top: 1px solid var(--color-border); padding-block: 14px; }
+.rag-modal-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 32px; background: #0007; }
+.rag-modal { width: min(900px, 100%); max-height: calc(100vh - 100px); overflow: auto; background: var(--color-surface); color: var(--color-text); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 12px 48px #0004; }
+.rag-passages { max-height: 38vh; overflow: auto; }
+.rag-page .rag-checkbox { flex-direction: row; align-items: start; }
+.rag-index-versions { display: flex; flex-direction: column; gap: 10px; }
+.rag-index-versions fieldset { border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.rag-page .rag-radio { flex-direction: row; align-items: center; }
+.rag-page .rag-radio input { width: auto; flex: 0 0 auto; }
+@media (max-width: 650px) { .rag-card { padding: 14px; } .rag-modal-backdrop { padding: 12px; } .rag-modal { padding: 16px; } }

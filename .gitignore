@@ -37,6 +37,8 @@ apps/agent-desktop/src-tauri/target/
 # Generated Python sidecar binaries.
 # They should be rebuilt through tools/build-python-sidecar.bat.
 apps/agent-desktop/src-tauri/binaries/*.exe
+apps/agent-desktop/src-tauri/binaries/rag-runtime/
+apps/agent-desktop/src-tauri/binaries/rag-runtime-staging-*/
 
 
 # =========================================================
@@ -52,6 +54,7 @@ __pycache__/
 .ruff_cache/
 
 .venv/
+.venv-rag/
 venv/
 env/
 

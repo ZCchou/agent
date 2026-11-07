@@ -137,6 +137,7 @@ def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed()
 
     async def scenario() -> None:
         service = object.__new__(ChatRunService)
+        service.rag_grounding = SimpleNamespace(runs={})
         service.execution_repository = ExecutionRepositoryStub()
         service.repository = SimpleNamespace(
             bind_attempt_invocation_spec=lambda *_args: None,

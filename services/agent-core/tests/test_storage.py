@@ -36,7 +36,7 @@ def test_schema_initialization_is_idempotent(tmp_path: Path) -> None:
     CoreRepository(path)
     CoreRepository(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 23
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 24
 
 
 def test_schema_v2_migrates_without_losing_data(tmp_path: Path) -> None:
@@ -64,7 +64,7 @@ def test_schema_v2_migrates_without_losing_data(tmp_path: Path) -> None:
     repository = CoreRepository(path)
     assert repository.get_conversation("c1")["chat_group_id"] == "g1"
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 23
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 24
         assert connection.execute("SELECT sort_order FROM conversations WHERE id = 'c1'").fetchone()[0] == 0
 
 
@@ -107,7 +107,7 @@ def test_v8_to_v9_preserves_records_and_adds_context_contract(tmp_path: Path) ->
         run_columns = {row[1] for row in connection.execute("PRAGMA table_info(model_runs)")}
         version = connection.execute("SELECT version FROM schema_info").fetchone()[0]
     assert before == after
-    assert version == 23
+    assert version == 24
     assert "sequence_no" in message_columns
     assert {"context_strategy", "context_generation", "automatic_compaction_used"} <= run_columns
 
@@ -175,7 +175,7 @@ def test_v14_to_v15_creates_artifacts_without_changing_business_rows(tmp_path: P
 
     assert run["id"]
     assert before == after
-    assert version == 23
+    assert version == 24
     assert artifact["kind"] == "text.utf8"
     assert artifact["processor_id"] == "builtin.utf8_text"
     assert artifact["storage_key"] == "message-attachments/legacy-text.bin"

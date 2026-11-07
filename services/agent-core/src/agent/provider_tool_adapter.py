@@ -32,6 +32,12 @@ def structured_messages(
         f"Allowed tool names: {', '.join(allowed) if allowed else 'none'}.\n"
         f"Complete allowed tool schemas (JSON): {schema}"
     )
+    if any("适航资料问答输出约定" in str(message.get("content", "")) for message in messages):
+        instruction += (
+            "\nFor airworthiness evidence answers, use the required transport envelope. "
+            "Serialize the claims JSON as the string value of the content field in "
+            "{\"type\":\"text\",\"content\":\"...\"}. Tool calls still use the tool_call envelope."
+        )
     return [{"role": "system", "content": instruction}, *messages]
 
 

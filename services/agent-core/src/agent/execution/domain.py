@@ -342,7 +342,7 @@ class InvocationSpec:
     artifact_ids: tuple[str, ...] = ()
     rejection_receipt_ids: tuple[str, ...] = ()
     tool_result_ids: tuple[str, ...] = ()
-    tool_contract_version: str = "tool-contract-v2"
+    tool_contract_version: str = "tool-contract-v3"
     allowed_tool_names: tuple[str, ...] = ()
     tool_transport: ToolTransport = "none"
     tool_schema_hash: str = ""

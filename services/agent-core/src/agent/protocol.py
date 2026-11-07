@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 16
+PROTOCOL_VERSION = 17
 CORE_VERSION = "0.14.2"
-BUILD_ID = "schema23-skills-v1"
+BUILD_ID = "schema24-rag-v1"
 _LOGGER = logging.getLogger("agent.core")
 
 
@@ -383,6 +383,7 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
 
 
 ASYNC_MESSAGE_TYPES = {
+    "rag.request",
     "app.update.prepare", "app.update.abort",
     "runtime.capabilities.configure", "runtime.capabilities.resolve",
     "provider.configure", "provider.clear", "provider.status", "provider.list_models",
@@ -430,7 +431,9 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
     if not isinstance(params, dict):
         return _error(request_id, message_type, "invalid_params", "Request params must be an object.")
     try:
-        if message_type in {"app.update.prepare", "app.update.abort"}:
+        if message_type == "rag.request":
+            result = await service.rag.handle(_required_string(params, "action"), params.get("params", {}))
+        elif message_type in {"app.update.prepare", "app.update.abort"}:
             from agent.execution.app_update import prepare, abort
             update_id = _required_string(params, "update_id")
             result = (prepare if message_type == "app.update.prepare" else abort)(service, update_id)

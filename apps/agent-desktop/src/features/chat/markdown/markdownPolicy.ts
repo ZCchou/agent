@@ -3,6 +3,11 @@ export type ImageClassification = "remote_https" | "blocked";
 export interface ProjectFileTarget { path: string; lineStart: number | null; lineEnd: number | null }
 export interface ProjectDirectoryTarget { path: string }
 
+export function parseRagEvidenceTarget(value: string): string | null {
+  const match = /^rag-evidence:(rag-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/.exec(value);
+  return match && match[0] === value ? match[1] : null;
+}
+
 function parseExternalUrl(value: string): URL | null {
   try {
     const parsed = new URL(value);
@@ -64,6 +69,9 @@ export function remoteImageHost(value: string): string | null {
 }
 
 export function markdownUrlTransform(url: string, key: string): string {
+  if (/^[\s\u0000-\u001f\u007f]*rag-evidence:/i.test(url)) {
+    return key === "href" && parseRagEvidenceTarget(url) ? url : "";
+  }
   if (key === "src") return classifyImage(url) === "remote_https" ? url : "";
   if (key === "href") return classifyLink(url) === "external" || parseProjectFileTarget(url) || parseProjectDirectoryTarget(url) ? url : "";
   return "";

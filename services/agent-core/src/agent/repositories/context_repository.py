@@ -445,6 +445,13 @@ class ContextRepository:
                 raise CoreDataError("context_source_unavailable", "The context source is unavailable.")
             if item["source_type"] == "attachment":
                 return self._attachment_source_preview(run_id, item)
+            if item["source_type"] == "rag_chunk" and item["project_id"] and item["included"]:
+                from agent.rag.repository import RagRepository
+                source = RagRepository(self.core, recover_jobs=False).preview_evidence(
+                    item["project_id"], item["source_id"], length=8000)
+                if source.get("run_id") != run_id or source["text_hash"] != item["source_hash"]:
+                    raise CoreDataError("rag_evidence_forbidden", "该证据不属于当前上下文。")
+                return {"item_id": item_id, "source_type": "rag_chunk", "source": source}
             if item["source_type"] in {"message", "current_message"}:
                 source = connection.execute(
                     """SELECT id, role, content, sequence_no, created_at FROM messages

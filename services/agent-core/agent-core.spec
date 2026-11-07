@@ -1,21 +1,26 @@
 # PyInstaller entry point for the Windows Core sidecar.
 # Keep the sidecar build deterministic and package the installed project
 # dependencies only through the normal import graph.
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from pathlib import Path
+import sys
 
+source_root = Path(SPECPATH) / "src"
+sys.path.insert(0, str(source_root))
 
 hiddenimports = collect_submodules("agent")
 
 a = Analysis(
     ["src/agent/main.py"],
-    pathex=["src"],
+    pathex=[str(source_root)],
     binaries=[],
-    datas=[],
+    datas=collect_data_files("agent", includes=["builtin_skills/**/*"])
+        + collect_data_files("sqlite_vec") + collect_data_files("pypdfium2_raw"),
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["torch", "transformers", "onnxruntime", "tokenizers", "safetensors", "sentencepiece"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

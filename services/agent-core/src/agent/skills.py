@@ -94,7 +94,11 @@ class SkillRegistry:
                     raise ValueError()
             except (yaml.YAMLError, AttributeError, ValueError, RecursionError) as error:
                 raise _fail("agents/openai.yaml has invalid implicit invocation policy.") from error
+        rag = metadata.get('rag', {})
+        if not isinstance(rag, dict) or type(rag.get('required', False)) is not bool:
+            raise _fail('Skill rag.required must be a boolean.')
         return {**entry, 'name': name, 'description': description.strip(), 'implicit': implicit,
+                'rag_required': rag.get('required', False),
                 'content': frontmatter[2].strip(), 'revision': sha256(text.encode('utf-8')).hexdigest(), 'error': None}
 
     def list(self) -> list[dict]:
@@ -141,6 +145,16 @@ class SkillRegistry:
     def catalog(self) -> list[dict]:
         return [{'name': v['name'], 'description': v['description']} for v in self.list()
                 if v['enabled'] and v['implicit'] and not v['error']]
+
+    def requires_rag(self, user_content: str) -> bool:
+        for name in self.references(user_content):
+            try:
+                item = self.load(name)
+            except CoreDataError:
+                continue
+            if item.get('rag_required', False):
+                return True
+        return False
 
     def load(self, name: str, *, explicit: bool = True) -> dict:
         with _LOCK:

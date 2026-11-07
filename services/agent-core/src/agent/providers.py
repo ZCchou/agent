@@ -94,6 +94,7 @@ class ProviderProfile:
     base_url: str
     api_key: str | None = None
     enabled: bool = True
+    local_strict: bool = False
     endpoint_mode: str = "exact"
     allowed_model_ids: tuple[str, ...] = ()
     automatic_model_ids: tuple[str, ...] = ()
@@ -446,7 +447,7 @@ class FakeModelProvider(ModelProvider):
 class OllamaProvider(ModelProvider):
     async def list_models(self) -> list[dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 response = await client.get(f"{self.profile.base_url.rstrip('/')}/api/tags")
             if response.is_error:
                 raise _map_http_error(response)
@@ -471,7 +472,7 @@ class OllamaProvider(ModelProvider):
     async def stream(self, model_id: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         try:
             timeout = httpx.Timeout(600, connect=15, read=None)
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 async with client.stream("POST", f"{self.profile.base_url.rstrip('/')}/api/chat",
                                          json={"model": model_id, "messages": messages, "stream": True}) as response:
                     if response.is_error:
@@ -507,7 +508,7 @@ class OllamaProvider(ModelProvider):
                 payload["format"] = "json"
             if tools:
                 payload["tools"] = _external_tool_definitions(options.allowed_tools if options else None)
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 async with client.stream(
                     "POST", f"{self.profile.base_url.rstrip('/')}/api/chat", json=payload,
                 ) as response:
@@ -581,7 +582,7 @@ class OpenAICompatibleProvider(ModelProvider):
         base = self.profile.base_url.rstrip("/")
         candidates = model_list_base_candidates(base, self.profile.endpoint_mode)
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 for index, candidate in enumerate(candidates):
                     response = await client.get(f"{candidate}/models", headers=self._headers())
                     if response.status_code == 404 and index + 1 < len(candidates):
@@ -627,7 +628,7 @@ class OpenAICompatibleProvider(ModelProvider):
     async def stream(self, model_id: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         try:
             timeout = httpx.Timeout(600, connect=15, read=None)
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 async with client.stream(
                     "POST", self._endpoint("chat/completions"),
                     headers=self._headers(), json={"model": model_id, "messages": messages, "stream": True},
@@ -823,7 +824,7 @@ class OpenAICompatibleProvider(ModelProvider):
                             "Use $web_search before answering."
                         ),
                     }, *payload["messages"]]
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 async with client.stream(
                     "POST", self._endpoint("chat/completions"), headers=self._headers(), json=payload,
                 ) as response:
@@ -965,7 +966,7 @@ class OpenAICompatibleProvider(ModelProvider):
         timeout = httpx.Timeout(600, connect=15, read=None)
         headers = self._headers()
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 tools_response = await client.get(
                     self._endpoint(f"formulas/{formula_uri}/tools"), headers=headers,
                 )
@@ -1210,7 +1211,7 @@ class OpenAICompatibleProvider(ModelProvider):
         }
         try:
             timeout = httpx.Timeout(600, connect=15, read=None)
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
                 async with client.stream(
                     "POST", self._endpoint("responses"), headers=self._headers(), json=payload,
                 ) as response:

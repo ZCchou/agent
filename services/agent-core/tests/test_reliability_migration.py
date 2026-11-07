@@ -69,7 +69,7 @@ def test_schema20_upgrade_preserves_rows_and_revokes_legacy_claims(tmp_path: Pat
             "SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_info'")]
         before = {table: connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables}
         preserved_tables = [table for table in tables if table != "context_compaction_attempts"]
-        contents = {table: [tuple(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid')]
+        contents = {table: sorted((tuple(row) for row in connection.execute(f'SELECT * FROM "{table}"')), key=repr)
                     for table in preserved_tables}
     # Keep an open connection so a committed new row remains in WAL. Reading
     # the immutable main file proves that the backup must include those pages.
@@ -80,15 +80,15 @@ def test_schema20_upgrade_preserves_rows_and_revokes_legacy_claims(tmp_path: Pat
     keeper.commit()
     with sqlite3.connect(f"file:{path.as_posix()}?immutable=1", uri=True) as main_only:
         assert main_only.execute("SELECT content FROM messages WHERE id=?", (run["user_message_id"],)).fetchone()[0] == "preserved"
-    contents["messages"] = [tuple(row) for row in keeper.execute('SELECT * FROM messages ORDER BY rowid')]
+    contents["messages"] = sorted((tuple(row) for row in keeper.execute('SELECT * FROM messages')), key=repr)
     CoreRepository(path)
     CoreRepository(path)
     keeper.close()
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 23
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 24
         assert {table: connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables} == before
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert {table: [tuple(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid')]
+        assert {table: sorted((tuple(row) for row in connection.execute(f'SELECT * FROM "{table}"')), key=repr)
                 for table in preserved_tables} == contents
         attempts = {row["id"]: dict(row) for row in connection.execute("SELECT * FROM context_compaction_attempts")}
     assert (attempts["valid"]["checkpoint_id"], attempts["valid"]["input_tokens"],
@@ -104,7 +104,7 @@ def test_schema20_upgrade_preserves_rows_and_revokes_legacy_claims(tmp_path: Pat
         assert attempt["budget_policy_json"] is None
         assert json.loads(attempt["target_json"]) == (
             {"provider_profile_id": "provider", "model_id": "model"} if identifier != "orphan" else {})
-    backups = list(tmp_path.glob("upgrade.db.pre-schema23-*.bak"))
+    backups = list(tmp_path.glob("upgrade.db.pre-schema24-*.bak"))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as connection:
         assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 20
@@ -118,5 +118,5 @@ def test_new_database_needs_no_upgrade_backup(tmp_path: Path):
     path = tmp_path / "new.db"
     repository = CoreRepository(path)
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 23
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 24
     assert list(tmp_path.glob("*.bak")) == []

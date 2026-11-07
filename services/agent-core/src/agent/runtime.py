@@ -72,6 +72,8 @@ from agent.web_search.domain import (
 )
 from agent.web_search.service import WebSearchService
 from agent.web_search.evidence import evaluate_web_evidence
+from agent.rag.service import RagService
+from agent.rag.grounding import RagGrounding, require_local_profile
 
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -87,7 +89,10 @@ class ChatRunService:
         self.repository = repository
         self.event_sink = event_sink
         self.skills = SkillRegistry(repository.database_path.parent / "skills.json")
-        self.context = ContextEngineService(repository, skill_context=self.skills.render)
+        self.rag = RagService(repository)
+        self.rag_grounding = RagGrounding(self.rag)
+        self.context = ContextEngineService(repository, skill_context=self.skills.render,
+                                            rag_context=self.rag_grounding.evidence)
         self.web_intent_resolver = WebIntentResolver()
         self.rule_intent_resolver = RuleIntentResolver(self.web_intent_resolver)
         self.profiles: dict[str, ProviderProfile] = {
@@ -627,6 +632,12 @@ class ChatRunService:
             position = conversation["messages"].index(edited_message)
             conversation = {**conversation, "messages": conversation["messages"][:position]}
         content = params.get("content")
+        rag_enabled = bool(conversation and conversation.get("project_id") and
+                           self.rag.project_state(conversation["project_id"]).get("enabled"))
+        rag_local_required = bool(conversation and self._rag_requires_local(conversation))
+        if rag_local_required:
+            params = {**params, "web_search_request_mode": "off", "web_search_global_enabled": False}
+            conversation = {**conversation, "model_access_policy": "local_only"}
         attachments = params.get("attachments", [])
         attachment_rejections = params.get("attachment_rejections", [])
         if not isinstance(content, str) or not isinstance(attachments, list) \
@@ -634,6 +645,8 @@ class ChatRunService:
             raise CoreDataError(
                 "invalid_params", "content, attachments and attachment rejections are invalid."
             )
+        if self.skills.requires_rag(content) and not rag_enabled:
+            raise CoreDataError("rag_library_required", "该技能需要先为当前项目绑定资料库。")
         if edited_message is not None:
             if params.get("attachment_references"):
                 raise CoreDataError("invalid_message_edit", "An edit retains its original attachments; historical references must be selected after sending.")
@@ -677,7 +690,7 @@ class ChatRunService:
         )
         pending_action = (
             PendingFollowUpAction.from_dict(pending_action_record)
-            if pending_action_record else None
+            if pending_action_record and not rag_enabled else None
         )
         pending_confirmation = resolve_pending_confirmation(
             user_text=content, action=pending_action,
@@ -730,6 +743,8 @@ class ChatRunService:
             ),
             resolved_web_intent=resolved_web_intent,
         )
+        if rag_local_required:
+            requirements = replace(requirements, web="off", web_evidence="optional", files="none", tools="available")
         if requirements.tools == "none":
             # Core skill authoring is available independently of imported packages.
             # "available" preserves text-only routes and never requires a tool model.
@@ -766,6 +781,8 @@ class ChatRunService:
                 requirements=replace(rule_resolution.requirements, reasoning="required"),
             )
         requested_requirements = requirements
+        if rag_local_required:
+            rule_resolution = replace(rule_resolution, requirements=requirements)
         degraded_capabilities: tuple[CapabilityAdvisory, ...] = ()
 
         def degrade(
@@ -813,6 +830,16 @@ class ChatRunService:
         candidates = self._execution_candidates(
             conversation, automatic_only=selection_mode == "automatic",
         )
+        if rag_local_required:
+            intent_analysis_needed = False
+            allowed_profile_ids = set()
+            for candidate_profile in self.profiles.values():
+                try:
+                    require_local_profile(candidate_profile)
+                except CoreDataError:
+                    continue
+                allowed_profile_ids.add(candidate_profile.id)
+            candidates = [candidate for candidate in candidates if candidate.provider_profile_id in allowed_profile_ids]
         global_default_key = (
             (
                 self.routing_preferences["global_default_provider_profile_id"],
@@ -853,6 +880,8 @@ class ChatRunService:
             coordinator_key = fixed_key
             if conversation:
                 self._enforce_project_policy(conversation, self._profile(decision.provider_profile_id))
+                if rag_local_required:
+                    require_local_profile(self._profile(decision.provider_profile_id))
         elif selection_mode == "automatic":
             fixed_key = None
             coordinator_key = (
@@ -1578,6 +1607,8 @@ class ChatRunService:
         profile = self._profile(self._required(requested, "provider_profile_id"))
         model_id = self._required(requested, "model_id")
         conversation = self.repository.get_run_conversation(run["id"])
+        if self._rag_requires_local(conversation):
+            profile = require_local_profile(profile)
         self._validate_planned_model(conversation, {
             "provider_profile_id": profile.id, "model_id": model_id,
             "protocol_id": profile.primary_protocol,
@@ -1631,6 +1662,8 @@ class ChatRunService:
                 self.repository.get_run_conversation(run["id"]), invocation_target,
             )
             current_profile = self._profile_for_step(self._profile(target.provider_profile_id), invocation_target)
+            if self._rag_requires_local(self.repository.get_run_conversation(run["id"])):
+                current_profile = require_local_profile(current_profile)
             capabilities = (current_profile.model_capabilities or {}).get(target.model_id, {})
             current_target = CompactionTarget(
                 current_profile.id, target.model_id, current_profile.primary_protocol,
@@ -1642,6 +1675,7 @@ class ChatRunService:
             })
         if current_target != target or current_profile != profile:
             raise CoreDataError("context_target_changed", "The compaction target changed before dispatch.")
+        self.rag_grounding.validate(run["id"])
 
     async def shutdown(self) -> None:
         tasks = list(self.run_tasks.values()) + list(self.compaction_tasks.values())
@@ -1652,6 +1686,7 @@ class ChatRunService:
         self.execution_repository.interrupt_active()
         self.repository.interrupt_active_runs()
         self.tool_loop.shutdown()
+        await self.rag.close()
 
     async def _execute(self, run_id: str) -> None:
         content = ""
@@ -1687,6 +1722,7 @@ class ChatRunService:
                 (message for message in current_conversation["messages"]
                  if message["id"] == run["user_message_id"]), None,
             )
+            await self.rag_grounding.prepare(run, current_conversation)
             if execution_plan is None and run.get("parent_run_id") \
                     and current_user and current_user.get("attachments"):
                 raise CoreDataError(
@@ -1780,6 +1816,8 @@ class ChatRunService:
             profile = self._profile(run["provider_profile_id"])
             if execution_step is not None:
                 profile = self._profile_for_step(profile, execution_step)
+            if self._rag_requires_local(self.repository.get_run_conversation(run_id)) or run_id in self.rag_grounding.runs:
+                profile = require_local_profile(profile)
             provider = create_provider(profile)
             assembled = await self._prepare_context(
                 run, profile, provider, round_no=0, invocation_target=execution_step,
@@ -1813,6 +1851,10 @@ class ChatRunService:
                 allowed_tools.extend(("web.search", "web.open"))
             if route_allows_tools and tool_mode != "text_only":
                 allowed_tools.extend(SKILL_TOOLS)
+            if self._rag_requires_local(conversation) or run_id in self.rag_grounding.runs:
+                allowed_tools = [name for name in allowed_tools if name in {"skills.load", "skills.read_resource"}]
+                if run_id in self.rag_grounding.runs and route_allows_tools and tool_mode != "text_only":
+                    allowed_tools.extend(("rag.search", "rag.read"))
             tools_enabled = bool(allowed_tools)
 
             automatic_attempt = 0
@@ -1922,7 +1964,7 @@ class ChatRunService:
                         input_artifact_ids=tuple(final_artifact_ids),
                         budget_attempt_ids=tuple(tool_budget_attempt_ids),
                         buffer_output=(
-                            execution_step is not None
+                            run_id in self.rag_grounding.runs or execution_step is not None
                             and execution_step.get("step_type") == "grounding_fallback"
                         ),
                     )
@@ -2022,11 +2064,18 @@ class ChatRunService:
                 notice = image_unread_notice(image_advisory.get("reason_code"))
                 content += notice
                 await self._emit(run_id, "run.chunk", {"delta": notice})
-            result = self.repository.complete_model_run(run_id, attempt_id, content)
+            if run_id in self.rag_grounding.runs:
+                content = self.rag_grounding.finalize(run_id, content)
+                evidence_state = self.rag_grounding.runs[run_id]
+                result = self.repository.complete_model_run(run_id, attempt_id, content,
+                    rag_guard=(evidence_state["project_id"], evidence_state["generation"]))
+                await self._emit(run_id, "run.chunk", {"delta": content})
+            else:
+                result = self.repository.complete_model_run(run_id, attempt_id, content)
             resolved_intent = (execution_plan or {}).get("resolved_intent", {})
             confirmed_pending_action = resolved_intent.get("pending_action_id")
             if not self.repository.list_web_operations(run_id) and not confirmed_pending_action \
-                    and not run.get("_response_recovered"):
+                    and not run.get("_response_recovered") and run_id not in self.rag_grounding.runs:
                 candidate = detect_web_search_offer(
                     assistant_text=result["assistant_message"].get("content", ""),
                     user_request=(current_user or {}).get("content", ""),
@@ -2199,7 +2248,7 @@ class ChatRunService:
                 except CoreDataError:
                     pass
             if attempt_id:
-                if content:
+                if content and run_id not in self.rag_grounding.runs:
                     self.repository.checkpoint_draft(run_id, attempt_id, content)
                 self.repository.finish_attempt(attempt_id, "cancelled_by_user")
             try:
@@ -2291,6 +2340,8 @@ class ChatRunService:
                 except (CoreDataError, sqlite3.Error):
                     pass
             fallback_content = str(content or (saved.get("draft") or {}).get("content") or "")
+            if run_id in self.rag_grounding.runs:
+                fallback_content = ""
             try:
                 self.tool_loop.interrupt_run(run_id)
                 operations = self.tool_loop.repository.list_for_run(run_id)
@@ -2423,6 +2474,7 @@ class ChatRunService:
                     if state.get("health_status") not in {"ready", "degraded"})
                   for model, states in (profile.model_route_health or {}).items()}
         return replace(profile,
+            local_strict=False,
             model_capabilities=capabilities,
             model_route_capabilities={model: tuple(support_identity(state) for state in states)
                 for model, states in (profile.model_route_capabilities or {}).items()},
@@ -2444,6 +2496,12 @@ class ChatRunService:
             "protocol_id": profile.primary_protocol if profile else "",
         }
         conversation = self.repository.get_run_conversation(run["id"])
+        if self._rag_requires_local(conversation) or run["id"] in self.rag_grounding.runs:
+            if profile is not None:
+                require_local_profile(profile)
+            if current_run.get("web_search_route") not in {None, "none"}:
+                raise CoreDataError("rag_network_forbidden", "资料问答运行禁止联网检索。")
+            self.rag_grounding.validate(run["id"])
         self._validate_planned_model(conversation, target)
         self._validate_planned_web_permission(conversation, current_run)
         if profile is not None:
@@ -2465,7 +2523,35 @@ class ChatRunService:
             self._validate_context_dispatch_authority(run, profile, invocation_target)
             raise
         self._validate_context_dispatch_authority(run, profile, invocation_target)
+        if run["id"] in self.rag_grounding.runs:
+            self.rag_grounding.admit(run["id"], [item.source.source_id for item in packed.items
+                if item.source.source_type == "rag_chunk" and item.included],
+                budget=min(6000, int(packed.input_target * 0.30)))
         return packed
+
+    def _rag_requires_local(self, conversation: dict[str, Any]) -> bool:
+        project_id = conversation.get("project_id")
+        if project_id and self.rag.project_state(project_id).get("enabled"):
+            return True
+        if not conversation.get("id"):
+            return False
+        with self.repository._connect() as connection:
+            # Branches and project copies retain source_message_id through each
+            # copied prefix. Follow actual messages so later parent runs do not
+            # classify a clean prefix as evidence history.
+            return connection.execute("""WITH RECURSIVE message_lineage(id) AS (
+                    SELECT source_message_id FROM messages
+                    WHERE conversation_id=? AND source_message_id IS NOT NULL
+                    UNION
+                    SELECT m.source_message_id FROM messages m JOIN message_lineage l ON m.id=l.id
+                    WHERE m.source_message_id IS NOT NULL
+                )
+                SELECT 1 FROM rag_searches s JOIN model_runs r ON r.id=s.run_id
+                WHERE r.conversation_id=? OR r.assistant_message_id IN (SELECT id FROM message_lineage)
+                    OR r.user_message_id IN (SELECT id FROM message_lineage)
+                UNION ALL
+                SELECT 1 FROM messages WHERE conversation_id=? AND instr(content,'rag-evidence:')>0
+                LIMIT 1""", (conversation["id"],) * 3).fetchone() is not None
 
     @staticmethod
     def _serialization_identity(step: dict[str, Any] | None) -> dict[str, Any]:
@@ -3763,7 +3849,7 @@ class ChatRunService:
                 run, attempt_id, provider, messages, tools_enabled, tool_mode, **options,
             )
         except Exception as error:
-            if isinstance(error, sqlite3.Error):
+            if isinstance(error, sqlite3.Error) or run["id"] in self.rag_grounding.runs:
                 raise
             current = self.repository.get_model_run(run["id"])
             partial = str((current.get("draft") or {}).get("content") or "")
@@ -4324,11 +4410,17 @@ class ChatRunService:
                         budget_attempt_ids=budget_attempt_ids,
                     )
                 else:
+                    if call.name == "skills.load" and self.skills.requires_rag("$" + call.arguments["name"]) \
+                            and run_id not in self.rag_grounding.runs:
+                        raise CoreDataError("rag_library_required", "该技能需要当前项目的资料库证据。")
                     operation, resolution = await self.tool_loop.request(
                         run_id=run_id, attempt_id=attempt_id,
                         sequence=tool_sequence, call=call,
                         budget_attempt_ids=budget_attempt_ids,
                         local_executor=(lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in SKILL_TOOLS else None,
+                        async_executor=(lambda call=call: self.rag_grounding.execute(run_id, call.name, call.arguments,
+                            max_characters=max(256, self._skill_context_allowance(run_id, messages=messages,
+                                max_output_tokens=max_output_tokens)))) if call.name in {"rag.search", "rag.read"} else None,
                     )
                 tool_output = resolution.output
                 if call.name in {"web.search", "web.open"} and resolution.success:

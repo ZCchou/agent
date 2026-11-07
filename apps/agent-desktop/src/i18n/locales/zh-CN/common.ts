@@ -1,4 +1,6 @@
+import rag from "./rag";
 const common = {
+  rag,
   buttonAudit: {
     actionFailed: "操作失败，请重试。",
     saveFailed: "保存失败，已保留你的修改，请重试。",
@@ -33,6 +35,7 @@ const common = {
   "pickerEmpty": "没有可用技能，请在「系统功能 → 技能」中导入文件夹。"
 },
   navigation: {
+    rag: "本地资料库",
     newChat: "新建聊天",
     chats: "普通聊天",
     resources: "聊天与项目",

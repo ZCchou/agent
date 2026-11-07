@@ -23,6 +23,7 @@ mod file_search;
 mod file_security;
 mod image_normalizer;
 mod logging;
+mod rag_commands;
 #[cfg(test)]
 mod reliability_contracts;
 mod route_health;
@@ -65,6 +66,7 @@ pub fn run() {
         .manage(app_updates::AppUpdateService::default())
         .manage(Mutex::new(CoreProcessManager::new()))
         .manage(credentials::CredentialStore)
+        .manage(Mutex::new(rag_commands::RagPathGrants::default()))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -350,6 +352,9 @@ pub fn run() {
             app_updates::draft::load_update_draft,
             app_updates::draft::ack_update_draft,
             skill_commands::list_skills,
+            rag_commands::rag_request,
+            rag_commands::rag_select_paths,
+            rag_commands::rag_revoke_paths,
             skill_commands::save_skill,
             skill_commands::import_skill_directory,
             skill_commands::inspect_skill,

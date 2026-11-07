@@ -52,6 +52,7 @@ class ToolLoopService:
         self, *, run_id: str, attempt_id: str, sequence: int, call: ToolCall,
         budget_attempt_ids: tuple[str, ...] = (),
         local_executor: Callable[[], str] | None = None,
+        async_executor: Callable[[], Awaitable[str]] | None = None,
     ) -> tuple[dict[str, Any], ToolResolution]:
         self._enforce_limits(run_id, attempt_id, call, budget_attempt_ids)
         operation = self.repository.create(run_id, attempt_id, sequence, call)
@@ -67,14 +68,20 @@ class ToolLoopService:
         waiter: asyncio.Future[ToolResolution] = loop.create_future()
         self.waiters[operation["id"]] = waiter
         try:
-            if local_executor is not None:
+            if local_executor is not None or async_executor is not None:
                 self.update_status(operation["id"], "executing")
                 try:
-                    output = await asyncio.to_thread(local_executor)
+                    executor_task = asyncio.create_task(async_executor() if async_executor else asyncio.to_thread(local_executor))
+                    def cancel_executor(result):
+                        if result.cancelled():
+                            executor_task.cancel()
+                    waiter.add_done_callback(cancel_executor)
+                    output = await executor_task
                 except CoreDataError as error:
                     self.resolve(operation["id"], success=False, output=error.message, error_code=error.code)
                 except Exception:
-                    self.resolve(operation["id"], success=False, output="Skill operation failed. Reload the package to check its state and continue with available information.", error_code="skill_unavailable")
+                    code = "rag_operation_failed" if async_executor else "skill_unavailable"
+                    self.resolve(operation["id"], success=False, output="Local operation failed. Check its state before retrying.", error_code=code)
                 else:
                     self.resolve(operation["id"], success=True, output=output)
             else:
@@ -191,7 +198,7 @@ class ToolLoopService:
         mutations += sum(item["tool_name"] == "skills.save" for item in operations if item["status"] != "rejected")
         return {
             "calls": quota(self.MAX_ROUNDS, len(current), "attempt"),
-            "reads": quota(self.MAX_READ_OPERATIONS, sum(item["tool_name"] in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource"} for item in current), "attempt"),
+            "reads": quota(self.MAX_READ_OPERATIONS, sum(item["tool_name"] in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read"} for item in current), "attempt"),
             "mutations": quota(self.MAX_FILE_MUTATIONS, mutations, "run"),
             "web_searches": quota(self.MAX_WEB_SEARCHES, sum(item["tool_name"] == "web.search" for item in operations), "run"),
             "web_opens": quota(self.MAX_WEB_OPENS, sum(item["tool_name"] == "web.open" for item in operations), "run"),
@@ -210,7 +217,7 @@ class ToolLoopService:
                 f"This attempt reached its {self.MAX_ROUNDS}-call tool limit. Retry starts a new allowance.",
                 {key: budget["calls"][key] for key in ("limit", "used", "scope")},
             )
-        if call.name in {"fs.list", "fs.search", "fs.read", "skills.load", "skills.read_resource"} and not budget["reads"]["remaining"]:
+        if call.name in {"fs.list", "fs.search", "fs.read", "skills.load", "skills.read_resource", "rag.search", "rag.read"} and not budget["reads"]["remaining"]:
             raise CoreDataError(
                 "tool_read_limit_exceeded",
                 f"This attempt reached its {self.MAX_READ_OPERATIONS}-operation read/search limit.",

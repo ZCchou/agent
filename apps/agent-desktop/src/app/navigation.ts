@@ -6,6 +6,7 @@ import {
   Bell,
   Bot,
   Brain,
+  Library,
   Folder,
   MessageCircle,
   Settings,
@@ -19,6 +20,7 @@ export type AppPage =
   | "chat"
   | "projects"
   | "models"
+  | "rag"
   | "abilities"
   | "memory"
   | "reminders"
@@ -47,6 +49,7 @@ export interface NavigationItem {
 
 export const navigationItems:
   NavigationItem[] = [
+    { id: "rag", labelKey: "navigation.rag", icon: Library, section: "main" },
     {
       id: "chat",
       labelKey:
@@ -145,6 +148,7 @@ export const navigationItems:
  */
 export const pageTitleKeys:
   Record<AppPage, string> = {
+    rag: "rag.title",
     chat:
       "pages.chat.title",
 

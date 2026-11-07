@@ -69,11 +69,13 @@ async def run_context_work(function, *args, **kwargs):
 class ContextEngineService:
     VERSION = "context-engine-v2"
 
-    def __init__(self, repository: CoreRepository, *, skill_context: Callable[..., str] | None = None) -> None:
+    def __init__(self, repository: CoreRepository, *, skill_context: Callable[..., str] | None = None,
+                 rag_context: Callable[[str], list[dict]] | None = None) -> None:
         self.repository = repository
         self.context_repository = ContextRepository(repository)
         self.behavior = BehaviorPolicyResolver()
         self.skill_context = skill_context
+        self.rag_context = rag_context
 
     async def assemble_async(self, run: dict[str, Any], *, context_window: int | None = None,
                              max_output_tokens: int | None = None, strict: bool = False,
@@ -212,6 +214,7 @@ class ContextEngineService:
             context_generation=sources["context_generation"], context_window=window,
             input_target=target, hard_limit=hard_limit, output_reserve=reserve,
             serialization_identity=serialization_identity,
+            rag_evidence=self.rag_context(run["id"]) if self.rag_context else None,
         )
         return packed, conversation["id"]
 

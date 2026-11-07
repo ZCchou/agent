@@ -12,6 +12,7 @@ import { useAppUpdate } from "../features/updater/AppUpdateProvider";
 import { useTranslation } from "react-i18next";
 
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage").then((module) => ({ default: module.ProjectsPage })));
+const RagPage = lazy(() => import("../features/rag/RagPage").then((module) => ({ default: module.RagPage })));
 const ModelsPage = lazy(() => import("../features/models/ModelsPage").then((module) => ({ default: module.ModelsPage })));
 const AbilitiesPage = lazy(() => import("../features/abilities/AbilitiesPage").then((module) => ({ default: module.AbilitiesPage })));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage").then((module) => ({ default: module.MemoryPage })));
@@ -31,6 +32,8 @@ export function AppShell() {
 
   function renderPage() {
     switch (currentPage) {
+      case "rag":
+        return <RagPage />;
       case "projects":
         return <ProjectsPage />;
 
