@@ -11,6 +11,10 @@ async function setup(page) {
     const models = []; const jobs = [];
     let selected = false; let runtime = { state: "stopped" };
     window.__localCalls = []; window.__localRoutingCalls = []; let routing = null;
+    window.__restrictLocalModel = false;
+    const routedConversation = async () => ({ ...await original("get_conversation"),
+      model_selection_mode: routing.mode, provider_profile_id: routing.provider_profile_id, model_id: routing.model_id,
+      coordinator_provider_profile_id: routing.provider_profile_id, coordinator_model_id: routing.model_id });
     window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
       if (command === "local_model_select_path") { selected = true; return { grant_id: "native-mock-grant", path: "C:/fixtures/main.gguf" }; }
       if (command === "local_model_revoke_path") { selected = false; return; }
@@ -24,10 +28,21 @@ async function setup(page) {
       }
       if (command === "update_conversation_routing") {
         window.__localRoutingCalls.push(structuredClone(args.request)); routing = args.request;
-        return { conversation: { ...await original("get_conversation"), model_selection_mode: routing.mode, provider_profile_id: routing.provider_profile_id, model_id: routing.model_id } };
+        return { conversation: await routedConversation() };
       }
-      if (command === "list_conversations" && routing) return (await original(command, args)).map(conversation => ({ ...conversation, model_selection_mode: routing.mode, provider_profile_id: routing.provider_profile_id, model_id: routing.model_id }));
-      if (command === "get_conversation" && routing) return { ...await original(command, args), model_selection_mode: routing.mode, provider_profile_id: routing.provider_profile_id, model_id: routing.model_id };
+      if (command === "list_conversations" && routing) return [await routedConversation()];
+      if (command === "get_conversation" && routing) return routedConversation();
+      if (command === "get_project_model_scope" && window.__restrictLocalModel) return { project_id: "project-1", policy: "restricted", models: [] };
+      if (command === "connect_model_provider") return null;
+      if (command === "start_model_run") {
+        const conversation = await routedConversation();
+        const user = { id: "local-user", conversation_id: conversation.id, role: "user", content: args.request.content, created_at: "2026-11-08" };
+        const assistant = { id: "local-assistant", conversation_id: conversation.id, role: "assistant", content: "Local model response", created_at: "2026-11-08" };
+        window.__localRun = { id: "local-run", conversation_id: conversation.id, user_message_id: user.id,
+          status: "completed", provider_profile_id: record.provider_profile_id, model_id: id, assistant_message: assistant };
+        return { status: "accepted", conversation, user_message: user, run: window.__localRun };
+      }
+      if (command === "get_model_run") return { run: window.__localRun };
       if (command === "update_default_model") { record.is_default = true; return { settings: await window.__TAURI_INTERNALS__.invoke("get_app_settings"), core_sync: "applied", warning_code: null }; }
       if (command !== "local_model_request") return original(command, args);
       window.__localCalls.push(structuredClone(args));
@@ -93,6 +108,106 @@ test("mocked import task can be cancelled", async ({ page }) => {
   await setup(page); await importModel(page);
   await page.getByRole("button", { name: "取消任务", exact: true }).click();
   await expect(page.getByText("import · cancelled", { exact: true })).toBeVisible();
+});
+
+for (const mode of ["fixed", "automatic"]) {
+  test(`${mode} chat distinguishes an unloaded managed model and resumes after loading`, async ({ page }) => {
+    await setup(page); await importModel(page);
+    await page.getByRole("button", { name: "加载模型", exact: true }).click();
+    await expect(page.getByText(/实际后端 cpu/)).toBeVisible();
+    await page.evaluate(mode => window.__TAURI_INTERNALS__.invoke("update_conversation_routing", { request: {
+      conversation_id: "work-1", mode, provider_profile_id: `managed:${"a".repeat(64)}`, model_id: "a".repeat(64),
+    } }), mode);
+    await page.getByRole("button", { name: "Implementation work", exact: true }).click();
+    // Model disappears while the chat remains open, as with idle release.
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("local_model_request", { action: "runtime.unload", params: {} }));
+    const editor = page.getByRole("textbox", { name: "Ask agent..." });
+    await editor.fill("Continue with local evidence");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(page.getByText(/The selected local model is not loaded/)).toBeVisible();
+    await expect(editor).toHaveValue("Continue with local evidence");
+    await expect(page.getByRole("button", { name: "加载本地模型", exact: true })).toBeVisible({ timeout: 10_000 });
+    await page.getByRole("button", { name: "加载本地模型", exact: true }).click();
+    await page.getByRole("button", { name: "加载模型", exact: true }).click();
+    await expect(page.getByText(/实际后端 cpu/)).toBeVisible();
+    await page.getByRole("button", { name: "Implementation work", exact: true }).click();
+    await expect(editor).toHaveValue("Continue with local evidence");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(page.getByText("Local model response", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => window.__localRoutingCalls.length)).toBe(1);
+  });
+}
+
+test("an out-of-scope cold managed model still requires a compatible selection", async ({ page }) => {
+  await setup(page); await importModel(page);
+  await page.evaluate(async () => {
+    window.__restrictLocalModel = true;
+    await window.__TAURI_INTERNALS__.invoke("update_conversation_routing", { request: {
+      conversation_id: "work-1", mode: "fixed", provider_profile_id: `managed:${"a".repeat(64)}`, model_id: "a".repeat(64),
+    } });
+  });
+  await page.getByRole("button", { name: "Implementation work", exact: true }).click();
+  await page.getByRole("textbox", { name: "Ask agent..." }).fill("Restricted evidence");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText(/The current model is not allowed for this conversation or project/)).toBeVisible();
+  await expect(page.getByText(/The selected local model is not loaded/)).toHaveCount(0);
+});
+
+test("top selector loads an imported local model before binding the conversation", async ({ page }) => {
+  await setup(page); await importModel(page);
+  await page.getByRole("button", { name: "Implementation work", exact: true }).click();
+  const value = `managed:${"a".repeat(64)}::${"a".repeat(64)}`;
+  await page.locator(".top-bar select").last().selectOption(value);
+  await expect(page.locator(".top-bar select").last()).toHaveValue(value);
+  await expect(page.locator(".top-bar select").last()).toBeEnabled();
+  await page.getByRole("textbox", { name: "Ask agent..." }).fill("Use selected local model");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Local model response", { exact: true })).toBeVisible();
+});
+
+test("a new chat can select and load its local default without opening model settings", async ({ page }) => {
+  await setup(page); await importModel(page);
+  await page.getByRole("button", { name: "New Chat", exact: true }).click();
+  const value = `managed:${"a".repeat(64)}::${"a".repeat(64)}`;
+  await page.locator(".top-bar select").last().selectOption(value);
+  await expect(page.locator(".top-bar select").last()).toHaveValue(value);
+  await expect(page.locator(".top-bar select").last()).toBeEnabled();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Fixture GGUF · 默认模型" })).toBeVisible();
+  await expect(page.getByText(/实际后端 cpu/)).toBeVisible();
+});
+
+test("model settings can select an unloaded imported model as the default", async ({ page }) => {
+  await setup(page); await importModel(page);
+  await page.locator(".models-default-card select").first().selectOption(`managed:${"a".repeat(64)}`);
+  await page.locator(".models-default-card select").last().selectOption("a".repeat(64));
+  await expect(page.getByRole("heading", { name: "Fixture GGUF · 默认模型" })).toBeVisible();
+});
+
+test("a failed local load keeps the previous conversation model", async ({ page }) => {
+  await setup(page); await importModel(page);
+  await page.locator('.local-model-config select[name="device"]').selectOption("cuda");
+  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  await page.getByRole("button", { name: "Implementation work", exact: true }).click();
+  await page.locator(".top-bar select").last().selectOption(`managed:${"a".repeat(64)}::${"a".repeat(64)}`);
+  await expect(page.locator(".top-bar [role=alert]")).toBeVisible();
+  await expect(page.locator(".top-bar select").last()).toBeEnabled();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "CUDA device unavailable" })).toHaveCount(3);
+  expect(await page.evaluate(() => window.__localRoutingCalls)).toEqual([]);
+});
+
+test("leaving a conversation while its model loads does not change the new chat default", async ({ page }) => {
+  await setup(page); await importModel(page);
+  await page.getByRole("button", { name: "Implementation work", exact: true }).click();
+  await page.locator(".top-bar select").last().selectOption(`managed:${"a".repeat(64)}::${"a".repeat(64)}`);
+  await expect(page.locator(".top-bar select").last()).toBeDisabled();
+  await page.getByRole("button", { name: "New Chat", exact: true }).click();
+  await expect(page.locator(".top-bar select").last()).toBeEnabled();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(page.getByText(/实际后端 cpu/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fixture GGUF · 默认模型" })).toHaveCount(0);
+  expect(await page.evaluate(() => window.__localRoutingCalls)).toEqual([]);
 });
 test("queued GPU failure survives refresh, successful retry and reopening with its historical job", async ({ page }) => {
   const pageErrors = [];

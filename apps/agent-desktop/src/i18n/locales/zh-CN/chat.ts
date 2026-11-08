@@ -369,6 +369,7 @@ const chat = {
     titlePrompt: "知识标题", contentPrompt: "知识内容", publish: "发布到项目" },
   errors: {
     selectCompatibleModel: "当前模型不符合这个会话或项目的使用规则。请先在顶部选择一个可用模型。",
+    localModelNotLoaded: "当前选中的本地模型尚未加载，可能已被闲置释放。请点击顶部“加载本地模型”，加载完成后重新发送。输入内容已保留。",
     network_unavailable: "网络当前不可用。", connection_reset: "模型连接意外中断。",
     request_timeout: "模型未能及时开始回复。", stream_stalled: "模型长时间没有继续输出。",
     authentication_failed: "认证失败，请重新输入 API Key。", quota_exhausted: "模型服务额度已用尽。",

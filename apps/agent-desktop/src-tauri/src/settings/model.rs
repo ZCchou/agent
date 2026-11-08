@@ -858,6 +858,21 @@ impl Default for ModelSettings {
     }
 }
 
+impl ModelSettings {
+    pub(crate) fn remove_demo_provider(&mut self) {
+        let demo_default = self.default_provider_profile_id == "builtin-demo"
+            || self.providers.iter().any(|profile| {
+                profile.kind == "fake" && profile.id == self.default_provider_profile_id
+            });
+        self.providers
+            .retain(|profile| profile.id != "builtin-demo" && profile.kind != "fake");
+        if demo_default {
+            self.default_provider_profile_id.clear();
+            self.default_model_id.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarPreferences {
     #[serde(default)]

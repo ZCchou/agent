@@ -38,6 +38,7 @@ pub(crate) fn apply_catalog(
     mut settings: AppSettings,
     catalog: &serde_json::Value,
 ) -> Result<AppSettings, String> {
+    settings.models.remove_demo_provider();
     settings.web_search.enabled = false;
     settings.content.remote_image_policy = RemoteImagePolicy::Ask;
     settings
@@ -1152,6 +1153,13 @@ pub async fn update_default_model(
 #[cfg(test)]
 mod managed_catalog_tests {
     use super::*;
+    #[test]
+    fn catalog_never_advertises_a_legacy_demo_without_imported_models() {
+        let settings = apply_catalog(AppSettings::default(), &json!({"models": []})).unwrap();
+        assert!(settings.models.providers.is_empty());
+        assert!(settings.models.default_provider_profile_id.is_empty());
+        assert!(settings.models.default_model_id.is_empty());
+    }
     #[test]
     fn overlays_stable_managed_catalog_without_private_transport_and_disables_saved_remote() {
         let mut original = AppSettings::default();

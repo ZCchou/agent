@@ -511,7 +511,7 @@ export function ChatPage() {
       const projectId = sendConversation ? sendConversation.project_id : (draft.kind === "project_work" ? draft.projectId : null);
       const project = projectId ? projects.find((item) => item.id === projectId) : undefined;
       const scope = projectId ? await projectRepository.getModelScope(projectId) : null;
-      let candidates = selectableModels(settings, project, scope);
+      let candidates = selectableModels(settings, project, scope, true);
       const automaticMode = sendConversation
         ? sendConversation.model_selection_mode === "automatic"
         : (settings.routing?.new_conversation_mode ?? "automatic") === "automatic";
@@ -524,12 +524,18 @@ export function ChatPage() {
           ? sendConversation?.coordinator_model_id ?? settings.models.default_model_id
           : sendConversation?.model_id ?? settings.models.default_model_id,
       );
-      if (!selected) throw new Error(tChat("errors.selectCompatibleModel"));
+      if (!selected || selected.model.status === "unavailable") {
+        setRoutingRevision((value) => value + 1);
+        throw new Error(tChat(selected ? "errors.localModelNotLoaded" : "errors.selectCompatibleModel"));
+      }
       if (!automaticMode && effectiveKind === "project_work" && selected.model.tool_mode === "unknown") {
         settings = await modelCatalogRepository.probeTools(selected.provider.id, selected.model.id);
-        candidates = selectableModels(settings, project, scope);
+        candidates = selectableModels(settings, project, scope, true);
         selected = resolveSelectedModel(candidates, selected.provider.id, selected.model.id);
-        if (!selected) throw new Error(tChat("errors.selectCompatibleModel"));
+        if (!selected || selected.model.status === "unavailable") {
+          setRoutingRevision((value) => value + 1);
+          throw new Error(tChat(selected ? "errors.localModelNotLoaded" : "errors.selectCompatibleModel"));
+        }
       }
       await providerRepository.connect(selected.provider.id);
       if (!isCurrent()) return;

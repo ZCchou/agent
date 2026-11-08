@@ -369,6 +369,7 @@ const chat = {
     titlePrompt: "Knowledge title", contentPrompt: "Knowledge content", publish: "Publish to project" },
   errors: {
     selectCompatibleModel: "The current model is not allowed for this conversation or project. Choose an available model above.",
+    localModelNotLoaded: "The selected local model is not loaded. It may have been released while idle. Click Load local model above, then resend after loading. Your input has been kept.",
     network_unavailable: "The network is unavailable.", connection_reset: "The connection was interrupted.",
     request_timeout: "The model did not start responding in time.", stream_stalled: "The model stopped producing output.",
     authentication_failed: "Authentication failed. Re-enter the API key.", quota_exhausted: "The provider quota is exhausted.",

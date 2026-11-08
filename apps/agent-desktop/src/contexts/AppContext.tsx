@@ -49,7 +49,6 @@ interface AppContextValue {
   startNewChat: (chatGroupId?: string | null) => void;
   startNewWork: (projectId: string) => void;
   conversationCreated: (conversation: Conversation) => Promise<void>;
-  currentModel: string;
   coreStatus: CoreStatus;
   coreOnline: boolean;
   refreshCoreStatus: () => Promise<void>;
@@ -204,7 +203,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     draft,
     setDraftCategory: (category) => setDraft((current) => ({ ...current, category })),
     startNewChat, startNewWork, conversationCreated,
-    currentModel: "builtin-demo",
     coreStatus, coreOnline: coreStatus.healthy, refreshCoreStatus,
     replaceWorkspaceResources,
   }), [

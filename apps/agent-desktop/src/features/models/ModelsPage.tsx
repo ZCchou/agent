@@ -364,10 +364,10 @@ export function ModelsPage() {
     {error ? <Button onClick={() => void loadSettings()}>{t("actions.retry")}</Button> : null}
   </div>;
 
-  const enabledProviders = modelSettings.providers.filter((provider) => provider.enabled && provider.models.some((model) => model.enabled && model.status !== "unavailable" && model.capabilities.text !== "no"));
+  const enabledProviders = modelSettings.providers.filter((provider) => provider.enabled && provider.models.some((model) => model.enabled && (model.status !== "unavailable" || provider.id.startsWith("managed:")) && model.capabilities.text !== "no"));
   const selectedDefaultProviderId = defaultProviderDraft ?? modelSettings.default_provider_profile_id;
   const selectedDefaultProvider = enabledProviders.find((provider) => provider.id === selectedDefaultProviderId) ?? enabledProviders[0];
-  const selectedProviderModels = selectedDefaultProvider?.models.filter((model) => model.enabled && model.status !== "unavailable" && model.capabilities.text !== "no") ?? [];
+  const selectedProviderModels = selectedDefaultProvider?.models.filter((model) => model.enabled && (model.status !== "unavailable" || selectedDefaultProvider.id.startsWith("managed:")) && model.capabilities.text !== "no") ?? [];
   const routing = settings.routing ?? {
     new_conversation_mode: "automatic" as const, default_preset: "balanced" as const,
     max_model_calls_per_message: 3, max_specialist_steps: 2,

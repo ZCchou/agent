@@ -53,7 +53,8 @@ impl SettingsManager {
             SettingsError::Storage("settings manager lock was poisoned".to_string())
         })?;
 
-        let settings = self.load_or_create()?;
+        let mut settings = self.load_or_create()?;
+        settings.models.remove_demo_provider();
 
         // Re-save once at startup so the legacy split-key layout is
         // migrated to the current single root object.
@@ -1729,9 +1730,33 @@ mod tests {
 
         let settings = manager.ensure_initialized().unwrap();
 
-        assert_eq!(settings, AppSettings::default(),);
+        assert!(settings.models.providers.is_empty());
+        assert!(settings.models.default_provider_profile_id.is_empty());
+        assert!(settings.models.default_model_id.is_empty());
+        assert_eq!(repository.snapshot(), Some(settings));
+    }
 
-        assert_eq!(repository.snapshot(), Some(AppSettings::default(),),);
+    #[test]
+    fn startup_removes_legacy_demo_and_preserves_real_model_selection() {
+        let mut settings = AppSettings::default();
+        let mut local = settings.models.providers[0].clone();
+        local.id = "local-service".into();
+        local.kind = "openai_compatible".into();
+        local.preset_id = "custom".into();
+        local.entered_base_url = "http://127.0.0.1:8080/v1".into();
+        local.resolved_api_base_url = None;
+        settings.models.providers.push(local);
+        settings.models.default_provider_profile_id = "local-service".into();
+        settings.models.default_model_id = "qwen".into();
+        let repository = Arc::new(MemorySettingsRepository::with_settings(settings));
+        let manager = SettingsManager::new(repository.clone());
+        let migrated = manager.ensure_initialized().unwrap();
+        assert_eq!(migrated.models.providers.len(), 1);
+        assert_eq!(migrated.models.providers[0].id, "local-service");
+        assert_eq!(migrated.models.default_provider_profile_id, "local-service");
+        assert_eq!(migrated.models.default_model_id, "qwen");
+        assert_eq!(repository.snapshot(), Some(migrated.clone()));
+        assert_eq!(manager.ensure_initialized().unwrap(), migrated);
     }
 
     #[test]
