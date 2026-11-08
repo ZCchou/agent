@@ -13,7 +13,7 @@ class ModelProfile:
 
 
 PROFILES = {
-    "qwen3-embedding-0.6b": ModelProfile("embedding", "qwen3", 1024, "last", 8192, ("Qwen3Model",)),
+    "qwen3-embedding-0.6b": ModelProfile("embedding", "qwen3", 1024, "last", 8192, ("Qwen3Model", "Qwen3ForCausalLM")),
     "qwen3-reranker-0.6b": ModelProfile("reranker", "qwen3", None, "yes_no", 8192, ("Qwen3ForCausalLM",)),
     "bge-m3": ModelProfile("embedding", "xlm-roberta", 1024, "cls", 8192, ("XLMRobertaModel",)),
     "bge-reranker-v2-m3": ModelProfile("reranker", "xlm-roberta", None, "sigmoid", 8192, ("XLMRobertaForSequenceClassification",)),

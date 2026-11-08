@@ -48,42 +48,21 @@ async function setup(page, options = {}) {
 async function settings(page) {
   await page.getByRole('button', { name: 'System features' }).click();
   await page.getByRole('navigation').getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Software update' })).toBeVisible();
+  await expect(page.getByText('离线模式已停用在线更新。')).toBeVisible();
 }
-test('manual checks show no update and channel unavailable with persistent channel preference', async ({ page }) => {
-  await setup(page, { check: { state: 'no_update', update_id: null, version: null } }); await settings(page);
-  await page.getByRole('button', { name: 'Check for updates' }).click();
-  await expect(page.getByText('You are up to date.')).toBeVisible();
-  await page.getByLabel('Update channel').selectOption('stable');
-  await page.evaluate(() => window.emitUpdate({ state: 'channel_unavailable', current_version: '0.14.1', channel: 'stable', update_id: null }));
-  await expect(page.getByText('No release is published for this channel yet.')).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem('agent:update-channel'))).toBe('stable');
+test('offline settings offer no online update actions even with a saved auto-check preference', async ({ page }) => {
+  await setup(page, { auto: true }); await settings(page);
+  for (const name of ['Check for updates', 'Download update', 'Install and restart']) {
+    await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+  }
+  await expect(page.getByLabel('Update channel')).toHaveCount(0);
+  // Cover the former startup timer while other UI work continues.
+  await page.getByRole('button', { name: 'Return to chat' }).click();
+  await page.getByRole('textbox', { name: 'Ask agent...' }).fill('Offline draft');
+  await page.waitForTimeout(1500);
+  expect(await page.evaluate(() => window.updateCalls.filter(x => /^(check|download|install)_app_update$/.test(x.command)))).toEqual([]);
 });
-test('check errors can be retried', async ({ page }) => {
-  await setup(page, { error: true }); await settings(page);
-  await page.getByRole('button', { name: 'Check for updates' }).click();
-  await expect(page.getByRole('alert')).toContainText('Network');
-  await page.getByRole('button', { name: 'Retry' }).click();
-  await expect(page.getByRole('button', { name: 'Download update' })).toBeVisible();
-});
-test('verified download shows progress, refuses busy installation and retains draft and ready bytes', async ({ page }) => {
-  await setup(page); const editor = page.getByRole('textbox', { name: 'Ask agent...' }); await editor.fill('Keep my draft');
-  await page.getByRole('button', { name: 'Attach file' }).click();
-  await expect(page.locator('.attachment-chip img')).toBeVisible(); await settings(page);
-  await page.getByRole('button', { name: 'Check for updates' }).click(); await page.getByRole('button', { name: 'Download update' }).click();
-  await expect(page.getByRole('progressbar')).toHaveAttribute('value', '50');
-  await page.evaluate(() => window.finishDownload());
-  await page.getByRole('button', { name: 'Install and restart' }).click();
-  await expect(page.getByRole('alert')).toContainText('Wait for running work');
-  await expect(page.getByRole('button', { name: 'Install and restart' })).toBeEnabled();
-  const install = await page.evaluate(() => window.updateCalls.find(x => x.command === 'install_app_update'));
-  expect(install.args.draft.text).toBe('Keep my draft'); expect(install.args.draft.attachment_ids).toEqual(['image-1']);
-  await page.getByRole('button', { name: 'Return to chat' }).click(); await expect(editor).toHaveValue('Keep my draft'); await expect(page.locator('.attachment-chip img')).toBeVisible();
-  expect(await page.evaluate(() => window.discarded)).toEqual([]);
-  await page.getByRole('button', { name: 'New Chat', exact: true }).click();
-  // New Chat intentionally clears; opening Settings itself never discarded the attachment.
-  expect(await page.evaluate(() => window.discarded)).toEqual(['image-1']);
-});
+
 test('settings navigation preserves draft text and staged images', async ({ page }) => {
   await setup(page); const editor = page.getByRole('textbox', { name: 'Ask agent...' }); await editor.fill('Persistent draft');
   await page.getByRole('button', { name: 'Attach file' }).click(); await expect(page.locator('.attachment-chip img')).toBeVisible();
@@ -91,11 +70,6 @@ test('settings navigation preserves draft text and staged images', async ({ page
   await page.evaluate(() => window.emitUpdate({ state: 'available', current_version: '0.14.1', channel: 'preview', update_id: 'u', version: '0.14.2' }));
   await page.getByRole('button', { name: 'Return to chat' }).click();
   await expect(editor).toHaveValue('Persistent draft'); await expect(page.locator('.attachment-chip img')).toBeVisible();
-});
-test('signature failure cannot offer installation', async ({ page }) => {
-  await setup(page, { signature: true }); await settings(page); await page.getByRole('button', { name: 'Check for updates' }).click(); await page.getByRole('button', { name: 'Download update' }).click();
-  await expect(page.getByRole('alert')).toContainText('signature'); await expect(page.getByRole('button', { name: 'Install and restart' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Retry' }).click(); await expect.poll(() => page.evaluate(() => window.checkCount)).toBe(2);
 });
 const restored = { update_id: 'old-update', draft: { conversation_id: null, kind: 'standard_chat', project_id: null, category: 'casual', text: 'Restored draft', attachment_ids: ['image-1'], rejected_ids: [], references: [] }, attachments: [attachment], rejected_attachments: [], missing_attachments: 0 };
 test('restart draft restores once with attachments and acknowledges after applying', async ({ page }) => {
@@ -112,12 +86,6 @@ test('late restoration never overwrites fresh typing and offers explicit restore
   await page.getByRole('button', { name: 'Restore saved draft' }).click(); await expect(editor).toHaveValue('Restored draft');
 });
 
-test('startup check is nonblocking and update banner opens Settings', async ({ page }) => {
-  await setup(page, { auto: true }); const editor = page.getByRole('textbox', { name: 'Ask agent...' }); await editor.fill('Keep typing');
-  await expect(page.getByRole('button', { name: 'Open updates' })).toBeVisible(); await expect(editor).toHaveValue('Keep typing');
-  await page.getByRole('button', { name: 'Open updates' }).click(); await expect(page.getByRole('heading', { name: 'Software update' })).toBeVisible();
-  const calls = await page.evaluate(() => window.updateCalls.filter(x => x.command === 'check_app_update')); expect(calls).toHaveLength(1); expect(calls[0].args.channel).toBe('preview');
-});
 test('restoration retains explicit historical references and reports missing attachments', async ({ page }) => {
   const reference = { attachment: { ...attachment, id: 'historical-image', name: 'reference.png' }, reference: { attachment_id: 'historical-image', source_start: 2, source_end: 8 } };
   await setup(page, { restore: { ...restored, missing_attachments: 1, draft: { ...restored.draft, references: [reference] } } }); await page.evaluate(() => window.restoreDraft());
@@ -134,36 +102,8 @@ test('a late initial status cannot erase a newer update progress event', async (
   await expect(page.getByRole('button', { name: 'Open updates' })).toBeVisible();
 });
 
-test('late events from a previous channel cannot offer its installer in the selected channel', async ({ page }) => {
-  await setup(page); await settings(page);
-  await page.getByRole('button', { name: 'Check for updates' }).click();
-  await page.getByLabel('Update channel').selectOption('stable');
-  await page.evaluate((payload) => window.emitUpdate(payload), available);
-  await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0);
-  await expect(page.getByLabel('Update channel')).toHaveValue('stable');
-});
 
-test('restored new chat keeps its existing chat group', async ({ page }) => {
-  await setup(page, { restore: { ...restored, draft: { ...restored.draft, chat_group_id: 'group-1' } } });
-  await page.evaluate(() => window.restoreDraft());
-  await expect(page.getByRole('textbox', { name: 'Ask agent...' })).toHaveValue('Restored draft');
-  await settings(page); await page.getByRole('button', { name: 'Check for updates' }).click();
-  await page.getByRole('button', { name: 'Download update' }).click(); await page.evaluate(() => window.finishDownload());
-  await page.getByRole('button', { name: 'Install and restart' }).click();
-  const call = await page.evaluate(() => window.updateCalls.find(x => x.command === 'install_app_update'));
-  expect(call.args.draft.chat_group_id).toBe('group-1');
-});
 
-test('installation freezes navigation and draft mutations until a failure returns control', async ({ page }) => {
-  await setup(page, { deferredInstall: true }); const editor = page.getByRole('textbox', { name: 'Ask agent...' });
-  await editor.fill('Snapshot stays current'); await settings(page);
-  await page.getByRole('button', { name: 'Check for updates' }).click(); await page.getByRole('button', { name: 'Download update' }).click();
-  await page.evaluate(() => window.finishDownload()); await page.getByRole('button', { name: 'Install and restart' }).click();
-  await expect(page.locator('.app-shell')).toHaveAttribute('inert', '');
-  await page.evaluate(() => window.failInstall());
-  await expect(page.locator('.app-shell')).not.toHaveAttribute('inert', '');
-  await page.getByRole('button', { name: 'Return to chat' }).click(); await expect(editor).toHaveValue('Snapshot stays current');
-});
 
 test('saved draft load failure has an in-place retry', async ({ page }) => {
   await setup(page, { loadFail: true });

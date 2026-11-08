@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import aclosing
+
 import json
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -256,6 +258,7 @@ async def stream_anthropic_web_search(
     force_search: bool,
     function_tools: list[dict[str, Any]] | None = None,
     enable_web_search: bool = True,
+    local_strict: bool = False,
     _continuation_count: int = 0,
 ) -> AsyncIterator[dict[str, Any]]:
     """Normalize Anthropic Messages web-search streaming into provider-neutral events."""
@@ -303,7 +306,7 @@ async def stream_anthropic_web_search(
     content_blocks: dict[int, dict[str, Any]] = {}
     pause_turn = False
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not local_strict) as client:
             async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                 if response.is_error:
                     body = (await response.aread()).decode("utf-8", errors="replace")
@@ -475,7 +478,7 @@ async def stream_anthropic_web_search(
                     except ValueError:
                         block["input"] = {}
                 continuation.append(block)
-            async for event in stream_anthropic_web_search(
+            async with aclosing(stream_anthropic_web_search(
                 endpoint_base_url=endpoint_base_url,
                 api_key=api_key,
                 model_id=model_id,
@@ -484,9 +487,11 @@ async def stream_anthropic_web_search(
                 force_search=False,
                 function_tools=function_tools,
                 enable_web_search=enable_web_search,
+                local_strict=local_strict,
                 _continuation_count=_continuation_count + 1,
-            ):
-                yield event
+            )) as provider_stream:
+                async for event in provider_stream:
+                    yield event
     except NativeAdapterFailure:
         raise
     except httpx.TimeoutException as error:

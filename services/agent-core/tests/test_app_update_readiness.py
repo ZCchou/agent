@@ -6,7 +6,7 @@ from test_tool_continuation_retry import fixture, install_http
 
 
 async def rpc(service, kind, **params):
-    return await handle_async_message({"v": 17, "id": kind, "type": kind, "params": params}, service)
+    return await handle_async_message({"v": 18, "id": kind, "type": kind, "params": params}, service)
 
 
 def test_idle_prepare_blocks_new_work_until_matching_abort(tmp_path, monkeypatch):

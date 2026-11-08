@@ -121,7 +121,7 @@ test('pending provider creation freezes the submitted configuration fields', asy
   await setup(page); await navigate(page, 'Models');
   await page.getByRole('button', { name: 'Add provider', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Add provider' });
-  await dialog.getByRole('button', { name: /Custom OpenAI-compatible/ }).click();
+  await dialog.getByRole('button', { name: /Ollama/ }).click();
   await dialog.locator('form').evaluate(form => form.requestSubmit());
   await page.waitForFunction(() => typeof window.finishProvider === 'function');
   for (const input of await dialog.locator('input, select').all()) await expect(input).toBeDisabled();
@@ -182,20 +182,12 @@ test('pending manual addition freezes its submitted model id until completion', 
   await expect(input).toBeEnabled(); await expect(input).toHaveValue('');
 });
 
-test('pending backend creation freezes the entire form including cancel', async ({ page }) => {
+test('offline search settings provide no backend configuration or requests', async ({ page }) => {
   await setup(page, 'backend-pending'); await navigate(page, 'Settings');
   await page.locator('.settings-navigation-card').filter({ hasText: 'Web & Search' }).getByRole('button', { name: 'Open', exact: true }).click();
-  await page.getByRole('button', { name: 'Add search service', exact: true }).click();
-  const form = page.locator('.web-search-backend-form');
-  await form.locator('input').nth(0).fill('Submitted backend');
-  await form.locator('input[type=password]').fill('synthetic-ui-test-key');
-  await form.getByRole('button', { name: 'Save', exact: true }).click();
-  await page.waitForFunction(() => typeof window.finishBackend === 'function');
-  for (const input of await form.locator('input, select').all()) await expect(input).toBeDisabled();
-  await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
-  await page.evaluate(() => window.finishBackend());
-  await expect(form).toHaveCount(0);
-  await expect(page.getByText('Submitted backend', { exact: true })).toBeVisible();
+  await expect(page.getByText('离线模式已停用联网检索。')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add search service', exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => window.actionCalls.filter(c => /^(save|test)_search_backend$/.test(c.command)))).toEqual([]);
 });
 
 test('committed model removal stays removed when runtime synchronization fails', async ({ page }) => {
@@ -222,19 +214,14 @@ test('model settings initial load failure offers an in-place retry', async ({ pa
   await expect(page.getByRole('button', { name: 'Add provider', exact: true })).toBeVisible();
 });
 
-for (const method of ['click', 'Enter']) test(`connecting Tavily by ${method} never sends the chat draft`, async ({ page }) => {
+test('legacy enabled search settings cannot expose online chat controls or submit a draft', async ({ page }) => {
   await setup(page, 'connect');
   const draft = page.getByRole('textbox', { name: 'Ask agent...' });
   await draft.fill('Keep this unsent draft');
-  await page.locator('.web-search-control__trigger').click();
-  await page.getByRole('button', { name: 'Connect Tavily', exact: true }).click();
-  const key = page.getByLabel('Tavily API key', { exact: true });
-  await key.fill('synthetic-ui-test-key');
-  if (method === 'click') await page.getByRole('button', { name: 'Connect and continue' }).click();
-  else await key.press('Enter');
+  await expect(page.locator('.web-search-control__trigger')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Connect Tavily', exact: true })).toHaveCount(0);
   await expect(draft).toHaveValue('Keep this unsent draft');
-  await expect.poll(() => page.evaluate(() => window.actionCalls.filter(c => c.command === 'save_search_backend').length)).toBe(1);
-  expect(await page.evaluate(() => window.actionCalls.filter(c => /^(create_conversation|start_model_run|start_conversation_model_run)$/.test(c.command)).length)).toBe(0);
+  expect(await page.evaluate(() => window.actionCalls.filter(c => /^(save_search_backend|create_conversation|start_model_run|start_conversation_model_run)$/.test(c.command)))).toEqual([]);
 });
 
 test('manual removal of a referenced model asks for confirmation before deleting', async ({ page }) => {
@@ -247,16 +234,15 @@ test('manual removal of a referenced model asks for confirmation before deleting
   expect(await page.evaluate(() => window.actionCalls.find(c => c.command === 'remove_manual_provider_model').args.confirmAffectedConversations)).toBe(true);
 });
 
-test('returning from search settings refreshes the retained chat search configuration', async ({ page }) => {
-  await setup(page); await navigate(page, 'Settings');
+test('returning from offline search settings preserves the retained chat draft', async ({ page }) => {
+  await setup(page); const draft = page.getByRole('textbox', { name: 'Ask agent...' });
+  await draft.fill('Retained offline draft'); await navigate(page, 'Settings');
   await page.locator('.settings-navigation-card').filter({ hasText: 'Web & Search' }).getByRole('button', { name: 'Open', exact: true }).click();
-  await page.locator('.web-search-master-card input').click();
-  await expect(page.locator('.web-search-master-card input')).toBeChecked();
-  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByText('离线模式已停用联网检索。')).toBeVisible();
+  await page.getByRole('button', { name: '返回', exact: true }).click();
   await page.getByRole('button', { name: 'Return to chat' }).click();
-  await page.locator('.web-search-control__trigger').click();
-  await expect(page.getByRole('menuitemradio', { name: 'Automatic', exact: false })).toBeEnabled();
-  expect(await page.evaluate(() => window.actionCalls.filter(c => c.command === 'get_app_settings').length)).toBeGreaterThan(3);
+  await expect(draft).toHaveValue('Retained offline draft');
+  await expect(page.locator('.web-search-control__trigger')).toHaveCount(0);
 });
 
 test('routing blur and preset change preserve both intended fields', async ({ page }) => {
@@ -278,32 +264,25 @@ test('trash admits a single pending mutation and disables conflicting actions', 
   await expect(page.getByRole('button', { name: 'Delete permanently', exact: false })).toBeDisabled();
 });
 
-test('search settings load failure can retry in place', async ({ page }) => {
+test('offline search notice needs no remote settings load', async ({ page }) => {
   await setup(page, 'load-search'); await navigate(page, 'Settings');
   await page.evaluate(() => { window.failSettings = true; });
   await page.locator('.settings-navigation-card').filter({ hasText: 'Web & Search' }).getByRole('button', { name: 'Open', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
-  await page.evaluate(() => { window.failSettings = false; });
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(page.locator('.web-search-master-card input')).toBeEnabled();
+  await expect(page.getByText('离线模式已停用联网检索。')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
 });
 
-test('native search diagnosis refreshes a capability persisted before failure', async ({ page }) => {
+test('offline model catalog disables native search diagnosis', async ({ page }) => {
   await setup(page, 'native'); const dialog = await catalog(page);
-  await expect(dialog.getByText('Native search available', { exact: true })).toBeVisible();
-  await dialog.getByRole('button', { name: 'Diagnose native search' }).click();
-  await expect(dialog.getByText('Current protocol unsupported', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Diagnose native search' })).toBeDisabled();
+  expect(await page.evaluate(() => window.actionCalls.filter(c => c.command === 'probe_native_web_search'))).toEqual([]);
 });
 
-test('a failed search-mode write for A cannot roll back the selected chat B', async ({ page }) => {
+test('switching historical chats retains offline search restrictions', async ({ page }) => {
   await setup(page, 'scope');
-  await page.getByRole('button', { name: 'Search chat A', exact: true }).click();
-  await page.locator('.web-search-control__trigger').click();
-  await page.getByRole('menuitemradio', { name: 'Automatic for this conversation', exact: true }).click();
-  await page.getByRole('button', { name: 'Search chat B', exact: true }).click();
-  await page.evaluate(() => window.failSearchMode());
-  await page.locator('.web-search-control__trigger').click();
-  await expect(page.getByRole('menuitemradio', { name: 'Off for this conversation' })).toHaveAttribute('aria-checked', 'true');
-  await expect(page.locator('.web-search-menu__error')).toHaveCount(0);
+  for (const id of ['A', 'B']) {
+    await page.getByRole('button', { name: `Search chat ${id}`, exact: true }).click();
+    await expect(page.locator('.web-search-control__trigger')).toHaveCount(0);
+  }
+  expect(await page.evaluate(() => window.actionCalls.filter(c => c.command === 'update_conversation_web_search'))).toEqual([]);
 });

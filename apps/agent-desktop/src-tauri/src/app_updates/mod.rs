@@ -193,6 +193,7 @@ pub async fn check_app_update(
     service: State<'_, AppUpdateService>,
     channel: Channel,
 ) -> Result<UpdateView, String> {
+    crate::offline::deny_network()?;
     // An independent release signing identity must be configured before any network access.
     if app
         .config()
@@ -308,6 +309,7 @@ pub async fn download_app_update(
     service: State<'_, AppUpdateService>,
     update_id: String,
 ) -> Result<UpdateView, String> {
+    crate::offline::deny_network()?;
     let update = {
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
         cache.check_identity(&update_id)?;
@@ -369,6 +371,7 @@ pub async fn install_app_update(
     update_id: String,
     draft: Option<draft::RestartDraft>,
 ) -> Result<(), String> {
+    crate::offline::deny_network()?;
     let (update, bytes) = {
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
         cache.check_identity(&update_id)?;

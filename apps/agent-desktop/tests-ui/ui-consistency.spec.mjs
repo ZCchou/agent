@@ -172,10 +172,8 @@ for (const locale of ["en", "zh-CN"]) test(`long content remains contained with 
   await page.screenshot({ path: `../../.artifacts/ui-consistency-2026-10-24/long-work-${locale}.png` });
   await page.getByRole("navigation").getByRole("button", { name: zh ? "设置" : "Settings", exact: true }).click();
   await page.getByRole("button", { name: zh ? "打开" : "Open", exact: true }).click();
-  await expect(page.locator(".web-search-preferences")).toBeVisible();
-  await contained(`${locale}: web settings`);
-  await page.getByRole("button", { name: zh ? "添加搜索服务" : "Add search service", exact: true }).click();
-  await expect(page.locator(".web-search-backend-form")).toBeVisible();
-  await contained(`${locale}: search form`);
+  await expect(page.getByText("离线模式已停用联网检索。")).toBeVisible();
+  await expect(page.locator(".web-search-backend-form")).toHaveCount(0);
+  await contained(`${locale}: offline search settings`);
   await page.screenshot({ path: `../../.artifacts/ui-consistency-2026-10-24/search-settings-${locale}.png` });
 });

@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -365,6 +365,18 @@ class CoreRepository:
                     raise
                 finally:
                     connection.execute("PRAGMA foreign_keys = ON")
+                version = 24
+            if version == 24:
+                from agent.migrations.v25_local_models import migrate as migrate_local_models
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_local_models(connection)
+                    connection.execute("UPDATE schema_info SET version = 25")
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
             self._create_indexes(connection)
             self._reconcile_terminal_web_operations(connection)
             self._validate_database(connection)
@@ -2412,7 +2424,12 @@ class CoreRepository:
                  'waiting_budget','generating','waiting_tool')""").fetchone()[0]
             tools = connection.execute("""SELECT COUNT(*) FROM tool_operations WHERE status IN
                 ('requested','validating','reviewing','waiting_user','executing')""").fetchone()[0]
-        return {"active_runs": runs, "active_tools": tools}
+            local_jobs = connection.execute("""SELECT COUNT(*) FROM local_model_jobs
+                WHERE status IN ('queued','running')""").fetchone()[0]
+            rag_jobs = connection.execute("""SELECT COUNT(*) FROM rag_jobs
+                WHERE status IN ('queued','running')""").fetchone()[0]
+        return {"active_runs": runs, "active_tools": tools,
+                "active_local_model_jobs": local_jobs, "active_rag_jobs": rag_jobs}
 
     def flush_for_app_update(self) -> None:
         with self._connect() as connection:

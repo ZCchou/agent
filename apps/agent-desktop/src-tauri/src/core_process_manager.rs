@@ -976,12 +976,12 @@ mod tests {
         let mut sequences = HashMap::new();
         assert!(accept_run_event(
             &mut sequences,
-            &json!({"v":17,"event":{
+            &json!({"v":18,"event":{
             "run_id":"r1","sequence":1,"event_type":"run.chunk","timestamp":"now","data":{}}})
         ));
         assert!(!accept_run_event(
             &mut sequences,
-            &json!({"v":17,"event":{
+            &json!({"v":18,"event":{
             "run_id":"r1","sequence":1,"event_type":"run.chunk","timestamp":"now","data":{}}})
         ));
         assert!(!accept_run_event(
@@ -991,7 +991,7 @@ mod tests {
         ));
         assert!(accept_run_event(
             &mut sequences,
-            &json!({"v":17,"event":{
+            &json!({"v":18,"event":{
             "run_id":"r2","sequence":1,"event_type":"run.failed","timestamp":"now","data":{}}})
         ));
         assert!(!accept_run_event(
@@ -1001,7 +1001,7 @@ mod tests {
         ));
         assert!(accept_run_event(
             &mut sequences,
-            &json!({"v":17,"event":{
+            &json!({"v":18,"event":{
             "run_id":"r4","sequence":1,"event_type":"run.invocation_dispatched",
             "timestamp":"now","data":{"spec_id":"spec-1"}}})
         ));
@@ -1014,7 +1014,7 @@ mod tests {
             .iter()
             .enumerate()
         {
-            let response = json!({"v":17,"event":{"run_id":"cap-run","sequence":index+1,
+            let response = json!({"v":18,"event":{"run_id":"cap-run","sequence":index+1,
                 "event_type":event_type,"timestamp":"now","data":{"request_id":"observation"}}});
             assert!(accept_run_event(&mut sequences, &response));
             assert!(!accept_run_event(&mut sequences, &response));
@@ -1023,14 +1023,14 @@ mod tests {
 
     #[test]
     fn terminal_events_identify_sequence_state_to_release() {
-        let response = json!({"v":17,"event":{
+        let response = json!({"v":18,"event":{
             "run_id":"r1","sequence":3,"event_type":"run.completed",
             "timestamp":"now","data":{}
         }});
 
         assert_eq!(terminal_event_run_id(&response), Some("r1"));
         assert_eq!(
-            terminal_event_run_id(&json!({"v":17,"event":{
+            terminal_event_run_id(&json!({"v":18,"event":{
                 "run_id":"r1","sequence":2,"event_type":"run.chunk",
                 "timestamp":"now","data":{}
             }})),

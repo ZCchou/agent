@@ -2,20 +2,20 @@ import { invoke } from "@tauri-apps/api/core";
 import type { WebSearchRepository, SearchBackendInput } from "../repositories/WebSearchRepository";
 import type { AppSettings, WebSearchSettings } from "../../types/settings";
 import type { Conversation, Project, WebOperation, WebSource } from "../../types/domain";
-import { enqueueSettingsWrite, patchWebSearch } from "./settingsPersistence";
+import { enqueueSettingsWrite, invokeSettingsMutation, patchWebSearch } from "./settingsPersistence";
 
 export class TauriWebSearchRepository implements WebSearchRepository {
   updateSettings(settings: Partial<WebSearchSettings>): Promise<AppSettings> {
     return patchWebSearch(settings);
   }
   saveBackend(input: SearchBackendInput): Promise<AppSettings> {
-    return enqueueSettingsWrite(() => invoke("save_search_backend", { backend: {
+    return enqueueSettingsWrite(() => invokeSettingsMutation("save_search_backend", { backend: {
       id: input.id, name: input.name, kind: input.kind, base_url: input.baseUrl,
       enabled: input.enabled, api_key: input.apiKey ?? null,
     } }));
   }
   deleteBackend(backendId: string): Promise<AppSettings> {
-    return enqueueSettingsWrite(() => invoke("delete_search_backend", { backendId }));
+    return enqueueSettingsWrite(() => invokeSettingsMutation("delete_search_backend", { backendId }));
   }
   testBackend(backendId: string): Promise<{ available: boolean; message: string; tested_at: string }> {
     return enqueueSettingsWrite(() => invoke("test_search_backend", { backendId }));
@@ -36,6 +36,6 @@ export class TauriWebSearchRepository implements WebSearchRepository {
     return (await invoke<{ source: WebSource }>("preview_web_source", { runId, sourceId })).source;
   }
   probeNative(providerId: string, modelId: string): Promise<AppSettings> {
-    return invoke("probe_native_web_search", { providerId, modelId });
+    return invokeSettingsMutation("probe_native_web_search", { providerId, modelId });
   }
 }

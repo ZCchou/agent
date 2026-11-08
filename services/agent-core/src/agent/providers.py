@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
@@ -24,6 +25,29 @@ from agent.web_search.native_adapters import (
     stream_anthropic_web_search,
 )
 from agent.execution.capabilities import normalize_capability_error_code
+
+
+@asynccontextmanager
+async def closing_provider_stream(stream):
+    """Finish transport cleanup even if the consuming task is cancelled again."""
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            cleanup = asyncio.ensure_future(close())
+            cancellation = None
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as error:
+                    cancellation = error
+            if cancellation is not None:
+                try:
+                    cleanup.result()
+                finally:
+                    raise cancellation
+            cleanup.result()
 
 
 @dataclass(frozen=True)
@@ -278,8 +302,9 @@ class ModelProvider:
         self, model_id: str, messages: list[dict[str, Any]], *, tools: bool,
         options: GenerationOptions | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        async for text in self.stream(model_id, messages):
-            yield ProviderEvent("text_delta", text=text)
+        async with closing_provider_stream(self.stream(model_id, messages)) as provider_stream:
+            async for text in provider_stream:
+                yield ProviderEvent("text_delta", text=text)
 
 
 class FakeModelProvider(ModelProvider):
@@ -440,8 +465,9 @@ class FakeModelProvider(ModelProvider):
                 },
             ))
             return
-        async for text in self.stream(model_id, messages):
-            yield ProviderEvent("text_delta", text=text)
+        async with closing_provider_stream(self.stream(model_id, messages)) as provider_stream:
+            async for text in provider_stream:
+                yield ProviderEvent("text_delta", text=text)
 
 
 class OllamaProvider(ModelProvider):
@@ -663,7 +689,7 @@ class OpenAICompatibleProvider(ModelProvider):
             if not self.profile.api_key:
                 raise ProviderError("authentication_failed", "Provider credentials are required.")
             try:
-                async for raw in stream_anthropic_web_search(
+                async with closing_provider_stream(stream_anthropic_web_search(
                     endpoint_base_url=self.profile.native_search_endpoint,
                     api_key=self.profile.api_key,
                     model_id=model_id,
@@ -676,30 +702,32 @@ class OpenAICompatibleProvider(ModelProvider):
                         _anthropic_function_tools(options.allowed_tools) if tools else []
                     ),
                     enable_web_search=True,
-                ):
-                    tool_call = None
-                    raw_tool_call = raw.get("tool_call")
-                    if isinstance(raw_tool_call, dict):
-                        try:
-                            candidate = ToolCall(
-                                str(raw_tool_call.get("id") or "anthropic-tool"),
-                                _internal_tool_name(raw_tool_call.get("name")),
-                                raw_tool_call.get("arguments"),
-                            )
-                            tool_call = validate_tool_call(candidate)
-                        except (CoreDataError, TypeError) as error:
-                            raise ProviderError(
-                                "model_tool_protocol_failed",
-                                "Model returned an invalid file-tool call.",
-                            ) from error
-                    yield ProviderEvent(
-                        kind=raw["kind"],
-                        text=raw.get("text", ""),
-                        tool_call=tool_call,
-                        usage=raw.get("usage"),
-                        finish_reason=raw.get("finish_reason"),
-                        web_search=raw.get("web_search"),
-                    )
+                    local_strict=self.profile.local_strict,
+                )) as provider_stream:
+                    async for raw in provider_stream:
+                        tool_call = None
+                        raw_tool_call = raw.get("tool_call")
+                        if isinstance(raw_tool_call, dict):
+                            try:
+                                candidate = ToolCall(
+                                    str(raw_tool_call.get("id") or "anthropic-tool"),
+                                    _internal_tool_name(raw_tool_call.get("name")),
+                                    raw_tool_call.get("arguments"),
+                                )
+                                tool_call = validate_tool_call(candidate)
+                            except (CoreDataError, TypeError) as error:
+                                raise ProviderError(
+                                    "model_tool_protocol_failed",
+                                    "Model returned an invalid file-tool call.",
+                                ) from error
+                        yield ProviderEvent(
+                            kind=raw["kind"],
+                            text=raw.get("text", ""),
+                            tool_call=tool_call,
+                            usage=raw.get("usage"),
+                            finish_reason=raw.get("finish_reason"),
+                            web_search=raw.get("web_search"),
+                        )
             except NativeAdapterFailure as error:
                 raise ProviderError(
                     error.code, error.message, error.retry_after,
@@ -716,16 +744,17 @@ class OpenAICompatibleProvider(ModelProvider):
                 and options.native_transport_adapter == "kimi_formula_web_search":
             if not self.profile.api_key:
                 raise ProviderError("authentication_failed", "Provider credentials are required.")
-            async for event in self._stream_kimi_formula_search(
+            async with closing_provider_stream(self._stream_kimi_formula_search(
                 model_id, messages, options,
-            ):
-                yield event
+            )) as provider_stream:
+                async for event in provider_stream:
+                    yield event
             return
         if self.profile.primary_protocol == "anthropic_messages":
             if not self.profile.api_key:
                 raise ProviderError("authentication_failed", "Provider credentials are required.")
             try:
-                async for raw in stream_anthropic_web_search(
+                async with closing_provider_stream(stream_anthropic_web_search(
                     endpoint_base_url=self.profile.base_url,
                     api_key=self.profile.api_key,
                     model_id=model_id,
@@ -736,26 +765,28 @@ class OpenAICompatibleProvider(ModelProvider):
                         _anthropic_function_tools(options.allowed_tools) if tools and options else []
                     ),
                     enable_web_search=False,
-                ):
-                    raw_tool_call = raw.get("tool_call")
-                    tool_call = None
-                    if isinstance(raw_tool_call, dict):
-                        try:
-                            candidate = ToolCall(
-                                str(raw_tool_call.get("id") or "anthropic-tool"),
-                                _internal_tool_name(raw_tool_call.get("name")),
-                                raw_tool_call.get("arguments"),
-                            )
-                            tool_call = validate_tool_call(candidate)
-                        except (CoreDataError, TypeError) as error:
-                            raise ProviderError(
-                                "model_tool_protocol_failed",
-                                "Model returned an invalid file-tool call.",
-                            ) from error
-                    yield ProviderEvent(
-                        kind=raw["kind"], text=raw.get("text", ""), tool_call=tool_call,
-                        usage=raw.get("usage"), finish_reason=raw.get("finish_reason"),
-                    )
+                    local_strict=self.profile.local_strict,
+                )) as provider_stream:
+                    async for raw in provider_stream:
+                        raw_tool_call = raw.get("tool_call")
+                        tool_call = None
+                        if isinstance(raw_tool_call, dict):
+                            try:
+                                candidate = ToolCall(
+                                    str(raw_tool_call.get("id") or "anthropic-tool"),
+                                    _internal_tool_name(raw_tool_call.get("name")),
+                                    raw_tool_call.get("arguments"),
+                                )
+                                tool_call = validate_tool_call(candidate)
+                            except (CoreDataError, TypeError) as error:
+                                raise ProviderError(
+                                    "model_tool_protocol_failed",
+                                    "Model returned an invalid file-tool call.",
+                                ) from error
+                        yield ProviderEvent(
+                            kind=raw["kind"], text=raw.get("text", ""), tool_call=tool_call,
+                            usage=raw.get("usage"), finish_reason=raw.get("finish_reason"),
+                        )
             except NativeAdapterFailure as error:
                 raise ProviderError(
                     error.code, error.message, error.retry_after,
@@ -770,18 +801,20 @@ class OpenAICompatibleProvider(ModelProvider):
             return
         if options and options.native_search_enabled \
                 and options.native_transport_adapter == "openai_responses_web_search":
-            async for event in self._stream_responses(
+            async with closing_provider_stream(self._stream_responses(
                 model_id, messages, options, include_web_search=True,
                 include_function_tools=tools,
-            ):
-                yield event
+            )) as provider_stream:
+                async for event in provider_stream:
+                    yield event
             return
         if self.profile.primary_protocol == "openai_responses":
-            async for event in self._stream_responses(
+            async with closing_provider_stream(self._stream_responses(
                 model_id, messages, options or GenerationOptions(), include_web_search=False,
                 include_function_tools=tools,
-            ):
-                yield event
+            )) as provider_stream:
+                async for event in provider_stream:
+                    yield event
             return
         calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
@@ -792,6 +825,8 @@ class OpenAICompatibleProvider(ModelProvider):
             payload: dict[str, Any] = {
                 "model": model_id, "messages": _provider_messages(messages), "stream": True,
             }
+            if self.profile.id.startswith("managed:"):
+                payload["stream_options"] = {"include_usage": True}
             if options and options.max_output_tokens:
                 payload["max_tokens"] = options.max_output_tokens
             if options and options.response_format == "json_object":

@@ -1,3 +1,4 @@
+import { isLocalProvider } from "../../services/modelSelection";
 import { Archive, BriefcaseBusiness, Folder, FolderKey, MoreHorizontal, Pencil, Pin, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -13,20 +14,13 @@ import type { AppSettings } from "../../types/settings";
 import { useResourceActions } from "../resources/ResourceActionsProvider";
 import { useScopedAction } from "../chat/useScopedAction";
 
-function isLocalProvider(provider: AppSettings["models"]["providers"][number]) {
-  const address = provider.resolved_api_base_url ?? provider.entered_base_url;
-  try {
-    const host = new URL(address).hostname;
-    return provider.kind === "fake" || provider.kind === "ollama" || ["localhost", "127.0.0.1", "::1"].includes(host);
-  } catch { return provider.kind === "fake"; }
-}
 
 export function ProjectsPage() {
   const { t } = useTranslation("common");
   const resourceActions = useResourceActions();
   const {
     projects, conversations, workspaceLoading, workspaceError, refreshWorkspace,
-    viewingProjectId, openProject, showProjects, openConversation, startNewWork,
+    viewingProjectId, setCurrentPage, openProject, showProjects, openConversation, startNewWork,
     newProjectRequested, consumeNewProjectRequest,
   } = useApp();
   const [open, setOpen] = useState(false);
@@ -137,7 +131,7 @@ export function ProjectsPage() {
   async function changeModelScopePolicy(policy: "inherit_global" | "restricted") {
     if (!selected || !appSettings) return;
     const currentlyAllowed = appSettings.models.providers.flatMap((provider) =>
-      provider.enabled ? provider.models.filter((model) => model.enabled && model.status !== "unavailable" && model.capabilities.text !== "no" && (
+      provider.enabled ? provider.models.filter((model) => model.enabled && (model.status !== "unavailable" || provider.id.startsWith("managed:")) && model.capabilities.text !== "no" && (
         policy !== "restricted" || selected.model_access_policy !== "local_only" || isLocalProvider(provider)
       )).map((model) => ({ provider_profile_id: provider.id, model_id: model.id })) : [],
     );
@@ -253,7 +247,7 @@ export function ProjectsPage() {
             </label>
             <label>{t("settings.webSearch.projectAccess")}
               <select value={selected.web_access_policy ?? "disabled"}
-                disabled={action.busy}
+                disabled title="离线模式已停用联网检索"
                 onChange={(event) => void changeWebAccess(event.target.value as "disabled" | "allow_search")}>
                 <option value="disabled">{t("settings.webSearch.projectOff")}</option>
                 <option value="allow_search">{t("settings.webSearch.projectOn")}</option>
@@ -263,13 +257,13 @@ export function ProjectsPage() {
             {modelScope?.policy === "restricted" && appSettings ? <div className="project-model-scope">
               <strong>{t("models.allowedInProject")}</strong>
               {appSettings.models.providers.flatMap((provider) => provider.enabled ? provider.models
-                .filter((model) => model.enabled && model.status !== "unavailable" && model.capabilities.text !== "no" && (selected.model_access_policy !== "local_only" || isLocalProvider(provider)))
+                .filter((model) => model.enabled && (model.status !== "unavailable" || provider.id.startsWith("managed:")) && model.capabilities.text !== "no" && (selected.model_access_policy !== "local_only" || isLocalProvider(provider)))
                 .map((model) => {
                   const checked = modelScope.models.some((item) => item.provider_profile_id === provider.id && item.model_id === model.id);
-                  return <label key={`${provider.id}:${model.id}`}><input type="checkbox" checked={checked} disabled={action.busy || (checked && modelScope.models.length === 1)}
+                  return <label key={`${provider.id}:${model.id}`}><input type="checkbox" checked={checked} disabled={action.busy || model.status === "unavailable" || (checked && modelScope.models.length === 1)}
                     title={checked && modelScope.models.length === 1 ? t("buttonAudit.oneModelRequired") : undefined}
                     onChange={(event) => void toggleProjectModel({ provider_profile_id: provider.id, model_id: model.id }, event.target.checked)} />
-                    <span>{provider.name} / {model.id}</span></label>;
+                    <span>{provider.name} / {model.id}{model.status === "unavailable" ? " · 未加载" : ""}</span>{model.status === "unavailable" && provider.id.startsWith("managed:") && <button type="button" onClick={() => setCurrentPage("models")}>加载模型</button>}</label>;
                 }) : [])}
             </div> : null}
             <div className="project-grant">

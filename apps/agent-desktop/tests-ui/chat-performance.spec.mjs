@@ -268,12 +268,12 @@ test("a visible mid-history message stays anchored when delayed media above it g
   for (const [index, message] of chat.messages.entries()) {
     message.content = `History row ${index}.\n\n${"Existing conversation text. ".repeat(10)}`;
   }
-  chat.messages[7].content = "Earlier illustration\n\n![Deferred history illustration](https://images.example/late-history.svg)";
+  chat.messages[7].content = "Earlier illustration\n\n![Deferred history illustration](https://asset.localhost/late-history.svg)";
   chat.messages[20].content = "Reader anchor: middle of history.";
   let delayedImage;
   let notifyImageRequested;
   const imageRequested = new Promise((resolve) => { notifyImageRequested = resolve; });
-  await page.route("https://images.example/late-history.svg", (route) => {
+  await page.route("https://asset.localhost/late-history.svg", (route) => {
     delayedImage = route;
     notifyImageRequested();
   });
@@ -286,7 +286,8 @@ test("a visible mid-history message stays anchored when delayed media above it g
   await page.getByRole("button", { name: "Performance history", exact: true }).click();
   // Start the real lazy image request while it is visible, but hold its bytes
   // until the reader has moved below it. No product DOM/style is patched.
-  await page.getByRole("button", { name: "Allow all remote images" }).click();
+
+  await page.getByRole("img", { name: "Deferred history illustration" }).scrollIntoViewIfNeeded();
   await imageRequested;
   await page.waitForFunction(() => window.__chatPerf.resume);
   await page.evaluate(() => window.__chatPerf.resume({ run: {

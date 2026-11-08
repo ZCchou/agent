@@ -437,18 +437,45 @@ def test_withdrawing_unbound_version_preserves_project_generation(tmp_path):
     asyncio.run(exercise())
 
 
-def test_timed_out_document_import_cannot_commit_after_native_thread_returns(tmp_path, monkeypatch):
-    import time
+def test_batch_import_gives_each_parser_its_budget_after_queue_wait(tmp_path, monkeypatch):
+    from agent.document_parser import ParserService
+    from agent.rag.documents import parse_document
     import agent.rag.service as service_module
-    monkeypatch.setattr(service_module, 'DOCUMENT_PARSE_TIMEOUT', .01)
+    monkeypatch.setattr(service_module, 'DOCUMENT_PARSE_TIMEOUT', .3)
     async def exercise():
         service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines())
+        # Keep the real parser semaphore/timeout; replace only subprocess work.
+        assert isinstance(service.parser, ParserService)
+        service.parser.timeout = .3
+        async def delayed_execute(original, stage, request_id):
+            await asyncio.sleep(.2)
+            return parse_document(original)
+        monkeypatch.setattr(service.parser, '_execute', delayed_execute)
         library = (await service.handle('library.create', {'name': '法规', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
-        original_extract = service._extract_original
-        def slow_extract(path):
-            time.sleep(.08)
-            return original_extract(path)
-        monkeypatch.setattr(service, '_extract_original', slow_extract)
+        paths = [tmp_path / 'first.txt', tmp_path / 'second.txt']
+        for index, path in enumerate(paths):
+            path.write_text(f'25.1309 Safety requirement {index}', encoding='utf-8')
+        try:
+            result = await service.handle('document.import', {'library_id': library, 'paths': [str(path) for path in paths]})
+            jobs = [await wait_job(service, {'job': job}) for job in result['jobs']]
+            assert [job['status'] for job in jobs] == ['completed', 'completed'], jobs
+            documents = service.repository.list_libraries()[0]['documents']
+            assert {document['title'] for document in documents} == {'first', 'second'}
+            assert len(documents) == 2
+            assert list(service.parser.staging.iterdir()) == []
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_timed_out_document_import_cannot_publish_after_worker_timeout(tmp_path):
+    import sys
+    from agent.document_parser import ParserService
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        parser = ParserService(tmp_path / 'rag', command=[sys.executable, '-c', 'import time;time.sleep(30)'], timeout=.1)
+        service = RagService(core, Engines(), parser=parser)
+        library = (await service.handle('library.create', {'name': '法规', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
         path = tmp_path / 'slow.txt'
         path.write_text('25.1309 安全性', encoding='utf-8')
         result = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))
@@ -457,7 +484,102 @@ def test_timed_out_document_import_cannot_commit_after_native_thread_returns(tmp
         await asyncio.sleep(.12)
         assert service.repository.list_libraries()[0]['documents'] == []
         assert service.repository.job(result['id'])['status'] == 'failed'
+        assert list(parser.staging.iterdir()) == []
         await service.close()
+    asyncio.run(exercise())
+
+
+def test_original_copy_timeout_cannot_publish_a_late_result(tmp_path, monkeypatch):
+    import time
+    import agent.rag.service as service_module
+    monkeypatch.setattr(service_module, 'DOCUMENT_PARSE_TIMEOUT', .01)
+
+    async def exercise():
+        service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines())
+        library = (await service.handle('library.create', {'name': 'Library', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+        extract = service._extract_original
+        def delayed_extract(path):
+            time.sleep(.08)
+            return extract(path)
+        monkeypatch.setattr(service, '_extract_original', delayed_extract)
+        path = tmp_path / 'slow-copy.txt'
+        path.write_text('25.1309 Safety', encoding='utf-8')
+        try:
+            job = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))
+            assert job['status'] == 'failed'
+            assert 'time limit' in job['error']
+            await asyncio.sleep(.12)
+            assert service.repository.list_libraries()[0]['documents'] == []
+            assert service.repository.job(job['id'])['status'] == 'failed'
+            assert list(service.parser.staging.iterdir()) == []
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_cancelled_import_rejects_result_from_parser_that_suppresses_cancel(tmp_path):
+    class DelayedParser:
+        def __init__(self):
+            self.entered = asyncio.Event()
+
+        async def parse(self, path):
+            from agent.rag.documents import parse_document
+            self.entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return parse_document(path)
+
+        async def close(self):
+            pass
+
+    async def exercise():
+        parser = DelayedParser()
+        service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines(), parser=parser)
+        library = (await service.handle('library.create', {'name': '法规', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+        path = tmp_path / 'standard.txt'
+        path.write_text('25.1309 Safety', encoding='utf-8')
+        job = (await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))['job']
+        await parser.entered.wait()
+        await service.handle('job.cancel', {'job_id': job['id']})
+        await asyncio.sleep(.05)
+        assert service.repository.job(job['id'])['status'] == 'cancelled'
+        assert service.repository.list_libraries()[0]['documents'] == []
+        await service.close()
+    asyncio.run(exercise())
+
+
+def test_cancelled_paste_rejects_result_from_parser_that_suppresses_cancel(tmp_path):
+    class DelayedParser:
+        def __init__(self):
+            self.entered = asyncio.Event()
+
+        async def parse(self, path):
+            from agent.rag.documents import parse_document
+            self.entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return parse_document(path)
+
+        async def close(self):
+            pass
+
+    async def exercise():
+        parser = DelayedParser()
+        service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines(), parser=parser)
+        library = (await service.handle('library.create', {'name': '法规', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+        task = asyncio.create_task(service.handle('document.paste', {
+            'library_id': library, 'title': 'Cancelled', 'content': '25.1309 Safety'}))
+        await parser.entered.wait()
+        task.cancel()
+        results = await asyncio.gather(task, return_exceptions=True)
+        try:
+            assert service.repository.list_libraries()[0]['documents'] == []
+            assert isinstance(results[0], asyncio.CancelledError)
+            assert service.repository.jobs() == []
+        finally:
+            await service.close()
     asyncio.run(exercise())
 
 

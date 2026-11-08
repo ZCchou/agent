@@ -22,7 +22,9 @@ mod file_access;
 mod file_search;
 mod file_security;
 mod image_normalizer;
+mod local_model_commands;
 mod logging;
+mod offline;
 mod rag_commands;
 #[cfg(test)]
 mod reliability_contracts;
@@ -67,6 +69,7 @@ pub fn run() {
         .manage(Mutex::new(CoreProcessManager::new()))
         .manage(credentials::CredentialStore)
         .manage(Mutex::new(rag_commands::RagPathGrants::default()))
+        .manage(Mutex::new(local_model_commands::LocalModelGrants::default()))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -352,6 +355,9 @@ pub fn run() {
             app_updates::draft::load_update_draft,
             app_updates::draft::ack_update_draft,
             skill_commands::list_skills,
+            local_model_commands::local_model_request,
+            local_model_commands::local_model_select_path,
+            local_model_commands::local_model_revoke_path,
             rag_commands::rag_request,
             rag_commands::rag_select_paths,
             rag_commands::rag_revoke_paths,

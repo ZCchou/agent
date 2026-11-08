@@ -10,23 +10,30 @@ export function enqueueSettingsWrite<T>(write: () => Promise<T>): Promise<T> {
   return result;
 }
 
+// Mutations may return the persisted snapshot. Consumers need the computed
+// public catalog, including managed models and offline-disabled legacy records.
+export async function invokeSettingsMutation(command: string, args: Record<string, unknown>): Promise<AppSettings> {
+  await invoke(command, args);
+  return invoke<AppSettings>("get_app_settings");
+}
+
 export function patchWebSearch(patch: Partial<WebSearchSettings>): Promise<AppSettings> {
   return enqueueSettingsWrite(async () => {
     const current = await invoke<AppSettings>("get_app_settings");
-    return invoke("update_web_search_settings", { settings: { ...current.web_search, ...patch } });
+    return invokeSettingsMutation("update_web_search_settings", { settings: { ...current.web_search, ...patch } });
   });
 }
 
 export function patchRouting(patch: Partial<RoutingPreferences>): Promise<AppSettings> {
   return enqueueSettingsWrite(async () => {
     const current = await invoke<AppSettings>("get_app_settings");
-    return invoke("update_routing_preferences", { routing: { ...current.routing, ...patch } });
+    return invokeSettingsMutation("update_routing_preferences", { routing: { ...current.routing, ...patch } });
   });
 }
 
 export function patchSidebarCollapse(preferences: SidebarPreferences): Promise<AppSettings> {
   return enqueueSettingsWrite(async () => {
     const current = await invoke<AppSettings>("get_app_settings");
-    return invoke("update_sidebar_preferences", { preferences: { ...preferences, width_px: current.sidebar.width_px } });
+    return invokeSettingsMutation("update_sidebar_preferences", { preferences: { ...preferences, width_px: current.sidebar.width_px } });
   });
 }

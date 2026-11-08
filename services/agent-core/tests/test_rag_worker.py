@@ -16,6 +16,37 @@ def test_unknown_worker_action_rejected():
         dispatch({"action": "execute", "code": "print(1)"}, {})
 
 
+def test_onnx_cuda_preloads_dependencies_before_provider_discovery(monkeypatch):
+    from types import SimpleNamespace
+    from agent.rag.worker import _engine
+    calls = []
+    monkeypatch.setattr("agent.rag.worker.importlib.util.find_spec", lambda name: object())
+    ort = SimpleNamespace(
+        preload_dlls=lambda **kwargs: calls.append(("preload", kwargs)),
+        get_available_providers=lambda: calls.append(("providers", {})) or ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    assert _engine("onnx", "cuda")["provider"] == "CUDAExecutionProvider"
+    assert calls == [("preload", {"cuda": True, "cudnn": True, "msvc": True}), ("providers", {})]
+
+
+def test_onnx_session_rejects_cuda_initialization_fallback(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import agent.rag.worker as worker
+    class Session:
+        def get_providers(self):
+            return ["CPUExecutionProvider"]
+        def disable_fallback(self):
+            pass
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(InferenceSession=lambda *args, **kwargs: Session()))
+    monkeypatch.setattr(worker, "_engine", lambda *args: {})
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(from_pretrained=lambda *args, **kwargs: object())))
+    (tmp_path / "rag-model.json").write_text(json.dumps({"graph": "model.onnx"}))
+    with pytest.raises(RuntimeError, match="CUDAExecutionProvider"):
+        worker._load({"path": str(tmp_path), "profile": "bge-m3", "backend": "onnx", "device": "cuda"}, {})
+
+
 def test_worker_client_exchanges_json_lines_and_closes(tmp_path):
     script = tmp_path / "worker.py"
     script.write_text("import sys,json\nfor line in sys.stdin:\n r=json.loads(line);print(json.dumps({'id':r['id'],'result':{'offline':True}}),flush=True)\n")
@@ -24,6 +55,23 @@ def test_worker_client_exchanges_json_lines_and_closes(tmp_path):
         assert await client.request("probe", {}) == {"offline": True}
         await client.close()
         assert client.process is None
+    asyncio.run(exercise())
+
+
+def test_worker_environment_isolates_native_and_python_search_paths(tmp_path, monkeypatch):
+    script = tmp_path / "environment.py"
+    script.write_text("import sys,json,os\nfor line in sys.stdin:\n r=json.loads(line);print(json.dumps({'id':r['id'],'result':{k:os.environ.get(k) for k in ['PATH','PYTHONPATH','PYTHONHOME','CUDA_PATH']}}),flush=True)\n")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", "") + os.pathsep + "C:/untrusted-dlls")
+    monkeypatch.setenv("PYTHONPATH", "C:/untrusted-python")
+    monkeypatch.setenv("CUDA_PATH", "C:/untrusted-cuda")
+    async def exercise():
+        client = WorkerClient([sys.executable, str(script)])
+        try:
+            result = await client.request("probe", {})
+            assert "untrusted" not in json.dumps(result)
+            assert result["CUDA_PATH"] is None and result["PYTHONHOME"] is None
+        finally:
+            await client.close()
     asyncio.run(exercise())
 
 
@@ -109,12 +157,20 @@ def native_model(root, profile):
     return tokenizer, model
 
 
-@pytest.mark.parametrize("profile", ["qwen3-embedding-0.6b", "qwen3-reranker-0.6b", "bge-m3", "bge-reranker-v2-m3"])
-def test_native_tiny_models_follow_reference_pooling_and_scoring(tmp_path, profile):
+@pytest.mark.parametrize("profile,official_config", [
+    ("qwen3-embedding-0.6b", False), ("qwen3-embedding-0.6b", True),
+    ("qwen3-reranker-0.6b", False), ("bge-m3", False), ("bge-reranker-v2-m3", False),
+])
+def test_native_tiny_models_follow_reference_pooling_and_scoring(tmp_path, profile, official_config):
     import torch
     from agent.rag.model_profiles import QUERY_INSTRUCTION, RERANK_PREFIX, RERANK_SUFFIX
     path = tmp_path / "native"
     tokenizer, model = native_model(path, profile)
+    if official_config:
+        config_path = path / "config.json"
+        config = json.loads(config_path.read_text())
+        config["architectures"] = ["Qwen3ForCausalLM"]
+        config_path.write_text(json.dumps(config))
     params = {"path": str(path), "profile": profile, "backend": "transformers", "device": "cpu", "texts": ["document relevant", "document"], "query": "query"}
     action = "rerank" if "reranker" in profile else "embed"
     actual = dispatch({"action": action, "params": params}, {})
@@ -137,6 +193,15 @@ def test_native_tiny_models_follow_reference_pooling_and_scoring(tmp_path, profi
             expected = hidden[:, -1] if profile.startswith("qwen3") else hidden[:, 0]
             expected = torch.nn.functional.normalize(expected.float(), p=2, dim=1)
     assert torch.allclose(torch.tensor(actual), expected, atol=1e-6)
+    if official_config:
+        params["query"] = False
+        actual_documents = dispatch({"action": "embed", "params": params}, {})
+        inputs = tokenizer(params["texts"], padding=True, return_tensors="pt")
+        with torch.inference_mode():
+            expected_documents = torch.nn.functional.normalize(model(**inputs).last_hidden_state[:, -1].float(), p=2, dim=1)
+        assert torch.allclose(torch.tensor(actual_documents), expected_documents, atol=1e-6)
+        with pytest.raises(ValueError, match="role"):
+            dispatch({"action": "rerank", "params": params}, {})
 
 
 def test_incomplete_native_weights_fail_instead_of_random_initialization(tmp_path):
@@ -172,3 +237,22 @@ def test_worker_response_uses_ascii_json_frames(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert output.isascii()
     assert json.loads(output)["result"]["text"] == "适航审定"
+
+def test_qwen_reranker_computes_only_the_last_position_logits(tmp_path, monkeypatch):
+    path = tmp_path / 'native'
+    profile = 'qwen3-reranker-0.6b'
+    tokenizer, model = native_model(path, profile)
+    original = model.forward
+    calls = []
+    def last_position_forward(*args, **kwargs):
+        calls.append(kwargs.get('logits_to_keep'))
+        assert kwargs.get('logits_to_keep') == 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(model, 'forward', last_position_forward)
+    params = {'path': str(path), 'profile': profile, 'backend': 'transformers',
+              'device': 'cpu', 'texts': ['document relevant', 'document'], 'query': 'query'}
+    cache = {'key': (str(path), profile, 'transformers', 'cpu', None),
+             'loaded': (tokenizer, model, None)}
+    scores = dispatch({'action': 'rerank', 'params': params}, cache)
+    assert calls == [1]
+    assert len(scores) == 2 and all(0 <= score <= 1 for score in scores)

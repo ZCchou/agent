@@ -115,6 +115,30 @@ def test_model_config_profile_mismatch_is_rejected(tmp_path):
     assert not inspection["valid"]
 
 
+@pytest.mark.parametrize("architecture", ["Qwen3ForCausalLM", "Qwen3Model"])
+def test_explicit_qwen_embedding_import_accepts_official_config(tmp_path, architecture):
+    source = model_directory(tmp_path / "source")
+    source.joinpath("config.json").write_text(json.dumps({
+        "model_type": "qwen3", "architectures": [architecture],
+        "hidden_size": 1024, "torch_dtype": "bfloat16", "tie_word_embeddings": True,
+    }))
+    header = json.dumps({"embed_tokens.weight": {
+        "dtype": "BF16", "shape": [1], "data_offsets": [0, 2],
+    }}).encode()
+    source.joinpath("model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + b"\0\0")
+    store = ModelStore(tmp_path / "data")
+    record = asyncio.run(store.import_model(source, "qwen3-embedding-0.6b"))
+    assert record["role"] == "embedding"
+    assert record["dimension"] == 1024
+    assert store.inspect(store.root / record["id"], "qwen3-embedding-0.6b")["valid"]
+    automatic = store.inspect(source)
+    if architecture == "Qwen3ForCausalLM":
+        assert not automatic["valid"]
+        assert "explicit" in " ".join(automatic["errors"]).lower()
+    else:
+        assert automatic["profile"] == "qwen3-embedding-0.6b"
+
+
 def test_retry_import_returns_same_immutable_identity(tmp_path):
     store = ModelStore(tmp_path / "data")
     source = model_directory(tmp_path / "source")
@@ -320,3 +344,66 @@ def test_runtime_status_reuses_hashes_but_new_worker_admission_rehashes(tmp_path
     assert len(hashes) == 1
     store._command()
     assert len(hashes) == 2
+
+def test_cpu_worker_is_reused_only_for_the_same_model_identity(tmp_path, monkeypatch):
+    import sys
+    script = tmp_path / 'worker.py'
+    script.write_text("import sys,json,os\nfor line in sys.stdin:\n r=json.loads(line); print(json.dumps({'id':r['id'],'result':{'available':True,'pid':os.getpid()}}),flush=True)\n")
+    store = ModelStore(tmp_path / 'data')
+    first_source = model_directory(tmp_path / 'first')
+    second_source = model_directory(tmp_path / 'second')
+    (second_source / 'tokenizer_config.json').write_text('{"name":"second"}')
+    first = asyncio.run(store.import_model(first_source, 'bge-m3'))
+    second = asyncio.run(store.import_model(second_source, 'bge-m3'))
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+
+    async def exercise():
+        try:
+            first_probe = await store.probe(first['id'])
+            old_worker = store._workers['cpu']
+            old_process = old_worker.process
+            assert (await store.probe(first['id']))['pid'] == first_probe['pid']
+            second_probe = await store.probe(second['id'])
+            assert second_probe['available']
+            assert old_process.returncode is not None
+            assert store._workers['cpu'] is not old_worker
+            assert second_probe['pid'] != first_probe['pid']
+            third_probe = await store.probe(first['id'])
+            assert third_probe['pid'] != second_probe['pid']
+        finally:
+            await store.close()
+    asyncio.run(exercise())
+
+def test_shutdown_during_model_switch_cannot_start_a_replacement_worker(tmp_path, monkeypatch):
+    import sys
+    from agent.rag.worker_client import WorkerClient
+    script = tmp_path / 'worker.py'
+    script.write_text("import sys,json\nfor line in sys.stdin:\n r=json.loads(line);print(json.dumps({'id':r['id'],'result':{'available':True}}),flush=True)\n")
+    store = ModelStore(tmp_path / 'data')
+    first_source = model_directory(tmp_path / 'first')
+    second_source = model_directory(tmp_path / 'second')
+    (second_source / 'tokenizer_config.json').write_text('{"name":"second"}')
+    first = asyncio.run(store.import_model(first_source, 'bge-m3'))
+    second = asyncio.run(store.import_model(second_source, 'bge-m3'))
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = WorkerClient.close
+        async def paused_close(worker):
+            await original(worker)
+            entered.set()
+            await release.wait()
+        try:
+            assert (await store.probe(first['id']))['available']
+            monkeypatch.setattr(WorkerClient, 'close', paused_close)
+            switching = asyncio.create_task(store.probe(second['id']))
+            await asyncio.wait_for(entered.wait(), 2)
+            await store.close()
+            release.set()
+            assert not (await switching)['available']
+            assert store._workers == {} and store._loaded_models == {}
+        finally:
+            release.set()
+            await store.close()
+    asyncio.run(exercise())

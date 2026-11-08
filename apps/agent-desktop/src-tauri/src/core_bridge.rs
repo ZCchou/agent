@@ -12,10 +12,10 @@ use crate::{
     logging::{events as log_events, AppLogger, LogLevel},
 };
 
-pub(crate) const PROTOCOL_VERSION: u64 = 17;
+pub(crate) const PROTOCOL_VERSION: u64 = 18;
 const EXPECTED_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const EXPECTED_SCHEMA_VERSION: u64 = 24;
-const EXPECTED_BUILD_ID: &str = "schema24-rag-v1";
+const EXPECTED_SCHEMA_VERSION: u64 = 25;
+const EXPECTED_BUILD_ID: &str = "schema25-local-runtime-v1";
 const CORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // Automatic start preparation may make two bounded 30-second intent calls
 // before returning a run. Control RPCs must not inherit that longer wait.
@@ -216,6 +216,41 @@ where
         ) -> Result<tauri::async_runtime::Receiver<Value>, String>
         + Send,
 {
+    crate::offline::validate_dispatch(message_type, &params)?;
+    if matches!(
+        message_type,
+        "model.run.start"
+            | "provider.list_models"
+            | "model.tool_capability.probe"
+            | "context.compaction.resume"
+    ) {
+        use tauri::Manager;
+        let provider_id = params
+            .get("provider_profile_id")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                params
+                    .get("target")
+                    .and_then(|target| target.get("provider_profile_id"))
+                    .and_then(Value::as_str)
+            });
+        if let (Some(provider_id), Some(settings)) = (
+            provider_id,
+            app.try_state::<crate::settings::SettingsManager>(),
+        ) {
+            if !provider_id.starts_with("managed:") {
+                let configured = settings.get_settings().map_err(|error| error.to_string())?;
+                let profile = configured
+                    .models
+                    .providers
+                    .iter()
+                    .find(|profile| profile.id == provider_id)
+                    .ok_or("provider_not_found")?;
+                crate::offline::validate_profile(profile)?;
+            }
+        }
+    }
+
     let started_at = Instant::now();
     let request_id = generate_request_id();
     let request =
@@ -521,9 +556,9 @@ mod tests {
         let manager = std::sync::Mutex::new(crate::core_process_manager::CoreProcessManager::new());
         manager.lock().unwrap().reset_process_state();
         let owner = manager.lock().unwrap().request_owner();
-        let response = json!({"v": 17, "id": "current", "type": "ping", "result": {
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 17,
-            "schema_version": 24, "build_id": "schema24-rag-v1"
+        let response = json!({"v": 18, "id": "current", "type": "ping", "result": {
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 18,
+            "schema_version": 25, "build_id": "schema25-local-runtime-v1"
         }});
         assert!(super::finish_core_response(
             &manager,
@@ -572,8 +607,8 @@ mod tests {
     #[test]
     fn current_ipc_ping_rejects_each_incompatible_core_identity() {
         let current = json!({
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 17,
-            "schema_version": 24, "build_id": "schema24-rag-v1"
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 18,
+            "schema_version": 25, "build_id": "schema25-local-runtime-v1"
         });
         for (field, wrong_value) in [
             ("core_version", json!("0.13.0")),
@@ -590,7 +625,7 @@ mod tests {
             manager.lock().unwrap().set_healthy(true);
             let mut identity = current.clone();
             identity[field] = wrong_value;
-            let response = json!({"v": 17, "id": "current", "type": "ping", "result": identity});
+            let response = json!({"v": 18, "id": "current", "type": "ping", "result": identity});
             assert!(
                 super::finish_core_response(
                     &manager,
@@ -612,7 +647,7 @@ mod tests {
 
     #[test]
     fn validates_success_envelope() {
-        let response = json!({"v": 17, "id": "req-1", "type": "ping", "result": {"pid": 42}});
+        let response = json!({"v": 18, "id": "req-1", "type": "ping", "result": {"pid": 42}});
         assert_eq!(
             validate_response(&response, "req-1", "ping").unwrap()["pid"],
             42
@@ -623,8 +658,8 @@ mod tests {
     fn rejects_protocol_type_and_id_mismatches() {
         for response in [
             json!({"v": 1, "id": "req-1", "type": "ping", "result": {}}),
-            json!({"v": 17, "id": "wrong", "type": "ping", "result": {}}),
-            json!({"v": 17, "id": "req-1", "type": "other", "result": {}}),
+            json!({"v": 18, "id": "wrong", "type": "ping", "result": {}}),
+            json!({"v": 18, "id": "req-1", "type": "other", "result": {}}),
         ] {
             assert!(validate_response(&response, "req-1", "ping").is_err());
         }
@@ -632,7 +667,7 @@ mod tests {
 
     #[test]
     fn surfaces_structured_core_error() {
-        let response = json!({"v": 17, "id": "req-1", "type": "ping",
+        let response = json!({"v": 18, "id": "req-1", "type": "ping",
             "error": {"code": "bad_request", "message": "Nope"}});
         assert!(validate_response(&response, "req-1", "ping")
             .unwrap_err()

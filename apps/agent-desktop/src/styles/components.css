@@ -2067,3 +2067,14 @@ label.top-select > svg:last-child {
 
 .terminal-command-card { min-width: 0; }
 .terminal-command-card pre { max-height: 280px; overflow: auto; padding: 8px; border-radius: 7px; background: var(--color-background); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.local-models { display: grid; gap: 16px; margin-bottom: 24px; }
+.local-models .ui-card { padding: 20px; }
+.local-model-config { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 12px 0; }
+.local-model-config label { display: grid; gap: 4px; max-width: 230px; }
+.local-model-config input, .local-model-config select { width: 100%; min-height: 32px; }
+.local-model-record { border-top: 1px solid var(--border-subtle); padding: 16px 0; }
+.local-model-digest, .local-models pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+.local-model-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.local-model-job { padding: 12px 0; }
+.local-model-job progress { margin: 0 12px; }

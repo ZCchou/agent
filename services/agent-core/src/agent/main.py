@@ -72,7 +72,7 @@ async def _run(repository: CoreRepository, logger: logging.Logger) -> None:
     async def emit_event(event: dict[str, Any]) -> None:
         await output.put({"v": PROTOCOL_VERSION, "event": event})
 
-    service = ChatRunService(repository, emit_event, logger=logger)
+    service = ChatRunService(repository, emit_event, logger=logger, offline=True)
     from agent.rag.bootstrap import install_builtin_skill
     install_builtin_skill(service.skills)
 
@@ -140,6 +140,9 @@ async def _run(repository: CoreRepository, logger: logging.Logger) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--document-worker"]:
+        from agent.document_parser.worker import main as document_worker_main
+        raise SystemExit(document_worker_main())
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="strict")
     if hasattr(sys.stdout, "reconfigure"):

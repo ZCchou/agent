@@ -20,12 +20,8 @@ test("Trash is a second-level settings page and only loads after it is opened", 
   await expect(page.getByRole("button", { name: "Open Trash" })).toBeVisible();
   const remoteImages = page.getByRole("checkbox", { name: /Allow loading/ });
   await expect(remoteImages).not.toBeChecked();
-  // This is a persisted controlled switch: React intentionally keeps the old
-  // value until the async Settings write succeeds, so Playwright's `check()`
-  // immediate-state assertion is too strict here.
-  await remoteImages.click();
-  await expect.poll(() => calls.filter((command) => command === "update_remote_image_policy").length).toBe(1);
-  await expect(remoteImages).toBeChecked();
+  await expect(remoteImages).toBeDisabled();
+  expect(calls).not.toContain("update_remote_image_policy");
   expect(calls).not.toContain("list_trash");
 
   await page.getByRole("button", { name: "Open Trash" }).click();

@@ -15,7 +15,7 @@ const emptyModels: RagModelList = { models: [], root: "", runtime: {} };
 export function RagPage() {
   const { t } = useTranslation("common");
   const { projects, viewingProjectId, activeConversation, draft } = useApp();
-  const [tab, setTab] = useState<"libraries" | "models">("libraries");
+  const [tab, setTab] = useState<"libraries" | "models">(() => { const tab = window.sessionStorage.getItem("agent:rag-tab"); window.sessionStorage.removeItem("agent:rag-tab"); return tab === "models" ? "models" : "libraries"; });
   const [models, setModels] = useState<RagModelList>(emptyModels);
   const [libraries, setLibraries] = useState<RagLibrary[]>([]);
   const [jobs, setJobs] = useState<RagJob[]>([]);

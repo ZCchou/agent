@@ -8,10 +8,10 @@ export interface SelectableModel {
 }
 
 export function isLocalProvider(provider: ProviderProfileSettings): boolean {
-  if (provider.kind === "fake" || provider.kind === "ollama") return true;
+  if (provider.id.startsWith("managed:") || provider.kind === "fake") return true;
   try {
     const host = new URL(provider.resolved_api_base_url ?? provider.entered_base_url).hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
   } catch {
     return false;
   }
@@ -21,6 +21,7 @@ export function selectableModels(
   settings: AppSettings,
   project?: Project,
   scope?: ProjectModelScope | null,
+  includeCold = false,
 ): SelectableModel[] {
   const applicableScope = scope && project?.id === scope.project_id ? scope : null;
   const scopeRestricted = project?.model_scope_policy === "restricted" || applicableScope?.policy === "restricted";
@@ -29,7 +30,7 @@ export function selectableModels(
     if (project?.model_access_policy === "local_only" && !isLocalProvider(provider)) return [];
     return provider.models.filter((model) =>
       model.enabled
-      && model.status !== "unavailable"
+      && (model.status !== "unavailable" || (includeCold && provider.id.startsWith("managed:")))
       && model.capabilities.text !== "no"
       && (!scopeRestricted || Boolean(applicableScope?.models.some((item) =>
         item.provider_profile_id === provider.id && item.model_id === model.id))),

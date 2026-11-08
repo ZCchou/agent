@@ -27,6 +27,9 @@ pub fn update_web_search_settings(
     settings: WebSearchSettings,
     manager: State<'_, SettingsManager>,
 ) -> Result<AppSettings, String> {
+    if settings.enabled {
+        crate::offline::deny_network()?;
+    }
     manager
         .update_web_search_settings(settings)
         .map_err(|error| error.to_string())
@@ -39,6 +42,7 @@ pub fn save_search_backend(
     manager: State<'_, SettingsManager>,
     credentials: State<'_, CredentialStore>,
 ) -> Result<AppSettings, String> {
+    crate::offline::deny_network()?;
     let backend_identifier = backend.id.clone();
     let credential_id = format!("web-search:{}", backend.id);
     let previous = credentials.get(&credential_id)?;
@@ -143,6 +147,7 @@ pub async fn test_search_backend(
     app: tauri::AppHandle,
     backend_id: String,
 ) -> Result<SearchBackendStatus, String> {
+    crate::offline::deny_network()?;
     let manager = app.state::<SettingsManager>();
     let credentials = app.state::<CredentialStore>();
     let service = app.state::<WebSearchService>();
@@ -196,6 +201,7 @@ pub async fn probe_native_web_search(
     manager: State<'_, SettingsManager>,
     core: State<'_, Mutex<CoreProcessManager>>,
 ) -> Result<AppSettings, String> {
+    crate::offline::deny_network()?;
     let configured = manager.get_settings().map_err(|error| error.to_string())?;
     let provider = configured
         .models

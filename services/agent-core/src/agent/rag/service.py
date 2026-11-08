@@ -10,7 +10,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 
-from agent.rag.documents import MAX_FILE_BYTES, SUPPORTED_SUFFIXES, parse_document, parse_text
+from agent.document_parser import ParserService
+from agent.rag.documents import MAX_FILE_BYTES, MAX_TEXT_CHARS, SUPPORTED_SUFFIXES
 from agent.rag.repository import RagRepository, identifier, required_text
 from agent.rag.retrieval import candidates, load_vector_extension, vector_blob
 from agent.storage import CoreDataError, _utc_now
@@ -21,12 +22,13 @@ MEDIA_TYPES = {'.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlforma
 
 
 class RagService:
-    def __init__(self, repository, models=None):
+    def __init__(self, repository, models=None, *, parser=None):
         self.repository = RagRepository(repository)
         if models is None:
             from agent.rag.models import ModelStore
             models = ModelStore(self.repository.data_dir)
         self.models = models
+        self.parser = parser if parser is not None else ParserService(self.repository.data_dir)
         self._tasks = {}
         self._closed = False
 
@@ -114,10 +116,16 @@ class RagService:
         if action == 'document.paste':
             title = required_text(params.get('title'), 'Document title')
             content = params.get('content')
-            parsed = await asyncio.to_thread(parse_text, content)
+            if not isinstance(content, str):
+                raise CoreDataError('rag_invalid_document', 'Pasted content must be text.')
+            if len(content) > MAX_TEXT_CHARS:
+                raise CoreDataError('rag_document_too_large', 'The text document exceeds its character limit.')
+            digest, original = await asyncio.to_thread(self.repository.save_original, content.encode('utf-8'), '.txt')
+            parsed = await self.parser.parse(original)
             if self._closed:
                 raise CoreDataError('rag_closed', 'The RAG service closed before the document was saved.')
-            digest, _ = self.repository.save_original(content.encode('utf-8'), '.txt')
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             return self.repository.save_version(params.get('library_id'), title, parsed, digest, title + '.txt', 'text/plain', document_id=params.get('document_id'))
         if action == 'document.import':
             paths = params.get('paths')
@@ -183,13 +191,18 @@ class RagService:
         if len(content) > MAX_FILE_BYTES:
             raise CoreDataError('rag_document_too_large', 'The document exceeds 100 MiB.')
         digest, original = self.repository.save_original(content, path.suffix.lower())
-        return digest, parse_document(original)
+        return digest, original
 
     async def _import_document(self, job, path):
         try:
-            digest, parsed = await asyncio.wait_for(asyncio.to_thread(self._extract_original, path), timeout=DOCUMENT_PARSE_TIMEOUT)
+            digest, original = await asyncio.wait_for(
+                asyncio.to_thread(self._extract_original, path), timeout=DOCUMENT_PARSE_TIMEOUT)
         except TimeoutError as error:
             raise CoreDataError('rag_document_timeout', 'Document import exceeded its time limit.') from error
+        # ParserService bounds execution after its permit, excluding queue time.
+        parsed = await self.parser.parse(original)
+        if self._closed:
+            raise CoreDataError('rag_closed', 'The RAG service closed before the document was saved.')
         self.repository.save_version(job['library_id'], path.stem, parsed, digest, path.name,
                                      MEDIA_TYPES[path.suffix.lower()],
                                      str(path.resolve()), job['id'])
@@ -370,6 +383,7 @@ class RagService:
         for job_id, task in list(self._tasks.items()):
             self.repository.update_job(job_id, status='cancelled')
             task.cancel()
+        await self.parser.close()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         result = self.models.close()

@@ -1,7 +1,7 @@
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
 import { ArrowDown, Bot, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useConversationState } from "./useConversationState";
 import { useScopedAction } from "./useScopedAction";
 import { useTranslation } from "react-i18next";
@@ -64,7 +64,7 @@ export function ChatPage() {
   const { t: tChat } = useTranslation("chat");
   const { t: tCommon } = useTranslation("common");
   const {
-    currentPage, activeConversationId, activeConversation, projects, draft, coreOnline,
+    currentPage, setCurrentPage, activeConversationId, activeConversation, projects, draft, coreOnline,
     openConversation, openProject, conversationCreated, refreshWorkspace,
   } = useApp();
   const inspectorStore = useChatInspectorStore();
@@ -136,6 +136,7 @@ export function ChatPage() {
     actionType: string; purpose: string; evidence: string; expiresAt: string;
   } | null>(inspectorKey, null);
   const [budgetBusy, setBudgetBusy] = useConversationState(inspectorKey, false);
+  const [routingRevision, setRoutingRevision] = useState(0);
   const [routingOptions, setRoutingOptions] = useConversationState<RoutingModelOption[]>(inspectorKey, []);
   const [runActivityLabel, setRunActivityLabel] = useConversationState<string | null>(inspectorKey, null);
   const pendingSendRef = useRef<{ signature: string; idempotencyKey: string } | null>(null);
@@ -205,13 +206,13 @@ export function ChatPage() {
     ]).then(([settings, scope]) => {
       if (cancelled) return;
       const project = projectId ? projects.find((item) => item.id === projectId) : undefined;
-      setRoutingOptions(selectableModels(settings, project, scope).map((item) => ({
+      setRoutingOptions(selectableModels(settings, project, scope, true).map((item) => ({
         value: item.value, providerId: item.provider.id, modelId: item.model.id,
-        label: item.provider.name,
+        label: item.provider.name, unavailable: item.model.status === "unavailable",
       })));
     }).catch(() => { if (!cancelled) setRoutingOptions([]); });
     return () => { cancelled = true; };
-  }, [conversation?.id, conversation?.project_id, draft.kind, draft.projectId, projects, currentPage]);
+  }, [conversation?.id, conversation?.project_id, draft.kind, draft.projectId, projects, currentPage, coreOnline, routingRevision]);
 
   useEffect(() => {
     if (!activeConversation) return;
@@ -1206,6 +1207,7 @@ export function ChatPage() {
             </button>
           ) : undefined}
         routingControl={<ConversationRoutingControl conversation={conversation} options={routingOptions}
+          onOpen={() => setRoutingRevision(value => value + 1)} onLoad={() => setCurrentPage("models")}
           disabled={sending || budgetBusy}
           onSelectAutomatic={() => void updateRouting("automatic")}
           onSelectFixed={(option) => void updateRouting("fixed", option)} />}

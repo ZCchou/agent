@@ -138,3 +138,12 @@ describe("selectableModels", () => {
     expect(selectableModels(filteredSettings as AppSettings, project())).toEqual([]);
   });
 });
+
+it("keeps cold managed models visible for loading while excluding them from execution candidates", () => {
+  const id = "a".repeat(64);
+  const managedSettings = { ...settings, models: { ...settings.models, providers: [provider(`managed:${id}`, "openai_compatible", "", [model(id, { status: "unavailable", allow_automatic_routing: true })])] } };
+  expect(selectableModels(managedSettings, project())).toEqual([]);
+  expect(selectableModels(managedSettings, project(), null, true).map(item => item.value)).toEqual([`managed:${id}::${id}`]);
+  managedSettings.models.providers[0].models[0].status = "available";
+  expect(selectableModels(managedSettings, project())).toHaveLength(1);
+});

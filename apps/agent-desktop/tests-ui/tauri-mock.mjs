@@ -45,7 +45,7 @@ export async function installTauriMock(page, overrides = {}) {
     load_update_draft: null,
     ack_update_draft: null,
     agent_core_status: { running: true, healthy: true, issue: null },
-    ping_agent_core: { core_version: "0.14.1", protocol_version: 16, schema_version: 23, build_id: "schema23-skills-v1" },
+    ping_agent_core: { core_version: "0.14.1", protocol_version: 18, schema_version: 25, build_id: "schema25-local-runtime-v1" },
     list_skills: [],
     get_global_instructions: { global_instructions: { content: "", enabled: true, revision: 1 } },
     list_projects: [project],
@@ -93,8 +93,12 @@ export async function installTauriMock(page, overrides = {}) {
     let nextCallback = 1;
     window.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
-      invoke: async (command) => {
+      invoke: async (command, args) => {
         if (!(command in responses)) throw new Error(`Unexpected Tauri command: ${command}`);
+        if (command === "update_sidebar_width") {
+          responses.get_app_settings.sidebar.width_px = args.widthPx;
+          return structuredClone(responses.get_app_settings);
+        }
         return responses[command];
       },
       transformCallback: (callback, once) => {

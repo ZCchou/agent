@@ -45,6 +45,7 @@ impl WebSearchService {
         backend: &SearchBackendSettings,
         credentials: &CredentialStore,
     ) -> Result<SearchBackendStatus, String> {
+        crate::offline::deny_network()?;
         let request = SearchRequest {
             query: "agent connectivity test".to_string(),
             max_results: 1,
@@ -67,6 +68,7 @@ impl WebSearchService {
         credentials: &CredentialStore,
         request: &SearchRequest,
     ) -> Result<SearchResultSet, String> {
+        crate::offline::deny_network()?;
         if !backend.enabled {
             return Err("search_backend_not_configured: Search backend is disabled".to_string());
         }
@@ -124,6 +126,7 @@ impl WebSearchService {
         credentials: &CredentialStore,
         source: WebSource,
     ) -> Result<ExtractedPage, String> {
+        crate::offline::deny_network()?;
         match backend.kind.as_str() {
             "tavily" => {
                 let key = credentials

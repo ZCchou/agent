@@ -8,18 +8,21 @@ export interface RoutingModelOption {
   providerId: string;
   modelId: string;
   label: string;
+  unavailable?: boolean;
 }
 
 interface Props {
   conversation: Conversation | null;
   options: RoutingModelOption[];
   disabled: boolean;
+  onOpen?(): void;
+  onLoad?(): void;
   onSelectAutomatic(): void;
   onSelectFixed(option: RoutingModelOption): void;
 }
 
 export function ConversationRoutingControl({
-  conversation, options, disabled, onSelectAutomatic, onSelectFixed,
+  conversation, options, disabled, onSelectAutomatic, onSelectFixed, onOpen, onLoad,
 }: Props) {
   const { t } = useTranslation("chat");
   const [open, setOpen] = useState(false);
@@ -43,7 +46,7 @@ export function ConversationRoutingControl({
   return <div className="conversation-routing-control" ref={rootRef}>
     <button type="button" disabled={disabled || !conversation} aria-expanded={open}
       title={!conversation ? t("routing.availableAfterFirstMessage") : undefined}
-      onClick={() => setOpen((value) => !value)}>
+      onClick={() => { if (!open) onOpen?.(); setOpen((value) => !value); }}>
       {automatic ? <Sparkles size={14} /> : <Bot size={14} />}
       <span>{title}</span><ChevronDown size={13} />
     </button>
@@ -59,8 +62,8 @@ export function ConversationRoutingControl({
       {options.map((option) => <button type="button" key={option.value}
         className={!automatic && fixed === option.modelId
           && conversation.provider_profile_id === option.providerId ? "is-selected" : ""}
-        onClick={() => { setOpen(false); onSelectFixed(option); }}>
-        <Bot size={15} /><span><strong>{option.modelId}</strong><small>{option.label}</small></span>
+        onClick={() => { setOpen(false); if (option.unavailable) onLoad?.(); else onSelectFixed(option); }}>
+        <Bot size={15} /><span><strong>{option.modelId}</strong><small>{option.label}{option.unavailable ? " · 未加载，点击加载" : ""}</small></span>
       </button>)}
     </div> : null}
   </div>;

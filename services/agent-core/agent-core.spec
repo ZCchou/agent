@@ -7,6 +7,8 @@ import sys
 
 source_root = Path(SPECPATH) / "src"
 sys.path.insert(0, str(source_root))
+sys.path.insert(0, str(Path(SPECPATH).parents[1] / "tools"))
+from rag_runtime_assets import ssl_support_resources
 
 hiddenimports = collect_submodules("agent")
 
@@ -15,7 +17,8 @@ a = Analysis(
     pathex=[str(source_root)],
     binaries=[],
     datas=collect_data_files("agent", includes=["builtin_skills/**/*"])
-        + collect_data_files("sqlite_vec") + collect_data_files("pypdfium2_raw"),
+        + collect_data_files("sqlite_vec") + collect_data_files("pypdfium2_raw")
+        + [(str(path), ".") for path in ssl_support_resources()],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

@@ -20,13 +20,14 @@ describe("TauriModelCatalogRepository", () => {
     vi.mocked(invoke).mockResolvedValue({ schema_version: 5 });
     const repository = new TauriModelCatalogRepository();
     await repository.addManual("remote", "private-model");
-    expect(invoke).toHaveBeenLastCalledWith("add_manual_provider_model", {
+    expect(invoke).toHaveBeenNthCalledWith(1, "add_manual_provider_model", {
       providerId: "remote", modelId: "private-model",
     });
     await repository.updateDefault("remote", "private-model");
-    expect(invoke).toHaveBeenLastCalledWith("update_default_model", {
+    expect(invoke).toHaveBeenNthCalledWith(3, "update_default_model", {
       providerProfileId: "remote", modelId: "private-model",
     });
+    expect(invoke).toHaveBeenLastCalledWith("get_app_settings");
   });
 
   it("persists explicit model context limits without guessing them in the UI", async () => {

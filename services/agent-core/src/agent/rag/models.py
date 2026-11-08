@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 from agent.storage import CoreDataError
@@ -93,7 +94,7 @@ def _no_remote_code(value):
             _no_remote_code(item)
 
 
-def _validate_safetensors(path):
+def _validate_safetensors(path, *, include_header=False):
     total = path.stat().st_size
     with path.open("rb") as stream:
         raw = stream.read(8)
@@ -129,7 +130,7 @@ def _validate_safetensors(path):
         cursor = end
     if cursor != total - length - 8:
         raise ValueError("Safetensors file has trailing unindexed data")
-    return {name for name in header if name != "__metadata__"}
+    return (header, length) if include_header else {name for name in header if name != "__metadata__"}
 
 
 
@@ -148,6 +149,7 @@ class ModelStore:
         self._device_locks = {"cpu": asyncio.Lock(), "cuda": asyncio.Lock()}
         self._verified_files = {}
         self._loaded_models = {}
+        self.gpu_resources = None
         self._state = _json(self._state_path) if self._state_path.exists() else {"schema_version": 1, "root": str(self.data_dir / "models"), "models": []}
         if self._state.get("schema_version") != 1:
             raise CoreDataError("rag_model_error", "Unsupported local model registry version")
@@ -187,7 +189,10 @@ class ModelStore:
             inferred = metadata.get("profile") if metadata else None
             if inferred is None:
                 architectures = config.get("architectures", [])
-                inferred = next((key for key, spec in PROFILES.items() if spec.model_type == config.get("model_type") and any(name in spec.architectures for name in architectures)), None)
+                matches = [key for key, spec in PROFILES.items() if spec.model_type == config.get("model_type") and any(name in spec.architectures for name in architectures)]
+                if len(matches) > 1 and profile is None:
+                    raise ValueError("Ambiguous model architecture requires an explicit model profile")
+                inferred = matches[0] if len(matches) == 1 else None
             profile = profile or inferred
             if profile not in PROFILES:
                 raise ValueError("Select one of the four supported model profiles")
@@ -460,19 +465,29 @@ class ModelStore:
         if action == "embed" and record["role"] != "embedding" or action == "rerank" and record["role"] != "reranker":
             raise CoreDataError("rag_model_error", "Selected local model has the wrong role")
         device = record["device"]
-        async with self._device_locks[device]:
+        def is_resident():
+            loaded = self._loaded_models.get(device)
+            return loaded is not None and loaded[1] == (str(root), record["id"], record["digest"]) \
+                and loaded[0].process is not None and loaded[0].process.returncode is None
+        guard = self.gpu_resources.auxiliary(record, resident=is_resident) if self.gpu_resources else nullcontext()
+        async with guard, self._device_locks[device]:
             if self._closed:
                 raise CoreDataError("rag_model_error", "Local model store is closed")
+            identity = (str(root), record["id"], record["digest"])
             worker = self._workers.get(device)
+            if worker is not None and (self._loaded_models.get(device) != (worker, identity)
+                    or worker.process is None or worker.process.returncode is not None):
+                # Reclaim native allocators before loading a different model.
+                self._workers.pop(device, None)
+                self._loaded_models.pop(device, None)
+                await worker.close()
+                worker = None
             if worker is None:
                 command = await asyncio.to_thread(self._command)
                 if self._closed:
                     raise CoreDataError("rag_model_error", "Local model store is closed")
                 worker = WorkerClient(command)
                 self._workers[device] = worker
-            elif worker.process is None or worker.process.returncode is not None:
-                await asyncio.to_thread(self._command)
-            identity = (str(root), record["id"], record["digest"])
             force = self._loaded_models.get(device) != (worker, identity) or worker.process is None or worker.process.returncode is not None
             try:
                 path = await asyncio.to_thread(self._verified_path, record, root, force)
@@ -487,6 +502,13 @@ class ModelStore:
             except Exception:
                 self._loaded_models.pop(device, None)
                 raise
+
+    async def release_cuda(self):
+        async with self._device_locks["cuda"]:
+            worker = self._workers.pop("cuda", None)
+            self._loaded_models.pop("cuda", None)
+            if worker is not None:
+                await worker.close()
 
     async def probe(self, model_id):
         try:

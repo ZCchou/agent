@@ -36,13 +36,13 @@ def test_runtime_release_identity_rejects_stale_worker_and_dependency_lock(tmp_p
     repository = tmp_path / "repository"
     source = repository / "services/agent-core/src/agent/rag"
     source.mkdir(parents=True)
-    for name in ("worker.py", "model_profiles.py"):
+    for name in ("worker.py", "model_profiles.py", "models.py"):
         (source / name).write_text("original\n", encoding="utf-8")
     lock = repository / "services/agent-core/requirements-rag-cpu.lock"
     lock.write_text("package==1\n", encoding="utf-8")
     manifest = {"device_bundle": "cpu", "build_identity": tool.build_identity(repository, "cpu")}
     tool.verify_build_identity(manifest, repository)
-    for path in (source / "worker.py", lock):
+    for path in (source / "worker.py", source / "models.py", lock):
         original = path.read_bytes()
         path.write_bytes(b"changed\n")
         with pytest.raises(ValueError, match="source or dependency"):
@@ -86,3 +86,30 @@ def test_cpu_only_runtime_cannot_replace_the_installed_full_edition(tmp_path):
         tool.stage(source, target, required_device="cuda")
     assert (target / "previous.txt").read_text(encoding="utf-8") == "keep"
     assert not (target / "rag-worker.exe").exists()
+
+@pytest.mark.parametrize('has_resource', [False, True])
+def test_frozen_core_preserves_build_python_ssl_support_resources(tmp_path, monkeypatch, has_resource):
+    import runpy
+    import sys
+    from types import SimpleNamespace
+    from PyInstaller.utils import hooks
+    source = Path(__file__).resolve().parents[1]
+    certificate = tmp_path / 'ssl-support.pem'
+    resources = [certificate] if has_resource else []
+    monkeypatch.setitem(sys.modules, 'rag_runtime_assets', SimpleNamespace(ssl_support_resources=lambda: resources))
+    monkeypatch.setattr(hooks, 'collect_submodules', lambda name: [])
+    monkeypatch.setattr(hooks, 'collect_data_files', lambda name, **kwargs: [(name, name)])
+    captured = {}
+    def analysis(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(pure=[], scripts=[], binaries=[], datas=kwargs['datas'])
+    previous = list(sys.path)
+    try:
+        runpy.run_path(str(source / 'agent-core.spec'), init_globals={
+            'SPECPATH': str(source), 'Analysis': analysis, 'PYZ': lambda value: value,
+            'EXE': lambda *args, **kwargs: None})
+    finally:
+        sys.path[:] = previous
+    expected = [('agent', 'agent'), ('sqlite_vec', 'sqlite_vec'), ('pypdfium2_raw', 'pypdfium2_raw')]
+    expected.extend((str(path), '.') for path in resources)
+    assert captured['datas'] == expected

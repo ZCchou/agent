@@ -26,7 +26,7 @@ const Context = createContext<ContextValue | null>(null);
 export function AppUpdateProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState(initial);
   const [channel, setChannelState] = useState<UpdateChannel>(() => preference(CHANNEL_KEY) === "stable" ? "stable" : "preview");
-  const [autoCheck, setAutoState] = useState(() => preference(AUTO_KEY) !== "false");
+  const [autoCheck, setAutoState] = useState(false);
   const autoRef = useRef(autoCheck); autoRef.current = autoCheck;
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);

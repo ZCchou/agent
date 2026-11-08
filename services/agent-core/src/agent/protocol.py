@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 17
+PROTOCOL_VERSION = 18
 CORE_VERSION = "0.14.2"
-BUILD_ID = "schema24-rag-v1"
+BUILD_ID = "schema25-local-runtime-v1"
 _LOGGER = logging.getLogger("agent.core")
 
 
@@ -384,6 +384,7 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
 
 ASYNC_MESSAGE_TYPES = {
     "rag.request",
+    "local_model.request",
     "app.update.prepare", "app.update.abort",
     "runtime.capabilities.configure", "runtime.capabilities.resolve",
     "provider.configure", "provider.clear", "provider.status", "provider.list_models",
@@ -400,12 +401,12 @@ ASYNC_MESSAGE_TYPES = {
 
 
 async def handle_async_message(message: Any, service: ChatRunService) -> dict[str, Any]:
-    from agent.execution.app_update import ADMISSION_TYPES
+    from agent.execution.app_update import is_admission
     admitted = (isinstance(message, dict) and message.get("v") == PROTOCOL_VERSION
                 and isinstance(message.get("id"), str) and bool(message["id"])
                 and isinstance(message.get("params", {}), dict)
                 and isinstance(message.get("type"), str)
-                and message.get("type") in ADMISSION_TYPES)
+                and is_admission(message))
     if admitted:
         if service.update_prepared_id is not None:
             return _error(message["id"], message["type"], "app_update_installing",
@@ -433,6 +434,10 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
     try:
         if message_type == "rag.request":
             result = await service.rag.handle(_required_string(params, "action"), params.get("params", {}))
+        elif message_type == "local_model.request":
+            result = await service.handle_local_model(_required_string(params, "action"), params.get("params", {}))
+        elif getattr(service, "offline", False) and message_type in {"web.operation.prepare", "provider.native_search.probe"}:
+            raise CoreDataError("offline_network_forbidden", "离线模式禁用公网检索。")
         elif message_type in {"app.update.prepare", "app.update.abort"}:
             from agent.execution.app_update import prepare, abort
             update_id = _required_string(params, "update_id")

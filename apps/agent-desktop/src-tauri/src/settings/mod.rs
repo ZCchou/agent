@@ -2,7 +2,7 @@ pub(crate) mod commands;
 
 mod error;
 mod manager;
-mod model;
+pub(crate) mod model;
 mod repository;
 
 pub use manager::SettingsManager;

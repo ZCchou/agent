@@ -29,16 +29,16 @@ describe("markdown resource policy", () => {
     expect(classifyLink("https://user:secret@example.com/image")).toBe("blocked");
   });
 
-  it("allows only credential-free HTTPS images", () => {
-    expect(classifyImage("https://cdn.example.com/image.png")).toBe("remote_https");
+  it("blocks remote images and allows local bitmap data", () => {
+    expect(classifyImage("https://cdn.example.com/image.png")).toBe("blocked");
     expect(classifyImage("http://cdn.example.com/image.png")).toBe("blocked");
-    expect(classifyImage("data:image/png;base64,abc")).toBe("blocked");
+    expect(classifyImage("data:image/png;base64,abc")).toBe("local");
     expect(classifyImage("https://user:secret@cdn.example.com/image.png")).toBe("blocked");
-    expect(remoteImageHost("https://cdn.example.com/image.png")).toBe("cdn.example.com");
+    expect(remoteImageHost("https://cdn.example.com/image.png")).toBeNull();
   });
 
   it("removes blocked URLs before React creates a resource element", () => {
-    expect(markdownUrlTransform("https://cdn.example.com/a.png", "src")).toBe("https://cdn.example.com/a.png");
+    expect(markdownUrlTransform("https://cdn.example.com/a.png", "src")).toBe("");
     expect(markdownUrlTransform("http://cdn.example.com/a.png", "src")).toBe("");
     expect(markdownUrlTransform("javascript:alert(1)", "href")).toBe("");
   });

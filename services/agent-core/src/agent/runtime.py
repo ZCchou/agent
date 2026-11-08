@@ -11,6 +11,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -58,6 +59,7 @@ from agent.model_selection import FixedModelSelector, ModelSelector
 from agent.model_invocation import ModelInvocationService
 from agent.multimodal import estimate_image_tokens
 from agent.providers import (
+    closing_provider_stream,
     GenerationOptions, ProviderError, ProviderEvent, ProviderProfile,
     create_provider, validate_profile, validate_provider_completion,
 )
@@ -74,6 +76,9 @@ from agent.web_search.service import WebSearchService
 from agent.web_search.evidence import evaluate_web_evidence
 from agent.rag.service import RagService
 from agent.rag.grounding import RagGrounding, require_local_profile
+from agent.offline import local_profile
+from agent.local_models import LocalModelService
+from agent.local_provider import ManagedLocalProvider
 
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -85,11 +90,17 @@ class ChatRunService:
 
     def __init__(self, repository: CoreRepository, event_sink: EventSink,
                  model_selector: ModelSelector | None = None,
-                 logger: logging.Logger | None = None) -> None:
+                 logger: logging.Logger | None = None, *, offline: bool = False) -> None:
         self.repository = repository
+        self.offline = offline
+        self.offline_blocked_profiles: set[str] = set()
         self.event_sink = event_sink
         self.skills = SkillRegistry(repository.database_path.parent / "skills.json")
         self.rag = RagService(repository)
+        from agent.gpu_resources import GpuResources
+        self.gpu_resources = GpuResources(self.rag.models.release_cuda)
+        self.rag.models.gpu_resources = self.gpu_resources
+        self.local_models = LocalModelService(repository, load_guard=self.gpu_resources.primary)
         self.rag_grounding = RagGrounding(self.rag)
         self.context = ContextEngineService(repository, skill_context=self.skills.render,
                                             rag_context=self.rag_grounding.evidence)
@@ -159,6 +170,8 @@ class ChatRunService:
         self.context.context_repository.interrupt_compactions()
 
     def configure_provider(self, value: dict[str, Any]) -> dict[str, Any]:
+        if str(value.get("id", "")).startswith("managed:"):
+            raise CoreDataError("managed_provider_reserved", "托管模型由本地模型管理器配置。")
         profile = ProviderProfile(
             id=self._required(value, "id"), name=self._required(value, "name"),
             kind=self._required(value, "kind"), base_url=self._required(value, "base_url"),
@@ -213,6 +226,13 @@ class ChatRunService:
             } if isinstance(value.get("model_route_health"), dict) else {},
         )
         validate_profile(profile)
+        if self.offline:
+            try:
+                profile = local_profile(profile)
+                self.offline_blocked_profiles.discard(profile.id)
+            except CoreDataError:
+                profile = replace(profile, enabled=False)
+                self.offline_blocked_profiles.add(profile.id)
         self.profiles[profile.id] = profile
         # Recover only known transient failures after credentials are restored.
         # Restart/timeouts have uncertain dispatch outcomes and require explicit resume.
@@ -222,6 +242,8 @@ class ChatRunService:
         return self.profile_status(profile.id)
 
     def clear_provider(self, profile_id: str) -> None:
+        if profile_id.startswith("managed:"):
+            raise CoreDataError("managed_provider_reserved", "请通过本地模型管理器卸载托管模型。")
         if profile_id != "builtin-demo":
             self.profiles.pop(profile_id, None)
 
@@ -254,6 +276,7 @@ class ChatRunService:
             ) if isinstance(value.get("global_default_model_id"), str) else None,
         }
         self.production_routing_configured = True
+        self._sync_managed_profiles()
         return dict(self.routing_preferences)
 
     def update_conversation_routing(
@@ -297,17 +320,24 @@ class ChatRunService:
         )
 
     def profile_status(self, profile_id: str) -> dict[str, Any]:
+        self._sync_managed_profiles()
         profile = self.profiles.get(profile_id)
         if profile is None:
             raise CoreDataError("provider_not_configured", "The provider is not configured in Core memory.")
+        if profile_id.startswith("managed:"):
+            return {"id": profile.id, "name": profile.name, "kind": profile.kind,
+                    "source": "managed_local", "enabled": profile.enabled, "location": "local",
+                    "has_credential": False, "base_url": ""}
         return {"id": profile.id, "name": profile.name, "kind": profile.kind,
                 "base_url": profile.base_url, "enabled": profile.enabled,
                 "location": "local" if profile.is_local else "online",
-                 "has_credential": bool(profile.api_key)}
+                 "has_credential": bool(profile.api_key),
+                "offline_blocked": profile.id in self.offline_blocked_profiles}
 
     def _execution_candidates(
         self, conversation: dict[str, Any] | None, *, automatic_only: bool = False,
     ) -> list[ModelCandidate]:
+        self._sync_managed_profiles()
         restricted: set[tuple[str, str]] | None = None
         if conversation and conversation.get("kind") == "project_work":
             scope = self.repository.get_project_model_scope(conversation["project_id"])
@@ -320,6 +350,11 @@ class ChatRunService:
         for profile in self.profiles.values():
             if not profile.enabled:
                 continue
+            if self.offline:
+                try:
+                    local_profile(profile)
+                except CoreDataError:
+                    continue
             if automatic_only and self.production_routing_configured and profile.kind == "fake":
                 continue
             if conversation and conversation.get("kind") == "project_work" \
@@ -434,14 +469,14 @@ class ChatRunService:
         }
 
     async def list_models(self, profile_id: str) -> dict[str, Any]:
-        profile = self.profiles.get(profile_id)
-        if profile is None:
-            raise CoreDataError("provider_not_configured", "The provider is not configured in Core memory.")
-        provider = create_provider(profile)
+        profile = self._profile(profile_id)
+        provider = self._provider(profile)
         if hasattr(provider, "discover_models"):
             models, resolved = await provider.discover_models()
         else:
             models, resolved = await provider.list_models(), profile.base_url.rstrip("/")
+        if profile_id.startswith("managed:"):
+            return {"models": models, "source": "managed_local"}
         return {"models": models, "resolved_api_base_url": resolved}
 
     async def probe_tool_capability(self, profile_id: str, model_id: str) -> dict[str, Any]:
@@ -450,44 +485,54 @@ class ChatRunService:
             raise CoreDataError("model_not_enabled", "The model is not enabled for use.")
         if profile.kind == "fake":
             return {"tool_mode": "native", "verified": True}
-        provider = create_provider(profile)
+        provider = self._provider(profile)
         saw_text = False
         async with asyncio.timeout(60):
-            async for event in provider.stream_events(
+            async with closing_provider_stream(provider.stream_events(
                 model_id,
                 [{"role": "user", "content": (
                     "Call fs.list once with path set to a single dot. Do not answer in prose."
                 )}],
                 tools=True,
                 options=GenerationOptions(purpose="tool_review", max_output_tokens=128),
-            ):
-                if event.kind == "tool_call" and event.tool_call is not None \
-                        and event.tool_call.name == "fs.list":
-                    return {"tool_mode": "native", "verified": True}
-                if event.kind == "text_delta" and event.text:
-                    saw_text = True
+            )) as provider_stream:
+                async for event in provider_stream:
+                    if event.kind == "tool_call" and event.tool_call is not None \
+                            and event.tool_call.name == "fs.list":
+                        return self._tool_probe_result(profile_id, "native", True)
+                    if event.kind == "text_delta" and event.text:
+                        saw_text = True
         structured_content = ""
         async with asyncio.timeout(60):
-            async for event in provider.stream_events(
+            async with closing_provider_stream(provider.stream_events(
                 model_id,
                 structured_messages([{"role": "user", "content": "List the project root."}]),
                 tools=False,
                 options=GenerationOptions(purpose="tool_review", max_output_tokens=256),
-            ):
-                if event.kind == "text_delta" and event.text:
-                    structured_content += event.text
+            )) as provider_stream:
+                async for event in provider_stream:
+                    if event.kind == "text_delta" and event.text:
+                        structured_content += event.text
         try:
             _, call = parse_structured_output(structured_content)
             if call is not None:
-                return {"tool_mode": "structured", "verified": True}
+                return self._tool_probe_result(profile_id, "structured", True)
         except ProviderError:
             pass
-        return {"tool_mode": "text_only" if saw_text else "unknown", "verified": saw_text}
+        return self._tool_probe_result(profile_id, "text_only" if saw_text else "unknown", saw_text)
+
+    def _tool_probe_result(self, profile_id: str, mode: str, verified: bool) -> dict[str, Any]:
+        if profile_id.startswith("managed:") and verified:
+            self.local_models.set_tool_mode(profile_id, mode, verified=True)
+            self._sync_managed_profiles()
+        return {"tool_mode": mode, "verified": verified}
 
     async def probe_native_web_search(
         self, profile_id: str, model_id: str, route_id: str | None = None,
         capability_signature: list[str] | None = None,
     ) -> dict[str, Any]:
+        if self.offline:
+            raise CoreDataError("offline_network_forbidden", "离线模式禁用公网检索探测。")
         profile = self._profile(profile_id)
         if model_id not in profile.allowed_model_ids:
             raise CoreDataError("model_not_enabled", "The model is not enabled for use.")
@@ -530,7 +575,7 @@ class ChatRunService:
             "invocation_route_id": (native_route or {}).get("route_id", "legacy.primary"),
             "protocol_id": (native_route or {}).get("protocol") or profile.primary_protocol,
         })
-        provider = create_provider(probe_profile)
+        provider = self._provider(probe_profile)
         messages: list[dict[str, Any]] = [{
             "role": "user",
             "content": "Search the web for the official agent connectivity test phrase and reply briefly.",
@@ -538,7 +583,7 @@ class ChatRunService:
         saw_search = False
         native_call: ToolCall | None = None
         async with asyncio.timeout(90):
-            async for event in provider.stream_events(
+            async with closing_provider_stream(provider.stream_events(
                 model_id, messages, tools=False,
                 options=GenerationOptions(
                     purpose="tool_review", max_output_tokens=128,
@@ -551,12 +596,13 @@ class ChatRunService:
                     capability_signature=("native_web_search", "text"),
                     native_search_mode="required",
                 ),
-            ):
-                if event.kind in {"web_search_started", "web_search_result"}:
-                    saw_search = True
-                if event.kind == "native_search_call" and event.tool_call is not None \
-                        and event.tool_call.name == "native.web_search":
-                    native_call = event.tool_call
+            )) as provider_stream:
+                async for event in provider_stream:
+                    if event.kind in {"web_search_started", "web_search_result"}:
+                        saw_search = True
+                    if event.kind == "native_search_call" and event.tool_call is not None \
+                            and event.tool_call.name == "native.web_search":
+                        native_call = event.tool_call
         if native_call is not None:
             messages.extend([{
                 "role": "assistant", "content": None,
@@ -573,7 +619,7 @@ class ChatRunService:
                 "content": json.dumps(native_call.arguments, ensure_ascii=True, separators=(",", ":")),
             }])
             async with asyncio.timeout(90):
-                async for event in provider.stream_events(
+                async with closing_provider_stream(provider.stream_events(
                     model_id, messages, tools=False,
                     options=GenerationOptions(
                         purpose="tool_review", max_output_tokens=128,
@@ -586,9 +632,10 @@ class ChatRunService:
                         capability_signature=("native_web_search", "text"),
                         native_search_mode="auto",
                     ),
-                ):
-                    if event.kind == "text_delta" and event.text:
-                        saw_search = True
+                )) as provider_stream:
+                    async for event in provider_stream:
+                        if event.kind == "text_delta" and event.text:
+                            saw_search = True
         return {
             "status": "supported" if saw_search else "unsupported",
             "adapter": route_adapter,
@@ -597,6 +644,7 @@ class ChatRunService:
         }
 
     async def start(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._sync_managed_profiles()
         idempotency_key = self._required(params, "idempotency_key")
         existing = self.repository.get_model_run_by_idempotency_key(idempotency_key)
         if existing is not None:
@@ -632,6 +680,10 @@ class ChatRunService:
             position = conversation["messages"].index(edited_message)
             conversation = {**conversation, "messages": conversation["messages"][:position]}
         content = params.get("content")
+        if self.offline:
+            params = {**params, "web_search_request_mode": "off", "web_search_global_enabled": False}
+            if conversation:
+                conversation = {**conversation, "model_access_policy": "local_only"}
         rag_enabled = bool(conversation and conversation.get("project_id") and
                            self.rag.project_state(conversation["project_id"]).get("enabled"))
         rag_local_required = bool(conversation and self._rag_requires_local(conversation))
@@ -1687,6 +1739,7 @@ class ChatRunService:
         self.repository.interrupt_active_runs()
         self.tool_loop.shutdown()
         await self.rag.close()
+        await self.local_models.close()
 
     async def _execute(self, run_id: str) -> None:
         content = ""
@@ -1818,7 +1871,7 @@ class ChatRunService:
                 profile = self._profile_for_step(profile, execution_step)
             if self._rag_requires_local(self.repository.get_run_conversation(run_id)) or run_id in self.rag_grounding.runs:
                 profile = require_local_profile(profile)
-            provider = create_provider(profile)
+            provider = self._provider(profile)
             assembled = await self._prepare_context(
                 run, profile, provider, round_no=0, invocation_target=execution_step,
             )
@@ -1851,6 +1904,8 @@ class ChatRunService:
                 allowed_tools.extend(("web.search", "web.open"))
             if route_allows_tools and tool_mode != "text_only":
                 allowed_tools.extend(SKILL_TOOLS)
+            if self.offline:
+                allowed_tools = [name for name in allowed_tools if name not in {"web.search", "web.open", "terminal.run"}]
             if self._rag_requires_local(conversation) or run_id in self.rag_grounding.runs:
                 allowed_tools = [name for name in allowed_tools if name in {"skills.load", "skills.read_resource"}]
                 if run_id in self.rag_grounding.runs and route_allows_tools and tool_mode != "text_only":
@@ -2496,6 +2551,11 @@ class ChatRunService:
             "protocol_id": profile.primary_protocol if profile else "",
         }
         conversation = self.repository.get_run_conversation(run["id"])
+        if getattr(self, "offline", False):
+            if profile is not None:
+                local_profile(profile)
+            if current_run.get("web_search_route") not in {None, "none"}:
+                raise CoreDataError("offline_network_forbidden", "离线模式禁止公网检索。")
         if self._rag_requires_local(conversation) or run["id"] in self.rag_grounding.runs:
             if profile is not None:
                 require_local_profile(profile)
@@ -2725,7 +2785,7 @@ class ChatRunService:
             try:
                 if step["step_type"] == "web_research":
                     text, usage, provider_events = await self._invoke_search_specialist_step(
-                        run, execution_plan, step, attempt, create_provider(profile), messages,
+                        run, execution_plan, step, attempt, self._provider(profile), messages,
                         max_output_tokens=output_budget.initial_tokens,
                         artifact_ids=tuple(input_artifact_ids),
                     )
@@ -2734,7 +2794,7 @@ class ChatRunService:
                     for invocation_round in (1, 2):
                         try:
                             text, usage, provider_events = await self._invoke_planned_step(
-                                run, execution_plan, step, attempt, create_provider(profile), messages,
+                                run, execution_plan, step, attempt, self._provider(profile), messages,
                                 max_output_tokens=invocation_output_tokens,
                                 round_no=invocation_round,
                                 artifact_ids=tuple(input_artifact_ids),
@@ -2901,12 +2961,12 @@ class ChatRunService:
             "work_kind": conversation_kind,
             "recent_conversation": recent_messages[-6:],
         }, ensure_ascii=False, separators=(",", ":"))
-        provider = create_provider(profile)
+        provider = self._provider(profile)
 
         async def classify(response_format: str | None) -> dict[str, Any]:
             text = ""
             async with asyncio.timeout(30):
-                async for event in provider.stream_events(
+                async with closing_provider_stream(provider.stream_events(
                     model_id,
                     [{"role": "system", "content": prompt}, {"role": "user", "content": payload}],
                     tools=False,
@@ -2914,9 +2974,10 @@ class ChatRunService:
                         purpose="intent_analysis", max_output_tokens=256,
                         response_format=response_format,
                     ),
-                ):
-                    if event.kind == "text_delta" and event.text:
-                        text += event.text
+                )) as provider_stream:
+                    async for event in provider_stream:
+                        if event.kind == "text_delta" and event.text:
+                            text += event.text
             parsed = self.execution_coordinator.parse_routing_intent(text)
             return self.execution_coordinator.constrain_follow_up(
                 parsed, pending_action=pending_action,
@@ -3022,12 +3083,12 @@ class ChatRunService:
         max_output_tokens: int,
     ) -> str:
         """Run the bounded classifier, retrying endpoints that reject JSON mode."""
-        provider = create_provider(profile)
+        provider = self._provider(profile)
 
         async def stream(response_format: str | None) -> str:
             text = ""
             async with asyncio.timeout(12):
-                async for event in provider.stream_events(
+                async with closing_provider_stream(provider.stream_events(
                     model_id,
                     [{"role": "system", "content": prompt}, {"role": "user", "content": payload}],
                     tools=False,
@@ -3035,9 +3096,10 @@ class ChatRunService:
                         purpose="follow_up_analysis", max_output_tokens=max_output_tokens,
                         response_format=response_format,
                     ),
-                ):
-                    if event.kind == "text_delta" and event.text:
-                        text += event.text
+                )) as provider_stream:
+                    async for event in provider_stream:
+                        if event.kind == "text_delta" and event.text:
+                            text += event.text
             return text
 
         try:
@@ -3123,7 +3185,7 @@ class ChatRunService:
                 ).get("max_output_tokens"),
             )
             text, usage, _ = await self._invoke_planned_step(
-                run, execution_plan, step, attempt, create_provider(profile), messages,
+                run, execution_plan, step, attempt, self._provider(profile), messages,
                 max_output_tokens=intent_budget.initial_tokens,
                 response_format="json_object",
             )
@@ -3275,6 +3337,7 @@ class ChatRunService:
             "tool_schema_hash": spec.tool_schema_hash,
             "route_config_fingerprint": spec.route_fingerprint,
             "config_generation": spec.authority_generation,
+            **({"managed_runtime": dict(spec.managed_runtime)} if spec.managed_runtime else {}),
         }
 
     async def _invoke_search_specialist_step(
@@ -3800,7 +3863,7 @@ class ChatRunService:
                 "trigger": trigger, "status": "running",
             })
             checkpoint = await self.context.compact_once(
-                run, create_provider(profile), context_window=target.context_window,
+                run, self._provider(profile), context_window=target.context_window,
                 max_output_tokens=target.max_output_tokens, target=target,
                 dispatch_guard=lambda: self._validate_compaction_dispatch(run, target, profile),
             )
@@ -3954,7 +4017,7 @@ class ChatRunService:
             invocation_dispatched = False
             native_activity_in_turn = False
             try:
-                async with asyncio.timeout(600):
+                async with asyncio.timeout(600), AsyncExitStack() as stream_cleanup:
                     if execution_plan is None or execution_step is None:
                         raise CoreDataError(
                             "invocation_spec_invalid",
@@ -4035,6 +4098,7 @@ class ChatRunService:
                     stream = self.model_invocation.stream_prepared(
                         provider, spec, prepared,
                     ).__aiter__()
+                    await stream_cleanup.enter_async_context(closing_provider_stream(stream))
                     while True:
                         try:
                             async with asyncio.timeout(spec.activity_timeout_ms / 1000):
@@ -4583,7 +4647,13 @@ class ChatRunService:
             activity_timeout_ms=activity_timeout_ms,
             total_timeout_ms=total_timeout_ms,
             authority_generation=int(plan.get("authority_generation") or 0),
+            managed_runtime=self._managed_runtime_identity(step["provider_profile_id"]),
         )
+
+    def _managed_runtime_identity(self, provider_id: str) -> tuple[tuple[str, str], ...]:
+        if provider_id.startswith("managed:"):
+            return tuple(sorted(self.local_models.runtime_identity(provider_id).items()))
+        return ()
 
     async def _forced_presearch(
         self, run: dict[str, Any], attempt_id: str,
@@ -4819,18 +4889,19 @@ class ChatRunService:
                         "Return exactly JSON with decision approve, reject, or uncertain and reason_code."
                     ),
                 }
-                provider = create_provider(profile)
+                provider = self._provider(profile)
                 content = ""
                 async with asyncio.timeout(60):
-                    async for event in provider.stream_events(
+                    async with closing_provider_stream(provider.stream_events(
                         run["model_id"],
                         [{"role": "system", "content": "You are an isolated file-change risk reviewer. You have no tools."},
                          {"role": "user", "content": json.dumps(prompt, ensure_ascii=True)}],
                         tools=False,
                         options=GenerationOptions(purpose="tool_review", max_output_tokens=256),
-                    ):
-                        if event.kind == "text_delta" and event.text:
-                            content += event.text
+                    )) as provider_stream:
+                        async for event in provider_stream:
+                            if event.kind == "text_delta" and event.text:
+                                content += event.text
                 try:
                     parsed = json.loads(content)
                     candidate = parsed.get("decision")
@@ -4859,10 +4930,47 @@ class ChatRunService:
                                "timestamp": _utc_now(), "data": data})
 
     def _profile(self, profile_id: str) -> ProviderProfile:
-        profile = self.profiles.get(profile_id)
+        profile = self.local_models.get_profile(profile_id) if profile_id.startswith("managed:") else self.profiles.get(profile_id)
         if profile is None or not profile.enabled:
             raise CoreDataError("provider_unavailable", "The selected provider is unavailable.")
-        return profile
+        return local_profile(profile) if getattr(self, "offline", False) else profile
+
+    def _provider(self, profile: ProviderProfile):
+        profile = local_profile(profile) if getattr(self, "offline", False) else profile
+        provider = create_provider(profile)
+        if profile.id.startswith("managed:"):
+            return ManagedLocalProvider(profile, provider, self.local_models)
+        return provider
+
+    def _sync_managed_profiles(self) -> None:
+        models = getattr(self, "local_models", None)
+        if models is None:
+            return
+        for identity in [key for key in self.profiles if key.startswith("managed:")]:
+            self.profiles.pop(identity)
+        self.profiles.update(models.provider_profiles())
+        default = models.default_provider_id()
+        current = self.routing_preferences.get("global_default_provider_profile_id")
+        if default and (current is None or current.startswith("managed:")):
+            self.routing_preferences["global_default_provider_profile_id"] = default
+            self.routing_preferences["global_default_model_id"] = default.removeprefix("managed:")
+
+    async def handle_local_model(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await self.local_models.handle(action, params)
+        if action == "runtime.capabilities" and params.get("verify", True):
+            from agent.gpu_resources import nvidia_memory
+            result["resources"] = await asyncio.to_thread(nvidia_memory)
+        self._sync_managed_profiles()
+        if action == "model.configure" and params.get("is_default") is True:
+            self.routing_preferences["global_default_provider_profile_id"] = "managed:" + params["model_id"]
+            self.routing_preferences["global_default_model_id"] = params["model_id"]
+        if action == "model.list":
+            for record in result["models"]:
+                profile = self.profiles.get(record["provider_profile_id"])
+                record["source_type"] = "managed_local"
+                record["capabilities"] = (profile.model_capabilities or {}).get(record["id"], {}) if profile else {}
+                record["tool_mode"] = (profile.model_tool_modes or {}).get(record["id"], "unknown") if profile else "unknown"
+        return result
 
     @staticmethod
     def _required(params: dict[str, Any], key: str) -> str:

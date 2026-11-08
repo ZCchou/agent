@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./tauri-mock.mjs";
 
-test("assistant Markdown is rendered safely and remote images require one global approval", async ({ page }) => {
+test("assistant Markdown is rendered safely and offline mode blocks remote images", async ({ page }) => {
   test.setTimeout(35_000);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:5173" });
   let imageRequests = 0;
@@ -77,7 +77,7 @@ test("assistant Markdown is rendered safely and remote images require one global
   await expect(page.locator(".markdown-image")).toHaveCount(0);
   expect(imageRequests).toBe(0);
 
-  await page.getByRole("button", { name: "Allow all remote images" }).first().click();
-  await expect(page.locator(".markdown-image")).toHaveCount(2);
-  await expect.poll(() => imageRequests).toBe(2);
+  await expect(page.getByRole("button", { name: "Allow all remote images" })).toHaveCount(0);
+  await expect(page.locator(".markdown-image-placeholder--blocked")).toHaveCount(2);
+  expect(imageRequests).toBe(0);
 });

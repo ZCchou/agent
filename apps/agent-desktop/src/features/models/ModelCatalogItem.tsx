@@ -85,8 +85,8 @@ export function ModelCatalogItem({
         {model.enabled && model.tool_mode === "unknown"
           ? <Button variant="ghost" onClick={onProbeTools}>{t("models.probeTools")}</Button> : null}
         {canProbeNativeSearch
-          ? <Button variant="ghost" disabled={!model.enabled} title={t("models.probeNativeSearchCostHint")} onClick={onProbeNativeSearch}>{t("models.probeNativeSearch")}</Button>
-          : <Button variant="ghost" onClick={onConfigureExternalSearch}>{t("models.configureExternalSearch")}</Button>}
+          ? <Button variant="ghost" disabled title="离线模式已停用原生联网检索" onClick={onProbeNativeSearch}>{t("models.probeNativeSearch")}</Button>
+          : <Button variant="ghost" disabled title="离线模式已停用外部联网检索" onClick={onConfigureExternalSearch}>{t("models.configureExternalSearch")}</Button>}
         {model.capabilities.vision_source === "user_confirmed" || model.capabilities.vision_source === "runtime"
           ? <Button variant="ghost" onClick={onResetVision}>{t("models.resetVision")}</Button> : null}
         {routeHealth.some((record) => record.health_status !== "ready")

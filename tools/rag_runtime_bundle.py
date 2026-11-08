@@ -13,6 +13,7 @@ def build_identity(repository: Path, device: str) -> dict:
         raise ValueError("Unsupported runtime device")
     paths = ["services/agent-core/src/agent/rag/worker.py",
              "services/agent-core/src/agent/rag/model_profiles.py",
+             "services/agent-core/src/agent/rag/models.py",
              f"services/agent-core/requirements-rag-{device}.lock"]
     return {relative: hashlib.sha256((Path(repository) / relative).read_bytes().replace(b"\r\n", b"\n").rstrip(b"\n") + b"\n").hexdigest()
             for relative in paths}

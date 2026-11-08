@@ -28,6 +28,16 @@ def model_spec(**overrides) -> InvocationSpec:
     return InvocationSpec(**values)
 
 
+def test_managed_runtime_identity_is_hashed_and_audited_without_transport_secrets():
+    plain = model_spec()
+    first = model_spec(managed_runtime=(("engine_commit", "a" * 40), ("backend", "cuda"), ("session_id", "session-1")))
+    second = model_spec(managed_runtime=(("engine_commit", "a" * 40), ("backend", "cuda"), ("session_id", "session-2")))
+    assert len({plain.spec_hash, first.spec_hash, second.spec_hash}) == 3
+    assert "managed_runtime" not in plain.to_dict()["target"]
+    assert first.to_dict()["target"]["managed_runtime"]["session_id"] == "session-1"
+    assert ChatRunService._invocation_outcome_data(first)["managed_runtime"]["backend"] == "cuda"
+
+
 def test_compiler_rejects_protocol_adapter_mismatch_before_dispatch() -> None:
     with pytest.raises(CoreDataError, match="does not match") as error:
         InvocationCompiler().compile_model(

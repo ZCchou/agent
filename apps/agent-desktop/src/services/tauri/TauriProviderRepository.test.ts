@@ -24,8 +24,9 @@ describe("TauriProviderRepository", () => {
     await repository.countReferences("remote");
     expect(invoke).toHaveBeenLastCalledWith("count_provider_conversation_references", { providerId: "remote" });
     await repository.setEnabled("remote", false, true);
-    expect(invoke).toHaveBeenLastCalledWith("set_model_provider_enabled", {
+    expect(invoke).toHaveBeenNthCalledWith(2, "set_model_provider_enabled", {
       providerId: "remote", enabled: false, confirmAffectedConversations: true,
     });
+    expect(invoke).toHaveBeenLastCalledWith("get_app_settings");
   });
 });

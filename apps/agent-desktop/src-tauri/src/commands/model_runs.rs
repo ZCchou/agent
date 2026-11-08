@@ -59,6 +59,12 @@ pub async fn retry_model_run(
     context_strategy: Option<String>,
     web_search_override: Option<String>,
 ) -> Result<Value, String> {
+    if web_search_override
+        .as_deref()
+        .is_some_and(|mode| mode != "off")
+    {
+        crate::offline::deny_network()?;
+    }
     normalize_legacy_run_images(&app, &manager, &attachment_store, &run_id).await?;
     request_core(
         &app,
@@ -83,6 +89,26 @@ async fn normalize_legacy_run_images(
     let run = run_result
         .get("run")
         .ok_or_else(|| "invalid_core_response: Model run is missing.".to_string())?;
+    let settings = app.state::<crate::settings::SettingsManager>();
+    let configured = crate::settings::commands::catalog_settings(app, manager, &settings).await?;
+    let provider_id = run["provider_profile_id"]
+        .as_str()
+        .ok_or("invalid_core_response: Run provider missing")?;
+    let model_id = run["model_id"]
+        .as_str()
+        .ok_or("invalid_core_response: Run model missing")?;
+    if !configured.models.providers.iter().any(|profile| {
+        profile.id == provider_id
+            && profile.enabled
+            && profile
+                .models
+                .iter()
+                .any(|model| model.id == model_id && model.enabled && model.status != "unavailable")
+    }) {
+        return Err(
+            "model_unavailable: Load or reselect an available local model before retrying.".into(),
+        );
+    }
     let conversation_id = run
         .get("conversation_id")
         .and_then(Value::as_str)

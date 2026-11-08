@@ -14,7 +14,7 @@ import type {
   SidebarPreferences,
   WebSearchSettings,
 } from "../../types/settings";
-import { enqueueSettingsWrite, patchRouting, patchSidebarCollapse, patchWebSearch } from "./settingsPersistence";
+import { enqueueSettingsWrite, invokeSettingsMutation, patchRouting, patchSidebarCollapse, patchWebSearch } from "./settingsPersistence";
 
 
 /**
@@ -39,7 +39,7 @@ export class TauriSettingsRepository
     language:
       InterfaceLanguage,
   ): Promise<AppSettings> {
-    return invoke<AppSettings>(
+    return invokeSettingsMutation(
       "update_interface_language",
       {
         language,
@@ -52,11 +52,11 @@ export class TauriSettingsRepository
   }
 
   async updateSidebarWidth(widthPx: number): Promise<AppSettings> {
-    return enqueueSettingsWrite(() => invoke<AppSettings>("update_sidebar_width", { widthPx }));
+    return enqueueSettingsWrite(() => invokeSettingsMutation("update_sidebar_width", { widthPx }));
   }
 
   async updateRemoteImagePolicy(policy: RemoteImagePolicy): Promise<AppSettings> {
-    return invoke<AppSettings>("update_remote_image_policy", { policy });
+    return invokeSettingsMutation("update_remote_image_policy", { policy });
   }
   async updateWebSearch(settings: Partial<WebSearchSettings>): Promise<AppSettings> {
     return patchWebSearch(settings);
@@ -68,7 +68,7 @@ export class TauriSettingsRepository
   async updateModelVisionConfirmation(
     providerId: string, modelId: string, confirmed: boolean | null,
   ): Promise<AppSettings> {
-    return invoke<AppSettings>("update_model_vision_confirmation", {
+    return invokeSettingsMutation("update_model_vision_confirmation", {
       providerId, modelId, confirmed,
     });
   }

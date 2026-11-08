@@ -453,6 +453,32 @@ impl SettingsManager {
         Ok(settings)
     }
 
+    pub(crate) fn update_managed_default(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<AppSettings, SettingsError> {
+        if model_id.len() != 64
+            || !model_id
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            || provider_id != format!("managed:{model_id}")
+        {
+            return Err(SettingsError::InvalidData(
+                "Invalid managed model reference".into(),
+            ));
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SettingsError::Storage("settings manager lock was poisoned".into()))?;
+        let mut settings = self.load_or_create()?;
+        settings.models.default_provider_profile_id = provider_id.into();
+        settings.models.default_model_id = model_id.into();
+        self.repository.save(&settings)?;
+        Ok(settings)
+    }
+
     pub fn update_default_model(
         &self,
         provider_id: String,
@@ -2471,5 +2497,29 @@ mod tests {
         assert_eq!(repaired.models[0].native_web_search_status, "declared");
         assert_eq!(repaired.models[0].native_web_search_verified_at, None);
         assert_eq!(repository.snapshot(), Some(loaded));
+    }
+    #[test]
+    fn managed_default_persists_only_stable_references() {
+        let repository = Arc::new(MemorySettingsRepository::default());
+        let manager = SettingsManager::new(repository.clone());
+        let id = "a".repeat(64);
+        assert!(manager
+            .update_managed_default("managed:spoof", &id)
+            .is_err());
+        manager
+            .update_managed_default(&format!("managed:{id}"), &id)
+            .unwrap();
+        let stored = repository.snapshot().unwrap();
+        assert_eq!(stored.models.default_model_id, id);
+        assert_eq!(
+            stored.models.default_provider_profile_id,
+            format!("managed:{id}")
+        );
+        assert!(!stored
+            .models
+            .providers
+            .iter()
+            .any(|profile| profile.id.starts_with("managed:")));
+        assert_eq!(manager.get_settings().unwrap(), stored);
     }
 }

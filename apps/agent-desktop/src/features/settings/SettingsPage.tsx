@@ -287,8 +287,8 @@ export function SettingsPage() {
           <span>{t("settings.remoteImages.label")}</span>
           <input
             type="checkbox"
-            checked={remoteImages.policy === "allow"}
-            disabled={remoteImages.loading || remoteImages.saving}
+            checked={false}
+            disabled title="离线模式已停用远程图片"
             onChange={(event) => void (event.target.checked
               ? remoteImages.allowAllRemoteImages()
               : remoteImages.revokeRemoteImages()).catch(() => undefined)}

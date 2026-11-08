@@ -7,6 +7,19 @@ ADMISSION_TYPES = frozenset({
     "provider.native_search.probe", "model.tool_capability.probe",
 })
 
+MANAGEMENT_READ_ACTIONS = {
+    "local_model.request": frozenset({"model.list", "job.list", "runtime.status"}),
+    "rag.request": frozenset({"library.list", "document.list", "document.preview", "job.list",
+                              "model.list", "evidence.read"}),
+}
+
+
+def is_admission(message: dict) -> bool:
+    kind = message.get("type")
+    if kind in MANAGEMENT_READ_ACTIONS:
+        return message.get("params", {}).get("action") not in MANAGEMENT_READ_ACTIONS[kind]
+    return kind in ADMISSION_TYPES
+
 
 def prepare(service, update_id: str) -> dict:
     if len(update_id) > 100:

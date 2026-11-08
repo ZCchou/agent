@@ -1,3 +1,5 @@
+import { LocalModelsPanel } from "./LocalModelsPanel";
+import { isLocalProvider } from "../../services/modelSelection";
 import {
   Bot, CheckCircle2, Cloud, Cpu, KeyRound, List, LoaderCircle, Plus, Power,
   RefreshCw, Server, Trash2, X, XCircle,
@@ -33,14 +35,10 @@ function providerIcon(kind: ProviderKind) {
 
 export function ModelsPage() {
   const { t } = useTranslation("common");
-  const { setCurrentPage } = useApp();
+  const { setCurrentPage, coreOnline } = useApp();
   const presets: Preset[] = [
     { id: "ollama", kind: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434" },
-    { id: "deepseek", kind: "openai_compatible", name: "DeepSeek", baseUrl: "https://api.deepseek.com" },
-    { id: "openai", kind: "openai_compatible", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
-    { id: "moonshot_cn", kind: "openai_compatible", name: t("models.presets.moonshotCn"), baseUrl: "https://api.moonshot.cn/v1" },
-    { id: "kimi_global", kind: "openai_compatible", name: "Kimi International", baseUrl: "https://api.moonshot.ai/v1" },
-    { id: "custom", kind: "openai_compatible", name: t("models.presets.custom"), baseUrl: "https://example.com/v1" },
+    { id: "custom", kind: "openai_compatible", name: "本机兼容服务", baseUrl: "http://127.0.0.1:8080/v1" },
   ];
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [routeHealth, setRouteHealth] = useState<RouteHealthRecord[]>([]);
@@ -73,7 +71,7 @@ export function ModelsPage() {
   useEffect(() => {
     void loadSettings();
     void modelCatalogRepository.listRouteHealth().then(setRouteHealth).catch(() => setRouteHealth([]));
-  }, [loadSettings]);
+  }, [loadSettings, coreOnline]);
 
   const modelSettings = settings?.models;
   const viewingProvider = modelSettings?.providers.find((provider) => provider.id === viewingProviderId);
@@ -383,11 +381,13 @@ export function ModelsPage() {
   return (
     <div className="page-content models-page">
       <header className="page-heading models-page__heading">
-        <div><span className="models-page__heading-icon"><Bot size={26} /></span><div><h1>{t("pages.models.title")}</h1><p>{t("pages.models.description")}</p></div></div>
+        <div><span className="models-page__heading-icon"><Bot size={26} /></span><div><h1>本地模型</h1><p>{t("pages.models.description")}</p></div></div>
         <Button icon={<Plus size={16} />} variant="primary" onClick={() => setEditing(true)}>{t("models.add")}</Button>
       </header>
 
       {error && !editing && !viewingProvider ? <div className="models-alert" role="alert"><XCircle size={18} /><span>{error}</span><button type="button" onClick={() => setError(null)} aria-label={t("actions.close")}><X size={16} /></button></div> : null}
+
+      <LocalModelsPanel onChanged={loadSettings} onAuxiliary={() => { window.sessionStorage.setItem("agent:rag-tab", "models"); setCurrentPage("rag"); }} />
 
       <Card className="models-default-card">
         <div className="models-default-card__copy"><span className="models-default-card__icon"><Bot size={21} /></span><div><h2>{t("models.defaultModel")}</h2><p>{t("models.defaultDescription")}</p></div></div>
@@ -406,8 +406,9 @@ export function ModelsPage() {
       <section className="models-section" aria-labelledby="model-services-heading">
         <div className="models-section__heading"><div><h2 id="model-services-heading">{t("models.services")}</h2><p>{t("models.servicesDescription")}</p></div><span>{t("models.serviceCount", { count: modelSettings.providers.length })}</span></div>
         <div className="model-grid">
-          {modelSettings.providers.map((provider) => {
+          {modelSettings.providers.filter(provider => !provider.id.startsWith("managed:")).map((provider) => {
             const providerStatus = status[provider.id] ?? "idle";
+            const offlineDisabled = !isLocalProvider(provider);
             const isDefault = modelSettings.default_provider_profile_id === provider.id;
             const enabledModels = provider.models.filter((model) => model.enabled && model.status !== "unavailable" && model.capabilities.text !== "no");
             const automaticModels = enabledModels.filter((model) => model.allow_automatic_routing);
@@ -420,7 +421,7 @@ export function ModelsPage() {
             return <Card className="model-provider-card" key={provider.id}>
               <div className="model-provider-card__header">
                 <span className={`model-provider-card__icon model-provider-card__icon--${provider.kind}`}>{providerIcon(provider.kind)}</span>
-                <div className="model-provider-card__identity"><div><h3>{provider.name}</h3>{isDefault ? <span className="model-badge model-badge--primary">{t("models.currentDefault")}</span> : null}</div><span>{t(`models.providerKinds.${provider.kind}`)}</span></div>
+                <div className="model-provider-card__identity"><div><h3>{provider.name}</h3>{offlineDisabled && <span>离线模式已停用</span>}{isDefault ? <span className="model-badge model-badge--primary">{t("models.currentDefault")}</span> : null}</div><span>{t(`models.providerKinds.${provider.kind}`)}</span></div>
                 <span className={`model-status model-status--${providerStatus === "idle" && !provider.enabled ? "error" : providerStatus}`}>
                   {providerStatus === "loading" ? <LoaderCircle size={13} /> : providerStatus === "ok" ? <CheckCircle2 size={13} /> : providerStatus === "error" || !provider.enabled ? <XCircle size={13} /> : <span />}
                   {provider.enabled ? t(`models.status.${providerStatus}`) : t("models.status.disabled")}
@@ -435,8 +436,8 @@ export function ModelsPage() {
               </div>
               <div className="model-provider-actions">
                 <Button icon={<List size={15} />} onClick={(event) => { catalogTrigger.current = event.currentTarget; setViewingProviderId(provider.id); }}>{t("models.manageModels")}</Button>
-                <Button icon={providerStatus === "loading" ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} onClick={() => void refreshModels(provider.id)} disabled={providerStatus === "loading"}>{providerStatus === "loading" ? t("models.testing") : t("models.test")}</Button>
-                {provider.id !== "builtin-demo" ? <Button icon={<Power size={15} />} variant="ghost" disabled={isDefault && provider.enabled} onClick={() => void setProviderEnabled(provider.id, provider.name, !provider.enabled)}>{provider.enabled ? t("models.disableProvider") : t("models.enableProvider")}</Button> : null}
+                <Button icon={providerStatus === "loading" ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} onClick={() => void refreshModels(provider.id)} disabled={offlineDisabled || providerStatus === "loading"}>{providerStatus === "loading" ? t("models.testing") : t("models.test")}</Button>
+                {provider.id !== "builtin-demo" ? <Button icon={<Power size={15} />} variant="ghost" disabled={offlineDisabled || (isDefault && provider.enabled)} onClick={() => void setProviderEnabled(provider.id, provider.name, !provider.enabled)}>{provider.enabled ? t("models.disableProvider") : t("models.enableProvider")}</Button> : null}
                 {provider.id !== "builtin-demo" ? <Button className="model-delete-button" icon={<Trash2 size={15} />} variant="ghost" disabled={isDefault} onClick={() => void requestRemove(provider.id, provider.name)}>{t("models.delete")}</Button> : null}
               </div>
             </Card>;

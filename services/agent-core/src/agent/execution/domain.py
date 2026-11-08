@@ -358,6 +358,7 @@ class InvocationSpec:
     authority_generation: int = 0
     status: InvocationStatus = "prepared"
     spec_hash: str = ""
+    managed_runtime: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.round_no < 0 or self.attempt_no < 1 or self.authority_generation < 0:
@@ -382,6 +383,7 @@ class InvocationSpec:
                 "adapter_id": self.adapter_id,
                 "endpoint_role": self.endpoint_role,
                 "route_fingerprint": self.route_fingerprint,
+                **({"managed_runtime": dict(self.managed_runtime)} if self.managed_runtime else {}),
             },
             "capability_signature": list(self.capability_signature),
             "inputs": {

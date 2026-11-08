@@ -12,7 +12,7 @@ import { useScopedAction } from "../../features/chat/useScopedAction";
 export function TopBar() {
   const { t } = useTranslation("common");
   const {
-    currentPage, activeConversation, projects, chatGroups, draft, setDraftCategory,
+    currentPage, coreOnline, activeConversation, projects, chatGroups, draft, setDraftCategory,
     refreshWorkspace, setCurrentPage,
   } = useApp();
   const project = projects.find((item) => item.id === activeConversation?.project_id);
@@ -29,7 +29,7 @@ export function TopBar() {
     void settingsRepository.getAppSettings().then(value => { if (active) setSettings(value); })
       .catch(() => { if (active) setLoadError(true); });
     return () => { active = false; };
-  }, [currentPage, loadRevision]);
+  }, [currentPage, coreOnline, loadRevision]);
   useEffect(() => {
     let active = true;
     const projectId = activeConversation ? activeConversation.project_id : draft.kind === "project_work" ? draft.projectId : null;
@@ -84,7 +84,7 @@ export function TopBar() {
   const allModelCandidates = settings ? selectableModels(
     settings,
     activeConversation?.kind === "project_work" ? project : !activeConversation && draft.kind === "project_work" ? draftProject : undefined,
-    projectModelScope,
+    projectModelScope, true,
   ) : [];
   const automaticMode = activeConversation?.model_selection_mode === "automatic";
   const modelCandidates = automaticMode
@@ -175,6 +175,7 @@ export function TopBar() {
         </button> : <label className="top-select">
           <Box size={16} />
           <select value={selectedModelValue} disabled={action.busy || !settings || loadError}
+            onFocus={() => setLoadRevision(value => value + 1)}
             onChange={(event) => void updateConversationProvider(event.target.value)}>
             <option value="" disabled>{t("models.chooseCompatibleModel")}</option>
             {automaticMode ? (
@@ -186,9 +187,11 @@ export function TopBar() {
                 })}
               </option>
             ) : null}
-            {modelCandidates.map(({ provider, model, value }) => <option value={value} key={value}>{provider.name} / {model.id}</option>)}
+            {modelCandidates.map(({ provider, model, value }) => <option value={value} key={value} disabled={model.status === "unavailable"}>{provider.name} / {model.id}{model.status === "unavailable" ? " · 未加载" : ""}</option>)}
           </select>
         </label>}
+
+        {currentPage === "chat" && allModelCandidates.some(item => item.model.status === "unavailable" && item.provider.id.startsWith("managed:")) && <button onClick={() => setCurrentPage("models")}>加载本地模型</button>}
 
         <button className="profile-button" aria-label={t("topbar.profile")} title={t("topbar.profile")}
           onClick={() => setCurrentPage("settings")}>

@@ -29,7 +29,7 @@ if (-not (Test-Path -LiteralPath $buildPython)) {
 & $buildPython -c "import sys,struct; assert sys.version_info[:2] == (3,12) and struct.calcsize('P') == 8, 'CPython 3.12 x64 is required'"
 if ($LASTEXITCODE -ne 0) { throw 'Unsupported inference build interpreter' }
 if (-not $ReuseEnvironment) {
-    & $buildPython -m pip install --only-binary=:all: -r $lock
+    & $buildPython -m pip install --cache-dir (Join-Path $buildRoot 'pip-cache') --only-binary=:all: -r $lock
     if ($LASTEXITCODE -ne 0) { throw 'Failed to install fixed inference dependencies' }
 }
 & $buildPython -m pip check
@@ -62,16 +62,32 @@ $arguments = @(
     '--collect-all', 'tokenizers', '--collect-all', 'safetensors', '--collect-all', 'sentencepiece',
     '--exclude-module', 'tensorflow', '--exclude-module', 'jax',
     '--exclude-module', 'torchvision', '--exclude-module', 'torchaudio',
-    '--exclude-module', 'IPython', '--exclude-module', 'pytest', $entry
+    '--exclude-module', 'IPython', '--exclude-module', 'pytest',
+    '--exclude-module', 'tensorboard', '--exclude-module', 'tensorrt', $entry
 )
-& $buildPython @arguments
-if ($LASTEXITCODE -ne 0) { throw 'Inference runtime bundle build failed' }
+$previousPyInstallerCache = $env:PYINSTALLER_CONFIG_DIR
+$previousTemp = $env:TEMP
+$previousTmp = $env:TMP
+try {
+    $env:PYINSTALLER_CONFIG_DIR = Join-Path $buildRoot 'pyinstaller-cache'
+    $env:TEMP = Join-Path $buildRoot 'temp'
+    $env:TMP = $env:TEMP
+    New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+    & $buildPython @arguments
+    if ($LASTEXITCODE -ne 0) { throw 'Inference runtime bundle build failed' }
+} finally {
+    $env:PYINSTALLER_CONFIG_DIR = $previousPyInstallerCache
+    $env:TEMP = $previousTemp
+    $env:TMP = $previousTmp
+}
 $bundle = Join-Path $runRoot 'dist/rag-worker'
 if (-not (Test-Path -LiteralPath (Join-Path $bundle 'rag-worker.exe'))) {
     throw 'Inference build did not produce rag-worker.exe'
 }
 New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($destination)) | Out-Null
 Copy-Item -LiteralPath $bundle -Destination $destination -Recurse
+& $buildPython (Join-Path $PSScriptRoot 'rag_runtime_assets.py') $destination --cuda-license (Join-Path $repository '.artifacts/local-runtime-work/engines/LICENSE-NVIDIA-CUDA.html')
+if ($LASTEXITCODE -ne 0) { throw 'Inference runtime asset pruning or license inventory failed' }
 $hashes = [ordered]@{}
 Get-ChildItem -LiteralPath $destination -File -Recurse | Sort-Object FullName | ForEach-Object {
     $relative = [IO.Path]::GetRelativePath($destination, $_.FullName).Replace('\', '/')

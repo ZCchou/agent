@@ -6,10 +6,55 @@ import importlib.util
 import json
 import math
 import os
+import struct
 import sys
 from pathlib import Path
 
 from agent.rag.model_profiles import PROFILES, QUERY_INSTRUCTION, RERANK_PREFIX, RERANK_SUFFIX
+
+
+def _owned_state_dict(root):
+    """Read verified tensor ranges into owned buffers, avoiding Windows mmap views."""
+    import torch
+    from agent.rag.models import _json, _safe_relative, _validate_safetensors
+    root = Path(root)
+    if (root / "model.safetensors").is_file():
+        names = ["model.safetensors"]
+    else:
+        mapping = _json(root / "model.safetensors.index.json").get("weight_map")
+        if not isinstance(mapping, dict) or not mapping or any(not isinstance(name, str) for name in mapping.values()):
+            raise ValueError("Invalid safetensors shard index")
+        names = sorted(set(mapping.values()))
+    dtypes = {"BOOL": torch.bool, "U8": torch.uint8, "I8": torch.int8,
+              "I16": torch.int16, "U16": torch.uint16, "I32": torch.int32, "U32": torch.uint32,
+              "I64": torch.int64, "U64": torch.uint64, "F16": torch.float16, "BF16": torch.bfloat16,
+              "F32": torch.float32, "F64": torch.float64,
+              "F8_E4M3": torch.float8_e4m3fn, "F8_E5M2": torch.float8_e5m2}
+    state = {}
+    for name in names:
+        if not name.endswith(".safetensors"):
+            raise ValueError("Weight shards must be safetensors files")
+        path = _safe_relative(root, name)
+        header, header_size = _validate_safetensors(path, include_header=True)
+        keys = set(header) - {"__metadata__"}
+        with path.open("rb") as source:
+            if struct.unpack("<Q", source.read(8))[0] != header_size or json.loads(source.read(header_size)) != header:
+                raise ValueError("Weight shard header changed while reading")
+            expected_size = 8 + header_size + max(header[key]["data_offsets"][1] for key in keys)
+            if os.fstat(source.fileno()).st_size != expected_size:
+                raise ValueError("Weight shard size changed while reading")
+            for key in sorted(keys):
+                if key in state:
+                    raise ValueError("Duplicate tensor across weight shards")
+                item = header[key]
+                begin, end = item["data_offsets"]
+                source.seek(8 + header_size + begin)
+                buffer = bytearray(end - begin)
+                if source.readinto(buffer) != len(buffer):
+                    raise ValueError("Weight shard changed or was truncated while reading")
+                dtype = dtypes[item["dtype"]]
+                state[key] = torch.frombuffer(buffer, dtype=dtype).reshape(item["shape"]) if buffer else torch.empty(item["shape"], dtype=dtype)
+    return state
 
 
 def last_token_pool(hidden, attention_mask):
@@ -34,6 +79,8 @@ def _engine(backend, device):
             raise RuntimeError("CUDA is unavailable in the installed inference runtime")
         return {"engine": "transformers", "device": device, "cuda": torch.cuda.is_available()}
     import onnxruntime as ort
+    if device == "cuda":
+        ort.preload_dlls(cuda=True, cudnn=True, msvc=True)
     provider = "CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider"
     if provider not in ort.get_available_providers():
         raise RuntimeError(f"Requested provider {provider} is unavailable")
@@ -59,7 +106,8 @@ def _load(params, cache):
         metadata = json.loads((path / "rag-model.json").read_text(encoding="utf-8"))
         provider = "CUDAExecutionProvider" if params["device"] == "cuda" else "CPUExecutionProvider"
         model = ort.InferenceSession(str(path / metadata["graph"]), providers=[provider])
-        if provider not in model.get_providers():
+        model.disable_fallback()
+        if not model.get_providers() or model.get_providers()[0] != provider:
             raise RuntimeError(f"Requested ONNX provider {provider} failed to initialize")
         loaded = (tokenizer, model, metadata)
     else:
@@ -69,7 +117,20 @@ def _load(params, cache):
             factory = AutoModelForCausalLM
         elif profile.role == "reranker":
             factory = AutoModelForSequenceClassification
-        model, loading = factory.from_pretrained(str(path), local_files_only=True, trust_remote_code=False, use_safetensors=True, output_loading_info=True)
+        checkpoint = str(path)
+        loading_options = {"local_files_only": True, "trust_remote_code": False,
+                           "use_safetensors": True, "output_loading_info": True}
+        if os.name == "nt":
+            import torch
+            import transformers
+            native_classes = {"qwen3-embedding-0.6b": "Qwen3Model", "qwen3-reranker-0.6b": "Qwen3ForCausalLM",
+                              "bge-m3": "XLMRobertaModel", "bge-reranker-v2-m3": "XLMRobertaForSequenceClassification"}
+            factory = getattr(transformers, native_classes[params["profile"]])
+            loading_options.pop("trust_remote_code")
+            loading_options.update(config=transformers.AutoConfig.from_pretrained(str(path), local_files_only=True, trust_remote_code=False),
+                                   state_dict=_owned_state_dict(path), dtype=torch.float32)
+            checkpoint = None
+        model, loading = factory.from_pretrained(checkpoint, **loading_options)
         missing = loading.get("missing_keys", [])
         if params["profile"] == "bge-m3":
             # Dense CLS embeddings never consume the optional pooler projection.
@@ -93,11 +154,13 @@ def _torch_batch(params, tokenizer, model, texts):
         inputs["input_ids"] = [prefix + row + suffix for row in inputs["input_ids"]]
         inputs.pop("attention_mask", None)
         inputs = tokenizer.pad(inputs, padding=True, return_tensors="pt")
+        model_options = {"logits_to_keep": 1}
     else:
         inputs = tokenizer(texts, padding=True, truncation=True, max_length=profile.max_length, return_tensors="pt")
+        model_options = {}
     inputs = {name: tensor.to(params["device"]) for name, tensor in inputs.items()}
     with torch.inference_mode():
-        outputs = model(**inputs)
+        outputs = model(**inputs, **model_options)
         if profile.pooling == "yes_no":
             yes = tokenizer.convert_tokens_to_ids("yes")
             no = tokenizer.convert_tokens_to_ids("no")

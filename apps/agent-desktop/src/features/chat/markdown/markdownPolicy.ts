@@ -1,5 +1,5 @@
 export type LinkClassification = "external" | "blocked";
-export type ImageClassification = "remote_https" | "blocked";
+export type ImageClassification = "local" | "blocked";
 export interface ProjectFileTarget { path: string; lineStart: number | null; lineEnd: number | null }
 export interface ProjectDirectoryTarget { path: string }
 
@@ -27,7 +27,8 @@ export function classifyLink(value: string): LinkClassification {
 
 export function classifyImage(value: string): ImageClassification {
   const parsed = parseExternalUrl(value);
-  return parsed?.protocol === "https:" ? "remote_https" : "blocked";
+  if (/^data:image\/(png|jpeg|gif|webp|avif);base64,/i.test(value)) return "local";
+  return parsed && (parsed.protocol === "asset:" || parsed.protocol === "blob:" || (parsed.protocol === "https:" && parsed.hostname === "asset.localhost")) ? "local" : "blocked";
 }
 
 export function parseProjectFileTarget(value: string): ProjectFileTarget | null {
@@ -72,7 +73,7 @@ export function markdownUrlTransform(url: string, key: string): string {
   if (/^[\s\u0000-\u001f\u007f]*rag-evidence:/i.test(url)) {
     return key === "href" && parseRagEvidenceTarget(url) ? url : "";
   }
-  if (key === "src") return classifyImage(url) === "remote_https" ? url : "";
+  if (key === "src") return classifyImage(url) === "local" ? url : "";
   if (key === "href") return classifyLink(url) === "external" || parseProjectFileTarget(url) || parseProjectDirectoryTarget(url) ? url : "";
   return "";
 }

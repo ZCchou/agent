@@ -99,7 +99,7 @@ export function ModelCatalogDrawer({
 
       {!webPrivacyAcknowledged && nativeSearchRoute(provider) ? <div className="model-catalog-web-notice">
         <div><strong>{t("models.enableNativeSearchTitle")}</strong><p>{t("models.enableNativeSearchDescription")}</p></div>
-        <Button onClick={onEnableWebSearch}>{t("models.enableNativeSearch")}</Button>
+        <Button disabled title="离线模式已停用联网检索" onClick={onEnableWebSearch}>{t("models.enableNativeSearch")}</Button>
       </div> : null}
 
       <div className="model-list-toolbar">

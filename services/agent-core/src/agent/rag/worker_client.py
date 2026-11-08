@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from agent.storage import CoreDataError
+from agent.infrastructure.processes import WindowsJob
 
 
 class WorkerClient:
@@ -18,6 +19,7 @@ class WorkerClient:
         self._lock = asyncio.Lock()
         self._sequence = 0
         self._closed = False
+        self._job = None
 
     async def _start(self):
         if self._closed:
@@ -25,15 +27,28 @@ class WorkerClient:
         if self.process is not None and self.process.returncode is None:
             return
         env = os.environ.copy()
+        for name in list(env):
+            if name.upper() in {"PYTHONHOME", "PYTHONPATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "CUDA_VISIBLE_DEVICES", "CUDNN_PATH"} or name.upper().startswith("CUDA_PATH"):
+                env.pop(name)
+        system_root = Path(os.environ.get("SystemRoot", "C:/Windows"))
+        env["PATH"] = os.pathsep.join((str(Path(self.command[0]).resolve().parent),
+                                      str(system_root / "System32"), str(system_root)))
+        env["PYTHONNOUSERSITE"] = "1"
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false", PYTHONIOENCODING="utf-8")
         if not getattr(sys, "frozen", False):
             source = str(Path(__file__).resolve().parents[2])
-            env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = source
         self.process = await asyncio.create_subprocess_exec(
             *self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, limit=32 * 1024 * 1024,
             creationflags=0x08000000 if os.name == "nt" else 0,
         )
+        if os.name == "nt":
+            try:
+                self._job = WindowsJob(self.process.pid)
+            except BaseException:
+                await self._stop()
+                raise
         if self._closed:
             await self._stop()
             raise CoreDataError("rag_model_error", "Inference worker is closed")
@@ -72,9 +87,15 @@ class WorkerClient:
 
     async def _stop(self):
         process, self.process = self.process, None
+        job, self._job = self._job, None
+        if job is not None:
+            job.close()
         if process is not None:
             if process.returncode is None:
-                process.kill()
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
             await process.wait()
 
     async def close(self):

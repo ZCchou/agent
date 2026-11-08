@@ -10,6 +10,7 @@ from agent.execution.compiler import PreparedRequest
 from agent.execution.domain import InvocationSpec
 from agent.infrastructure.logging import events as log_events, log_event
 from agent.providers import (
+    closing_provider_stream,
     GenerationOptions, ProviderError, ProviderEvent, validate_provider_completion,
 )
 from agent.storage import CoreDataError
@@ -67,46 +68,47 @@ class ModelInvocationService:
         try:
             async with asyncio.timeout(spec.total_timeout_ms / 1000):
                 stream = self.stream_prepared(provider, spec, prepared).__aiter__()
-                while True:
-                    try:
-                        async with asyncio.timeout(spec.activity_timeout_ms / 1000):
-                            event = await anext(stream)
-                    except StopAsyncIteration:
-                        break
-                    except TimeoutError as error:
-                        raise ProviderError(
-                            "stream_stalled" if saw_activity else "request_timeout",
-                            "The model stopped producing activity."
-                            if saw_activity else "The model did not start responding in time.",
-                        ) from error
-                    saw_activity = True
-                    capability_id = (
-                        "structured_web_evidence"
-                        if "structured_web_evidence" in spec.capability_signature
-                        else "web_search"
-                        if "native_web_search" in spec.capability_signature
-                        else "vision_input"
-                        if "vision" in spec.capability_signature
-                        else "function_calling"
-                        if "function_tools" in spec.capability_signature
-                        else "reasoning"
-                        if "reasoning" in spec.capability_signature
-                        else "text_generation"
-                    )
-                    event = replace(
-                        event, run_id=spec.run_id or spec.plan_id, step_id=spec.step_id,
-                        capability_id=capability_id, adapter_id=spec.adapter_id,
-                        route_id=spec.route_id, sequence=len(events),
-                    )
-                    event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
-                    if event.kind == "provider_diagnostic":
-                        diagnostic.update(event.diagnostic or {})
-                        continue
-                    events.append(event)
-                    if event.kind == "text_delta" and event.text:
-                        content += event.text
-                    elif event.kind == "usage" and event.usage:
-                        usage.update(event.usage)
+                async with closing_provider_stream(stream):
+                    while True:
+                        try:
+                            async with asyncio.timeout(spec.activity_timeout_ms / 1000):
+                                event = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as error:
+                            raise ProviderError(
+                                "stream_stalled" if saw_activity else "request_timeout",
+                                "The model stopped producing activity."
+                                if saw_activity else "The model did not start responding in time.",
+                            ) from error
+                        saw_activity = True
+                        capability_id = (
+                            "structured_web_evidence"
+                            if "structured_web_evidence" in spec.capability_signature
+                            else "web_search"
+                            if "native_web_search" in spec.capability_signature
+                            else "vision_input"
+                            if "vision" in spec.capability_signature
+                            else "function_calling"
+                            if "function_tools" in spec.capability_signature
+                            else "reasoning"
+                            if "reasoning" in spec.capability_signature
+                            else "text_generation"
+                        )
+                        event = replace(
+                            event, run_id=spec.run_id or spec.plan_id, step_id=spec.step_id,
+                            capability_id=capability_id, adapter_id=spec.adapter_id,
+                            route_id=spec.route_id, sequence=len(events),
+                        )
+                        event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+                        if event.kind == "provider_diagnostic":
+                            diagnostic.update(event.diagnostic or {})
+                            continue
+                        events.append(event)
+                        if event.kind == "text_delta" and event.text:
+                            content += event.text
+                        elif event.kind == "usage" and event.usage:
+                            usage.update(event.usage)
                 validate_provider_completion(
                     content, next((event.finish_reason for event in reversed(events)
                                    if event.kind == "finish"), None), usage,
@@ -169,21 +171,22 @@ class ModelInvocationService:
         try:
             async with asyncio.timeout(90):
                 stream = self.stream(provider, model_id, messages, tools=False, options=options).__aiter__()
-                while True:
-                    try:
-                        async with asyncio.timeout(30):
-                            event = await anext(stream)
-                    except StopAsyncIteration:
-                        break
-                    except TimeoutError as error:
-                        raise ProviderError(
-                            "stream_stalled", "The specialist model stopped producing activity."
-                        ) from error
-                    events.append(event)
-                    if event.kind == "text_delta" and event.text:
-                        content += event.text
-                    elif event.kind == "usage" and event.usage:
-                        usage.update(event.usage)
+                async with closing_provider_stream(stream):
+                    while True:
+                        try:
+                            async with asyncio.timeout(30):
+                                event = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as error:
+                            raise ProviderError(
+                                "stream_stalled", "The specialist model stopped producing activity."
+                            ) from error
+                        events.append(event)
+                        if event.kind == "text_delta" and event.text:
+                            content += event.text
+                        elif event.kind == "usage" and event.usage:
+                            usage.update(event.usage)
                 validate_provider_completion(
                     content, next((event.finish_reason for event in reversed(events)
                                    if event.kind == "finish"), None), usage,

@@ -174,7 +174,7 @@ def test_runtime_configuration_updates_real_policy_and_model_snapshot(tmp_path,m
     requests=install_http(monkeypatch,[(list_reply("one"),"tool_calls"),({"content":"Work finished."},"stop")])
     async def scenario():
         async def configure(limits):
-            return await handle_async_message({"v":17,"id":"config","type":"runtime.capabilities.configure",
+            return await handle_async_message({"v":18,"id":"config","type":"runtime.capabilities.configure",
                 "params":{"host_reporting":False,"tool_budget_limits":limits}},service)
         async def sink(event):
             if event["event_type"] == "run.tool_requested":

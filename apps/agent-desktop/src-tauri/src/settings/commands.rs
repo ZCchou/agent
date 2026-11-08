@@ -26,8 +26,109 @@ use super::{
 /// React 只通过这个 command 获取配置，
 /// 不应该直接读取 settings.json。
 #[tauri::command]
-pub fn get_app_settings(manager: State<'_, SettingsManager>) -> Result<AppSettings, String> {
-    manager.get_settings().map_err(|error| error.to_string())
+pub async fn get_app_settings(
+    app: AppHandle,
+    manager: State<'_, SettingsManager>,
+    core: State<'_, Mutex<CoreProcessManager>>,
+) -> Result<AppSettings, String> {
+    catalog_settings(&app, &core, &manager).await
+}
+
+pub(crate) fn apply_catalog(
+    mut settings: AppSettings,
+    catalog: &serde_json::Value,
+) -> Result<AppSettings, String> {
+    settings.web_search.enabled = false;
+    settings.content.remote_image_policy = RemoteImagePolicy::Ask;
+    settings
+        .models
+        .providers
+        .retain(|profile| !profile.id.starts_with("managed:"));
+    for profile in &mut settings.models.providers {
+        if crate::offline::validate_profile(profile).is_err() {
+            profile.enabled = false;
+        }
+    }
+    for model in catalog["models"]
+        .as_array()
+        .ok_or("Invalid local model catalog")?
+    {
+        let id = model["id"].as_str().ok_or("Invalid managed model ID")?;
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err("Invalid managed model ID".into());
+        }
+        let provider_id = format!("managed:{id}");
+        if model["provider_profile_id"].as_str() != Some(&provider_id) {
+            return Err("Invalid managed provider ID".into());
+        }
+        let loaded = model["status"] == "loaded";
+        let capabilities = ModelCapabilities {
+            text: "yes".into(),
+            context_length: model["context_length"].as_u64(),
+            context_length_source: "discovered".into(),
+            input_price_per_million: Some("0".into()),
+            output_price_per_million: Some("0".into()),
+            ..Default::default()
+        };
+        let profile: ProviderProfileSettings = serde_json::from_value(json!({
+            "id": provider_id, "name": model["name"].as_str().unwrap_or(id),
+            "kind": "openai_compatible", "preset_id": "custom", "entered_base_url": "",
+            "resolved_api_base_url": null, "endpoint_mode": "exact", "enabled": true,
+            "credential_ref": null, "invocation_routes": [],
+            "models": [{ "id": id, "source": "discovered", "status": if loaded { "available" } else { "unavailable" },
+                "enabled": true, "allow_automatic_routing": true,
+                "tool_mode": model["tool_mode"].as_str().unwrap_or("unknown"), "capabilities": capabilities,
+                "last_seen_at": null }]
+        })).map_err(|_| "Invalid managed model metadata")?;
+        if model["is_default"] == true {
+            settings.models.default_provider_profile_id = provider_id;
+            settings.models.default_model_id = id.to_string();
+        }
+        settings.models.providers.push(profile);
+    }
+    Ok(settings)
+}
+
+pub(crate) async fn catalog_settings(
+    app: &AppHandle,
+    core: &State<'_, Mutex<CoreProcessManager>>,
+    manager: &SettingsManager,
+) -> Result<AppSettings, String> {
+    let settings = manager.get_settings().map_err(|error| error.to_string())?;
+    let mut catalog = request_core(
+        app,
+        core,
+        "local_model.request",
+        json!({"action": "model.list", "params": {}}),
+    )
+    .await?;
+    if catalog["models"]
+        .as_array()
+        .is_some_and(|models| models.iter().any(|model| model["status"] == "loaded"))
+    {
+        let runtime = request_core(
+            app,
+            core,
+            "local_model.request",
+            json!({"action": "runtime.status", "params": {}}),
+        )
+        .await?;
+        if let Some(models) = catalog["models"].as_array_mut() {
+            for model in models
+                .iter_mut()
+                .filter(|model| model["status"] == "loaded")
+            {
+                if runtime["state"] != "loaded" || runtime["model_id"] != model["id"] {
+                    model["status"] = json!("imported");
+                }
+            }
+        }
+    }
+    apply_catalog(settings, &catalog)
 }
 
 /// 修改全局界面语言。
@@ -70,6 +171,9 @@ pub fn update_remote_image_policy(
     policy: RemoteImagePolicy,
     manager: State<'_, SettingsManager>,
 ) -> Result<AppSettings, String> {
+    if policy == RemoteImagePolicy::Allow {
+        crate::offline::deny_network()?;
+    }
     manager
         .update_remote_image_policy(policy)
         .map_err(|error| error.to_string())
@@ -137,24 +241,7 @@ fn validate_provider_url(kind: &str, value: &str) -> Result<(), String> {
     if kind == "fake" && value == "memory://fake" {
         return Ok(());
     }
-    let parsed = url::Url::parse(value).map_err(|_| "The provider URL is invalid".to_string())?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "The provider URL needs a host".to_string())?;
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(
-            "The provider URL cannot contain credentials, a query, or a fragment".to_string(),
-        );
-    }
-    let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
-    if parsed.scheme() != "https" && !(loopback && parsed.scheme() == "http") {
-        return Err("Remote model providers must use HTTPS".to_string());
-    }
-    Ok(())
+    crate::offline::local_endpoint(value).map(|_| ())
 }
 
 async fn inject_provider(
@@ -163,6 +250,10 @@ async fn inject_provider(
     credentials: &State<'_, CredentialStore>,
     profile: &ProviderProfileSettings,
 ) -> Result<(), String> {
+    if profile.id.starts_with("managed:") {
+        return Ok(());
+    }
+    crate::offline::validate_profile(profile)?;
     let api_key = if profile.credential_ref.is_some() {
         credentials.get(&profile.id)?
     } else {
@@ -230,7 +321,7 @@ async fn inject_provider(
     Ok(())
 }
 
-fn routing_configuration(settings: &AppSettings) -> serde_json::Value {
+pub(crate) fn routing_configuration(settings: &AppSettings) -> serde_json::Value {
     let mut value = serde_json::to_value(&settings.routing).unwrap_or_else(|_| json!({}));
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -251,7 +342,11 @@ pub async fn reinject_providers(app: &AppHandle) -> Result<(), String> {
     let credentials = app.state::<CredentialStore>();
     let settings = manager.get_settings().map_err(|error| error.to_string())?;
     let profiles = &settings.models.providers;
-    for profile in profiles.iter().filter(|profile| profile.enabled) {
+    for profile in profiles.iter().filter(|profile| {
+        profile.enabled
+            && !profile.id.starts_with("managed:")
+            && crate::offline::validate_profile(profile).is_ok()
+    }) {
         inject_provider(app, &core, &credentials, profile).await?;
     }
     request_core(
@@ -272,6 +367,9 @@ pub async fn save_model_provider(
     credentials: State<'_, CredentialStore>,
     provider: ProviderProfileInput,
 ) -> Result<AppSettings, String> {
+    if provider.id.starts_with("managed:") {
+        return Err("Managed model IDs are reserved.".into());
+    }
     let (entered_base_url, endpoint_mode) =
         preset_address(&provider.preset_id, &provider.entered_base_url)?;
     validate_provider_url(&provider.kind, &entered_base_url)?;
@@ -394,15 +492,22 @@ pub async fn connect_model_provider(
     credentials: State<'_, CredentialStore>,
     provider_id: String,
 ) -> Result<(), String> {
-    let profile = manager
-        .get_settings()
-        .map_err(|error| error.to_string())?
+    let settings = catalog_settings(&app, &core, &manager).await?;
+    let profile = settings
         .models
         .providers
-        .into_iter()
-        .find(|item| item.id == provider_id)
-        .ok_or_else(|| "The provider profile does not exist".to_string())?;
-    inject_provider(&app, &core, &credentials, &profile).await
+        .iter()
+        .find(|profile| profile.id == provider_id && profile.enabled)
+        .ok_or("The provider profile is unavailable offline")?;
+    if profile.id.starts_with("managed:")
+        && !profile
+            .models
+            .iter()
+            .any(|model| model.status == "available")
+    {
+        return Err("model_unavailable: Load this local model before chatting.".into());
+    }
+    inject_provider(&app, &core, &credentials, profile).await
 }
 
 #[tauri::command]
@@ -547,7 +652,7 @@ pub async fn probe_model_tool_capability(
     provider_id: String,
     model_id: String,
 ) -> Result<AppSettings, String> {
-    let settings = manager.get_settings().map_err(|error| error.to_string())?;
+    let settings = catalog_settings(&app, &core, &manager).await?;
     let profile = settings
         .models
         .providers
@@ -569,6 +674,9 @@ pub async fn probe_model_tool_capability(
         std::time::Duration::from_secs(130),
     )
     .await?;
+    if provider_id.starts_with("managed:") {
+        return catalog_settings(&app, &core, &manager).await;
+    }
     let mode = result
         .get("tool_mode")
         .and_then(serde_json::Value::as_str)
@@ -967,6 +1075,43 @@ pub async fn update_default_model(
     provider_profile_id: String,
     model_id: String,
 ) -> Result<SettingsApplyResult, String> {
+    if provider_profile_id.starts_with("managed:") {
+        let configured = catalog_settings(&app, &core, &manager).await?;
+        if !configured.models.providers.iter().any(|profile| {
+            profile.id == provider_profile_id
+                && profile.models.iter().any(|model| model.id == model_id)
+        }) {
+            return Err("Managed model is no longer imported.".into());
+        }
+        request_core(&app, &core, "local_model.request", json!({"action": "model.configure", "params": {"model_id": model_id, "is_default": true}})).await?;
+        manager
+            .update_managed_default(&provider_profile_id, &model_id)
+            .map_err(|error| error.to_string())?;
+        let settings = catalog_settings(&app, &core, &manager).await?;
+        request_core(
+            &app,
+            &core,
+            "routing.configure",
+            routing_configuration(&settings),
+        )
+        .await?;
+        return Ok(SettingsApplyResult {
+            settings,
+            core_sync: "applied".into(),
+            warning_code: None,
+        });
+    }
+    let configured = catalog_settings(&app, &core, &manager).await?;
+    if !configured.models.providers.iter().any(|profile| {
+        profile.id == provider_profile_id
+            && profile.enabled
+            && profile
+                .models
+                .iter()
+                .any(|model| model.id == model_id && model.enabled && model.status != "unavailable")
+    }) {
+        return Err("The selected default model is unavailable offline.".into());
+    }
     let settings = manager
         .update_default_model(provider_profile_id, model_id)
         .map_err(|error| error.to_string())?;
@@ -976,6 +1121,11 @@ pub async fn update_default_model(
         .iter()
         .find(|profile| profile.id == settings.models.default_provider_profile_id);
     let sync_result = async {
+        for managed in configured.models.providers.iter().filter(|profile| profile.id.starts_with("managed:")) {
+            for model in &managed.models {
+                request_core(&app, &core, "local_model.request", json!({"action": "model.configure", "params": {"model_id": model.id, "is_default": false}})).await?;
+            }
+        }
         let profile = profile.ok_or_else(|| "The default provider does not exist".to_string())?;
         inject_provider(&app, &core, &credentials, profile).await?;
         request_core(
@@ -998,4 +1148,69 @@ pub async fn update_default_model(
         .to_string(),
         warning_code: sync_result.err().map(|_| "core_sync_failed".to_string()),
     })
+}
+#[cfg(test)]
+mod managed_catalog_tests {
+    use super::*;
+    #[test]
+    fn overlays_stable_managed_catalog_without_private_transport_and_disables_saved_remote() {
+        let mut original = AppSettings::default();
+        let mut remote = original.models.providers[0].clone();
+        remote.id = "saved-remote".into();
+        remote.kind = "openai_compatible".into();
+        remote.entered_base_url = "https://api.example.com".into();
+        remote.resolved_api_base_url = None;
+        remote.enabled = true;
+        original.models.providers.push(remote);
+        let catalog = json!({"models":[{"id":"a".repeat(64), "provider_profile_id":format!("managed:{}", "a".repeat(64)), "name":"Local GGUF", "status":"imported", "is_default":true,"context_length":8192,"tool_mode":"unknown"}]});
+        let settings = apply_catalog(original.clone(), &catalog).unwrap();
+        assert!(
+            !settings
+                .models
+                .providers
+                .iter()
+                .find(|profile| profile.id == "saved-remote")
+                .unwrap()
+                .enabled
+        );
+        let managed = settings
+            .models
+            .providers
+            .iter()
+            .find(|profile| profile.id.starts_with("managed:"))
+            .unwrap();
+        assert_eq!(managed.models[0].status, "unavailable");
+        assert!(managed.entered_base_url.is_empty());
+        assert!(managed.credential_ref.is_none());
+        assert!(managed.invocation_routes.is_empty());
+        assert_eq!(settings.models.default_model_id, "a".repeat(64));
+        assert!(!original
+            .models
+            .providers
+            .iter()
+            .any(|profile| profile.id.starts_with("managed:")));
+        let mut loaded = catalog.clone();
+        loaded["models"][0]["status"] = json!("loaded");
+        assert_eq!(
+            apply_catalog(original, &loaded)
+                .unwrap()
+                .models
+                .providers
+                .last()
+                .unwrap()
+                .models[0]
+                .status,
+            "available"
+        );
+    }
+    #[test]
+    fn rejects_spoofed_managed_profile_and_remote_configuration() {
+        assert!(apply_catalog(
+            AppSettings::default(),
+            &json!({"models":[{"id":"a".repeat(64), "provider_profile_id":"managed:spoof"}]})
+        )
+        .is_err());
+        assert!(validate_provider_url("ollama", "https://remote.test").is_err());
+        assert!(validate_provider_url("openai_compatible", "http://127.0.0.1:8080/v1").is_ok());
+    }
 }

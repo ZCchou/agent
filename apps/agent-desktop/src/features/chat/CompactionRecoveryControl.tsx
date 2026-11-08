@@ -17,7 +17,7 @@ export function CompactionRecoveryControl({ options, disabled, needsNewTarget, o
       <select aria-label={t("context.recoveryModel")} value={value} disabled={disabled}
         onChange={(event) => setValue(event.target.value)}>
         <option value="">{t("context.previousRecoveryModel")}</option>
-        {options.map((item) => <option key={item.value} value={item.value}>{item.label} · {item.modelId}</option>)}
+        {options.filter(option => !option.unavailable).map((item) => <option key={item.value} value={item.value}>{item.label} · {item.modelId}</option>)}
       </select>
     </label>
     <button type="button" disabled={disabled || (needsNewTarget && !option)} onClick={() => onResume(option

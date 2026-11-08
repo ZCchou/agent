@@ -280,6 +280,10 @@ fn effective_automatic_selection(persisted_mode: Option<&str>, requested_automat
         .unwrap_or(requested_automatic)
 }
 
+fn is_local_model_profile(profile: &crate::settings::model::ProviderProfileSettings) -> bool {
+    crate::offline::validate_profile(profile).is_ok()
+}
+
 #[tauri::command]
 pub async fn start_model_run(
     app: AppHandle,
@@ -350,7 +354,7 @@ pub async fn start_model_run(
     if automatic {
         crate::settings::commands::reinject_providers(&app).await?;
     }
-    let configured = settings.get_settings().map_err(|error| error.to_string())?;
+    let configured = crate::settings::commands::catalog_settings(&app, &manager, &settings).await?;
     request.web_search_global_enabled =
         configured.web_search.enabled && configured.web_search.privacy_acknowledged;
     if automatic {
@@ -482,6 +486,7 @@ pub async fn start_model_run(
         .as_ref()
         .and_then(|conversation| conversation.project_id.clone())
         .or_else(|| request.project_id.clone());
+    request.web_search_request_mode = Some("off".into());
     let configured_web_mode = request
         .web_search_request_mode
         .as_deref()
@@ -604,10 +609,7 @@ pub async fn start_model_run(
             }
         }
     }
-    let host_local = profile.kind == "fake"
-        || profile.effective_base_url().starts_with("http://127.0.0.1")
-        || profile.effective_base_url().starts_with("http://localhost")
-        || profile.effective_base_url().starts_with("http://[::1]");
+    let host_local = is_local_model_profile(profile);
     if !automatic && !host_local {
         let local_only = if let Some(conversation) = existing_conversation.as_ref() {
             conversation.model_access_policy.as_deref() == Some("local_only")
@@ -749,7 +751,8 @@ pub async fn update_conversation_routing(
         let selected_model_id = model_id.as_ref().ok_or_else(|| {
             "invalid_model_selection: A fixed route requires a provider and model.".to_string()
         })?;
-        let configured = settings.get_settings().map_err(|error| error.to_string())?;
+        let configured =
+            crate::settings::commands::catalog_settings(&app, &manager, &settings).await?;
         let profile = configured
             .models
             .providers
@@ -785,11 +788,7 @@ pub async fn update_conversation_routing(
                 .iter()
                 .find(|project| project.id == *project_id)
                 .ok_or_else(|| "project_not_found: The project does not exist.".to_string())?;
-            let local = profile.kind == "fake"
-                || profile.kind == "ollama"
-                || profile.effective_base_url().starts_with("http://127.0.0.1")
-                || profile.effective_base_url().starts_with("http://localhost")
-                || profile.effective_base_url().starts_with("http://[::1]");
+            let local = is_local_model_profile(profile);
             if project.model_access_policy == "local_only" && !local {
                 return Err(
                     "online_model_not_allowed: This project only allows local models.".to_string(),
@@ -840,6 +839,9 @@ pub async fn update_conversation_web_search(
     conversation_id: String,
     mode: String,
 ) -> Result<Value, String> {
+    if mode != "off" {
+        crate::offline::deny_network()?;
+    }
     request_core(
         &app,
         &manager,
@@ -858,6 +860,9 @@ pub async fn update_project_web_access(
     project_id: String,
     policy: String,
 ) -> Result<Value, String> {
+    if policy != "disabled" {
+        crate::offline::deny_network()?;
+    }
     request_core(
         &app,
         &manager,
@@ -1296,11 +1301,11 @@ mod routing_serialization_tests {
             "../../../../contracts/unified-invocation-v3.4.json"
         ))
         .unwrap();
-        assert_eq!(contract["ipc_version"], 17);
+        assert_eq!(contract["ipc_version"], 18);
         assert_eq!(contract["settings_schema_version"], 18);
-        assert_eq!(contract["core_schema_version"], 24);
+        assert_eq!(contract["core_schema_version"], 25);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema24-rag-v1");
+        assert_eq!(contract["build_id"], "schema25-local-runtime-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();
@@ -1487,7 +1492,8 @@ pub async fn update_conversation_model(
     model_id: Option<String>,
 ) -> Result<Conversation, String> {
     if let Some(profile_id) = provider_profile_id.as_ref() {
-        let configured = settings.get_settings().map_err(|error| error.to_string())?;
+        let configured =
+            crate::settings::commands::catalog_settings(&app, &manager, &settings).await?;
         let profile = configured
             .models
             .providers
@@ -1531,10 +1537,7 @@ pub async fn update_conversation_model(
                 );
             }
         }
-        let local = profile.kind == "fake"
-            || profile.effective_base_url().starts_with("http://127.0.0.1")
-            || profile.effective_base_url().starts_with("http://localhost")
-            || profile.effective_base_url().starts_with("http://[::1]");
+        let local = is_local_model_profile(profile);
         if conversation.model_access_policy.as_deref() == Some("local_only") && !local {
             return Err(
                 "online_model_not_allowed: This project only allows local models.".to_string(),
@@ -1602,7 +1605,8 @@ pub async fn update_project_model_scope(
     models: Vec<ProjectModelRef>,
 ) -> Result<ProjectModelScope, String> {
     if policy == "restricted" {
-        let configured = settings.get_settings().map_err(|error| error.to_string())?;
+        let configured =
+            crate::settings::commands::catalog_settings(&app, &manager, &settings).await?;
         if models.iter().any(|candidate| {
             !configured.models.providers.iter().any(|provider| {
                 provider.id == candidate.provider_profile_id
@@ -1610,7 +1614,8 @@ pub async fn update_project_model_scope(
                     && provider.models.iter().any(|model| {
                         model.id == candidate.model_id
                             && model.enabled
-                            && model.status != "unavailable"
+                            && (model.status != "unavailable"
+                                || provider.id.starts_with("managed:"))
                     })
             })
         }) {
@@ -1631,16 +1636,7 @@ pub async fn update_project_model_scope(
                     .providers
                     .iter()
                     .find(|provider| provider.id == candidate.provider_profile_id)
-                    .is_some_and(|provider| {
-                        provider.kind != "fake"
-                            && !provider
-                                .effective_base_url()
-                                .starts_with("http://127.0.0.1")
-                            && !provider
-                                .effective_base_url()
-                                .starts_with("http://localhost")
-                            && !provider.effective_base_url().starts_with("http://[::1]")
-                    })
+                    .is_some_and(|provider| !is_local_model_profile(provider))
             })
         {
             return Err(
@@ -2461,4 +2457,42 @@ pub async fn list_conversation_tool_operations(
         json!({"conversation_id":conversation_id}),
     )
     .await
+}
+
+#[cfg(test)]
+mod local_model_policy_tests {
+    use super::*;
+    #[test]
+    fn https_loopback_is_local_for_project_scope_and_fixed_conversation_selection() {
+        let mut profile = crate::settings::AppSettings::default()
+            .models
+            .providers
+            .remove(0);
+        profile.id = "manual-loopback".into();
+        profile.kind = "openai_compatible".into();
+        profile.resolved_api_base_url = None;
+        for endpoint in [
+            "https://127.0.0.1:8443/v1",
+            "https://localhost:8443/v1",
+            "https://[::1]:8443/v1",
+            "http://127.0.0.1:8080/v1",
+        ] {
+            profile.entered_base_url = endpoint.into();
+            assert!(is_local_model_profile(&profile), "{endpoint}");
+        }
+        for endpoint in [
+            "https://remote.test/v1",
+            "http://127.0.0.1.evil/v1",
+            "http://127.1:8080/v1",
+        ] {
+            profile.entered_base_url = endpoint.into();
+            assert!(!is_local_model_profile(&profile), "{endpoint}");
+        }
+        profile.id = format!("managed:{}", "a".repeat(64));
+        profile.entered_base_url = String::new();
+        assert!(is_local_model_profile(&profile));
+        profile.id = "demo".into();
+        profile.kind = "fake".into();
+        assert!(is_local_model_profile(&profile));
+    }
 }
