@@ -215,7 +215,7 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         args[-1] = '0' * 64
         self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
 
-    def invoke_installer(self, install, action='Install', fault='', defer=False, token=None):
+    def invoke_installer(self, install, action='Install', fault='', defer=False, token=None, include_ocr=False):
         application = self.root / 'application-manifest.json'
         app_files = {name: {'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()}
                      for name, content in {'agent-desktop.exe': b'complete new host',
@@ -234,6 +234,8 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
                  hashlib.sha256(application.read_bytes()).hexdigest()]
         if fault:
             args += ['-Fault', fault]
+        if include_ocr:
+            args += ['-IncludeOcr']
         if defer:
             args += ['-DeferCommit']
             import uuid
@@ -246,6 +248,23 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
             import os
             args += ['-TransactionToken', token, '-InstallerProcessId', str(os.getpid())]
         return subprocess.run(args, capture_output=True, text=True)
+
+    def test_ocr_components_install_and_uninstall_with_distinct_ownership(self):
+        for name in ('ocr-runtime/python/python.exe', 'ocr-model-package/ocr-model.json'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'OCR fixture')
+        with tempfile.TemporaryDirectory(prefix='agent-ocr-install-') as directory:
+            install = Path(directory)
+            result = self.invoke_installer(install, include_ocr=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((install / 'ocr-runtime/python/python.exe').exists())
+            self.assertTrue((install / 'ocr-model-package/ocr-model.json').exists())
+            self.assertIn('ocrpreview', (install / '.managed-runtime/owner.txt').read_text())
+            result = self.invoke_installer(install, action='Uninstall', include_ocr=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ('llm-runtime', 'rag-runtime', 'ocr-runtime', 'ocr-model-package'):
+                self.assertFalse((install / name).exists())
 
     def test_second_deferred_installer_cannot_recover_or_commit_active_transaction(self):
         with tempfile.TemporaryDirectory(prefix='agent-owned-install-') as name:

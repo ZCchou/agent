@@ -5,6 +5,7 @@ param(
     [string]$InstallDirectory,
     [string]$ManifestSha256,
     [switch]$RunPrerequisites,
+    [switch]$IncludeOcr,
     [switch]$DeferCommit,
     [string]$TransactionToken,
     [int]$InstallerProcessId = 0,
@@ -24,6 +25,11 @@ foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Secu
 $components = @('llm-runtime', 'rag-runtime')
 $appFiles = @('agent-desktop.exe', 'agent.exe', 'agent-core.exe', 'uninstall.exe')
 $owner = 'io.github.zcchou.agent.offline-runtime.v1'
+if ($IncludeOcr) {
+    $components += @('ocr-runtime', 'ocr-model-package')
+    $appFiles += 'agent_desktop_lib.dll'
+    $owner = 'io.github.zcchou.agent.ocrpreview.offline-runtime.v1'
+}
 $restartRequired = $false
 if ($TransactionToken) { $TransactionToken = ([guid]::Parse($TransactionToken)).ToString('N') }
 
@@ -87,7 +93,14 @@ function Read-ApplicationManifest([string]$Path, [string]$Digest) {
         throw 'Application identity manifest differs from this installer'
     }
     $record = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($record.schema_version -ne 1 -or @($record.files.PSObject.Properties).Count -ne 2) { throw 'Invalid application identity manifest' }
+    $allowed = @('agent-desktop.exe', 'agent-core.exe')
+    if ($IncludeOcr) { $allowed += 'agent_desktop_lib.dll' }
+    if ($record.schema_version -ne 1 -or @($record.files.PSObject.Properties).Count -lt 2) { throw 'Invalid application identity manifest' }
+    foreach ($entry in $record.files.PSObject.Properties) {
+        if ($entry.Name -notin $allowed -or $entry.Value.bytes -le 0 -or $entry.Value.sha256 -cnotmatch '^[a-f0-9]{64}$') {
+            throw 'Invalid application identity entry'
+        }
+    }
     foreach ($name in @('agent-desktop.exe', 'agent-core.exe')) {
         $entry = $record.files.PSObject.Properties[$name]
         if (-not $entry -or $entry.Value.bytes -le 0 -or $entry.Value.sha256 -cnotmatch '^[a-f0-9]{64}$') {

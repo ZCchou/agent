@@ -222,7 +222,8 @@ def make_payload(llm: Path, rag: Path, prereqs: Path, target: Path, release_id: 
 
 
 def installer_hook(manifest: Path, destination: Path, embedded_payload: bool = False, *,
-                   application_manifest: Path, run_prerequisites: bool = True) -> Path:
+                   application_manifest: Path, run_prerequisites: bool = True,
+                   include_ocr: bool = False) -> Path:
     """Bake the external payload identity into the installer itself."""
     digest = sha256(manifest)
     application_digest = sha256(application_manifest)
@@ -343,6 +344,8 @@ Var OfflineTransactionToken
   ${{EndIf}}
 !macroend
 '''
+    if include_ocr:
+        content = content.replace('-Action ', '-IncludeOcr -Action ')
     destination.write_text(content, encoding='utf-8-sig')
     return destination
 
