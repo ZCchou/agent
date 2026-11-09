@@ -1,10 +1,19 @@
 import { expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { navigationItems, pageTitleKeys } from "../../app/navigation";
-vi.mock("../../services/runtime", () => ({ ragRepository: {} }));
+vi.mock("../../services/runtime", () => ({ ragRepository: {
+  listModels: vi.fn().mockResolvedValue({ models: [], root: "", runtime: {} }),
+  listLibraries: vi.fn().mockResolvedValue({ libraries: [] }),
+  listJobs: vi.fn().mockResolvedValue({ jobs: [] }),
+} }));
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-import { DocumentReview, IndexVersionPicker, formatRagLocator } from "./RagPage";
+vi.mock("../../contexts/AppContext", () => ({ useApp: () => ({
+  projects: [], viewingProjectId: "project", activeConversation: null, draft: { projectId: null },
+}) }));
+import { DocumentReview, IndexVersionPicker, formatRagLocator, RagPage } from "./RagPage";
 import type { RagDocumentPreview, RagLibrary } from "../../types/rag";
+import { loadRagPageData } from "./ragPageData";
+import { ragRepository } from "../../services/runtime";
 
 const preview: RagDocumentPreview = {
   version: { id: "version", version_id: "version", title: "AC source", revision: "R1", source: "CAAC", document_number: "AC-1", status: "pending", chunk_count: 201, warnings: ["Table extraction requires review"] },
@@ -39,4 +48,20 @@ it("gates index construction until duplicate confirmed revisions have a choice",
   expect(html).toMatch(/disabled="">rag.index/);
   expect(html.match(/type="radio"/g)).toHaveLength(3);
   expect(html).not.toContain('checked=""');
+});
+
+it("shows cached library data immediately without a blocking processing indicator", async () => {
+  vi.stubGlobal("window", { sessionStorage: { getItem: () => null, removeItem: () => {} } });
+  await loadRagPageData(ragRepository, "project");
+  const html = renderToStaticMarkup(<RagPage />);
+  expect(html).not.toContain("rag.loading");
+  expect(html).not.toMatch(/disabled="">rag.refresh/);
+  vi.unstubAllGlobals();
+});
+
+it("keeps the initial loading indicator when this project has no display snapshot", async () => {
+  vi.stubGlobal("window", { sessionStorage: { getItem: () => null, removeItem: () => {} } });
+  await loadRagPageData(ragRepository, "another-project");
+  expect(renderToStaticMarkup(<RagPage />)).toContain("rag.loading");
+  vi.unstubAllGlobals();
 });

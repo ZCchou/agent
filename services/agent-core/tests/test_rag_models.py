@@ -106,7 +106,8 @@ def test_runtime_manifest_rejects_tampered_executable(tmp_path, monkeypatch):
     store = ModelStore(tmp_path / "data")
     assert store._command() == [str(executable)]
     executable.write_bytes(b"changed")
-    assert store.runtime_status()["available"] is False
+    with pytest.raises(CoreDataError, match="hash mismatch"):
+        store._command()
 
 
 def test_model_config_profile_mismatch_is_rejected(tmp_path):
@@ -168,7 +169,8 @@ def test_runtime_rejects_unlisted_executable_files(tmp_path, monkeypatch):
     (runtime / "injected.dll").write_bytes(b"unlisted")
     monkeypatch.setattr(models.sys, "frozen", True, raising=False)
     monkeypatch.setattr(models.sys, "executable", str(base / "agent-core.exe"))
-    assert ModelStore(tmp_path / "data").runtime_status()["available"] is False
+    with pytest.raises(CoreDataError, match="unlisted or missing"):
+        ModelStore(tmp_path / "data")._command()
 
 
 def test_model_store_close_prevents_new_inference_workers(tmp_path):
@@ -322,7 +324,7 @@ def test_import_copy_does_not_hold_registry_read_lock(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
-def test_runtime_status_reuses_hashes_but_new_worker_admission_rehashes(tmp_path, monkeypatch):
+def test_runtime_status_is_lightweight_but_worker_admission_checks_hashes(tmp_path, monkeypatch):
     import agent.rag.models as models
     base = tmp_path / "app"
     runtime = base / "rag-runtime"
@@ -341,9 +343,27 @@ def test_runtime_status_reuses_hashes_but_new_worker_admission_rehashes(tmp_path
     monkeypatch.setattr(models, "_hash", counted_hash)
     assert store.runtime_status()["available"]
     assert store.runtime_status()["available"]
-    assert len(hashes) == 1
+    assert hashes == []
     store._command()
-    assert len(hashes) == 2
+    assert len(hashes) == 1
+
+
+def test_runtime_status_never_walks_component_directories(tmp_path, monkeypatch):
+    import agent.rag.models as models
+    base = tmp_path / 'app'
+    runtime = base / 'rag-runtime'
+    runtime.mkdir(parents=True)
+    (runtime / 'rag-worker.exe').write_bytes(b'worker')
+    (runtime / 'runtime.json').write_text(json.dumps({'schema_version': 1, 'protocol_version': 1,
+        'executable': 'rag-worker.exe', 'files': {'rag-worker.exe': hashlib.sha256(b'worker').hexdigest()}}))
+    monkeypatch.setattr(models.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(models.sys, 'executable', str(base / 'agent-core.exe'))
+    def forbidden_walk(*args, **kwargs):
+        raise AssertionError('Page status must not scan the runtime directory')
+    monkeypatch.setattr(models.os, 'walk', forbidden_walk)
+    status = ModelStore(tmp_path / 'data').runtime_status()
+    assert status['available']
+    assert status['integrity_check'] == 'on_load'
 
 def test_cpu_worker_is_reused_only_for_the_same_model_identity(tmp_path, monkeypatch):
     import sys

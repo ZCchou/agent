@@ -7,6 +7,7 @@ import { ragRepository } from "../../services/runtime";
 import type { RagDocumentConfirmation, RagDocumentPreview, RagEvidence, RagJob, RagLibrary, RagLibraryDraft, RagModelList, RagPathSelection, RagProfile } from "../../types/rag";
 import { resolveIndexVersions, type IndexVersionChoices } from "./indexVersions";
 import { OcrPanel, OcrPreview } from "./OcrPanel";
+import { loadRagPageData, readRagPageData } from "./ragPageData";
 import "./rag.css";
 
 const profiles: RagProfile[] = ["qwen3-embedding-0.6b", "qwen3-reranker-0.6b", "bge-m3", "bge-reranker-v2-m3"];
@@ -17,37 +18,52 @@ export function RagPage() {
   const { t } = useTranslation("common");
   const { projects, viewingProjectId, activeConversation, draft } = useApp();
   const [tab, setTab] = useState<"libraries" | "models">(() => { const tab = window.sessionStorage.getItem("agent:rag-tab"); window.sessionStorage.removeItem("agent:rag-tab"); return tab === "models" ? "models" : "libraries"; });
-  const [models, setModels] = useState<RagModelList>(emptyModels);
-  const [libraries, setLibraries] = useState<RagLibrary[]>([]);
-  const [jobs, setJobs] = useState<RagJob[]>([]);
   const [projectId, setProjectId] = useState(viewingProjectId ?? activeConversation?.project_id ?? draft.projectId ?? "");
+  const cached = readRagPageData(ragRepository, projectId);
+  const [models, setModels] = useState<RagModelList>(cached?.models ?? emptyModels);
+  const [libraries, setLibraries] = useState<RagLibrary[]>(cached?.libraries ?? []);
+  const [jobs, setJobs] = useState<RagJob[]>(cached?.jobs ?? []);
+  const [loadedProjectId, setLoadedProjectId] = useState<string | null>(cached ? projectId : null);
+  const [loading, setLoading] = useState(!cached);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cancellingJobs, setCancellingJobs] = useState<string[]>([]);
   const pending = useRef(false);
   const mounted = useRef(true);
+  const refreshRevision = useRef(0);
   const refresh = useCallback(async () => {
-    const [modelList, libraryList, jobList, bindings] = await Promise.all([ragRepository.listModels(), ragRepository.listLibraries(), ragRepository.listJobs(), projectId ? ragRepository.listLibraries(projectId) : Promise.resolve({ libraries: [] as RagLibrary[] })]);
-    if (!mounted.current) return;
-    setModels(modelList);
-    setLibraries(libraryList.libraries.map((library) => {
-      const binding = bindings.libraries.find((item) => item.id === library.id && item.enabled);
-      return { ...library, project_ids: binding ? [projectId] : [], bound_index_id: binding?.index_id ?? null };
-    }));
-    setJobs(jobList.jobs);
+    const revision = ++refreshRevision.current;
+    setLoading(!readRagPageData(ragRepository, projectId));
+    try {
+      const data = await loadRagPageData(ragRepository, projectId);
+      if (!mounted.current || refreshRevision.current !== revision) return;
+      setModels(data.models);
+      setLibraries(data.libraries);
+      setJobs(data.jobs);
+      setLoadedProjectId(projectId);
+      setError("");
+    } catch (reason) {
+      if (mounted.current && refreshRevision.current === revision) throw reason;
+    } finally {
+      if (mounted.current && refreshRevision.current === revision) setLoading(false);
+    }
   }, [projectId]);
+  const backgroundRefresh = useCallback(async () => {
+    try { await refresh(); }
+    catch (reason) { if (mounted.current) setError(String(reason)); }
+  }, [refresh]);
   const act: Action = useCallback(async (operation) => {
     if (pending.current) return;
     pending.current = true; setBusy(true); setError("");
     try { await operation(); } catch (reason) { if (mounted.current) setError(String(reason)); }
     finally { pending.current = false; if (mounted.current) setBusy(false); }
   }, []);
-  useEffect(() => { mounted.current = true; void act(refresh); return () => { mounted.current = false; }; }, [act, refresh]);
+  useEffect(() => { mounted.current = true; void backgroundRefresh(); return () => { mounted.current = false; }; }, [backgroundRefresh]);
   useEffect(() => {
     if (!jobs.some((job) => ["queued", "running", "pending"].includes(job.status))) return;
-    const timer = window.setInterval(() => { if (!pending.current) void act(refresh); }, 2000);
+    const timer = window.setInterval(() => { if (!pending.current) void backgroundRefresh(); }, 2000);
     return () => window.clearInterval(timer);
-  }, [jobs, act, refresh]);
+  }, [jobs, backgroundRefresh]);
   async function cancelJob(jobId: string) {
     setCancellingJobs((items) => [...items, jobId]);
     try {
@@ -66,14 +82,14 @@ export function RagPage() {
       {(["libraries", "models"] as const).map((value) => <Button key={value} disabled={busy} role="tab" aria-selected={tab === value} aria-controls={`rag-${value}`} id={`rag-tab-${value}`} onClick={() => setTab(value)}>{t(`rag.${value}`)}</Button>)}
     </div>
     {error && <p role="alert" className="state-message state-message--error">{t("rag.error")} {error}</p>}
-    {busy && <p role="status">{t("rag.loading")}</p>}
+    {(busy || loading) && <p role="status">{t("rag.loading")}</p>}
     <section id={`rag-${tab}`} role="tabpanel" aria-labelledby={`rag-tab-${tab}`}>
       {tab === "models" ? <><OcrPanel /><ModelsPanel models={models} busy={busy} act={act} refresh={refresh} /></> : <>
         <label className="rag-field">{t("rag.project")}<select value={projectId} disabled={busy} onChange={(event) => setProjectId(event.target.value)}>
           <option value="">{t("rag.chooseProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         </select></label><p>{t("rag.bindingHelp")}</p>
-        <LibrariesPanel libraries={libraries} models={models} projectId={projectId} busy={busy} act={act} refresh={refresh} />
-        <SearchPanel projectId={projectId} busy={busy} act={act} />
+        <LibrariesPanel libraries={libraries} models={models} projectId={projectId} busy={busy || loadedProjectId !== projectId} act={act} refresh={refresh} />
+        <SearchPanel projectId={projectId} busy={busy || loadedProjectId !== projectId} act={act} />
       </>}
     </section>
     <Card className="rag-card"><h3>{t("rag.jobs")}</h3>{!jobs.length && <p>{t("rag.empty")}</p>}

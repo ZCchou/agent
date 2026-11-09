@@ -165,10 +165,22 @@ class ModelStore:
 
     def runtime_status(self):
         try:
-            command = self._command(force=False)
+            if getattr(sys, "frozen", False):
+                base = Path(sys.executable).resolve().parent / "rag-runtime"
+                metadata = _json(base / "runtime.json")
+                if metadata.get("schema_version") != 1 or metadata.get("protocol_version") != 1 or _linked(base):
+                    raise ValueError("Invalid inference runtime manifest")
+                executable = _safe_relative(base, metadata["executable"])
+                if not isinstance(metadata.get("files"), dict) or metadata["executable"] not in metadata["files"]:
+                    raise ValueError("Inference runtime executable is unlisted")
+                command = [str(executable)]
+            else:
+                command = [sys.executable, "-m", "agent.rag.worker"]
             libraries = {name: importlib.util.find_spec(name) is not None for name in ("torch", "transformers", "safetensors", "onnx", "onnxruntime")}
-            return {"available": True, "command": command[0], "version": 1, "libraries": libraries, "cuda_requires_probe": True, "source_runtime": not getattr(sys, "frozen", False)}
-        except CoreDataError as exc:
+            return {"available": True, "command": command[0], "version": 1, "libraries": libraries,
+                    "cuda_requires_probe": True, "source_runtime": not getattr(sys, "frozen", False),
+                    "integrity_check": "on_load"}
+        except (CoreDataError, OSError, ValueError, KeyError, TypeError) as exc:
             return {"available": False, "version": 1, "error": str(exc)}
 
     def inspect(self, path, profile=None):
