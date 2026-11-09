@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import zipfile
 
@@ -36,6 +38,8 @@ def is_public_file(name):
 
 
 def verify_application(source, manifest):
+    if manifest.get('application_id') != 'io.github.zcchou.agent.ocrpreview':
+        raise ValueError('OCR Preview application identity required')
     application = {}
     for name in APPLICATION:
         entry = manifest['files'].get(name)
@@ -50,7 +54,9 @@ def nsis_path(path):
     return str(Path(path).resolve()).replace('$', '$$').replace('"', '$\\"')
 
 
-def write_installer(source, output, payload_manifest, parts_manifest, compiler):
+def write_installer(source, output, payload_manifest, parts_manifest, compiler, version='0.15.0-ocr-preview.1'):
+    if not re.fullmatch(r'0\.15\.0-ocr-preview\.[1-9][0-9]*', version):
+        raise ValueError('Unsupported preview version')
     build = output / 'build'
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
     application = verify_application(source, original)
@@ -61,7 +67,7 @@ def write_installer(source, output, payload_manifest, parts_manifest, compiler):
     hook.write_text(hook.read_text(encoding='utf-8-sig').replace('$EXEDIR\\payload', '$INSTDIR\\.ocr-preview-payload\\payload'), encoding='utf-8-sig')
     helper = ROOT / 'tools/installer/prepare-ocr-payload.ps1'
     files = '\n'.join(f'  ClearErrors\n  File /oname={name} "{nsis_path(source / name)}"\n  !insertmacro NSIS_HOOK_ASSERT_APP_COPY' for name in APPLICATION)
-    setup = output / 'agent-0.15.0-ocr-preview.1-windows-x64-setup.exe'
+    setup = output / f'agent-{version}-windows-x64-setup.exe'
     prepare = f'''  InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File /oname=prepare.ps1 "{nsis_path(helper)}"
@@ -95,9 +101,9 @@ InstallDirRegKey HKCU "Software\\agentOCRPreview" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 Icon "{nsis_path(ROOT / 'apps/agent-desktop/src-tauri/icons/icon.ico')}"
-VIProductVersion "0.15.0.1"
+VIProductVersion "0.15.0.{version.rsplit('.', 1)[1]}"
 VIAddVersionKey /LANG=1033 "ProductName" "agent OCR Preview"
-VIAddVersionKey /LANG=1033 "FileVersion" "0.15.0-ocr-preview.1"
+VIAddVersionKey /LANG=1033 "FileVersion" "{version}"
 VIAddVersionKey /LANG=1033 "FileDescription" "Offline OCR preview installer"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "agent contributors"
 !define MUI_CUSTOMFUNCTION_ABORT InstallAbort
@@ -140,7 +146,7 @@ Section Install
   !insertmacro NSIS_HOOK_POSTINSTALL
   WriteRegStr HKCU "Software\\agentOCRPreview" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayName" "agent OCR Preview"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayVersion" "0.15.0-ocr-preview.1"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayVersion" "{version}"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "UninstallString" '"$INSTDIR\\uninstall.exe"'
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayIcon" "$INSTDIR\\agent-desktop.exe"
   CreateDirectory "$SMPROGRAMS\\agent OCR Preview"
@@ -177,7 +183,25 @@ SectionEnd
     return setup
 
 
-def build(source, prerequisites, output, compiler):
+def reuse_archives(previous, output, manifest, version):
+    previous, output = Path(previous), Path(output)
+    old = json.loads((previous / 'build/payload-manifest.json').read_text(encoding='utf-8'))
+    if old['files'] != manifest['files']:
+        raise ValueError('Previous runtime payload differs from the requested release')
+    parts = json.loads((previous / 'build/parts.json').read_text(encoding='utf-8'))['archives']
+    archives = []
+    for number, entry in enumerate(parts, 1):
+        validate_relative(entry['name'])
+        original = previous / entry['name']
+        check_file(original, entry)
+        name = f'agent-{version}-offline.part{number:02d}.zip'
+        destination = output / name
+        os.link(original, destination)
+        archives.append({**entry, 'name': name})
+    return archives
+
+
+def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1', reuse=None):
     source, prerequisites, output = map(Path, (source, prerequisites, output))
     if output.exists():
         raise ValueError('Choose a new release output directory')
@@ -196,14 +220,15 @@ def build(source, prerequisites, output, compiler):
     for name, entry in lock['prerequisites'].items():
         check_file(prerequisites / name, entry)
         records.append({'name': 'prerequisites/' + name, 'path': prerequisites / name, 'bytes': entry['bytes'], 'sha256': entry['sha256']})
-    manifest = {'schema_version': 1, 'release_id': 'agent-0.15.0-ocr-preview.1',
+    manifest = {'schema_version': 1, 'release_id': 'agent-' + version,
                 'prerequisites': lock['prerequisites'],
                 'files': {r['name']: {'bytes': r['bytes'], 'sha256': r['sha256']} for r in records}}
     payload_manifest = output / 'build/payload-manifest.json'
     write_json(payload_manifest, manifest)
     archives = []
-    for n, group in enumerate(plan_volumes(records), 1):
-        archive = output / f'agent-0.15.0-ocr-preview.1-offline.part{n:02d}.zip'
+    groups = [] if reuse else plan_volumes(records)
+    for n, group in enumerate(groups, 1):
+        archive = output / f'agent-{version}-offline.part{n:02d}.zip'
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as package:
             for record in group:
                 package.write(record['path'], record['name'])
@@ -211,6 +236,8 @@ def build(source, prerequisites, output, compiler):
             raise ValueError('A release asset exceeds the GitHub size limit')
         archives.append({'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': sha256(archive)})
         print(f'PACKED {archive.name} {archive.stat().st_size}', flush=True)
+    if reuse:
+        archives = reuse_archives(reuse, output, manifest, version)
     parts_manifest = output / 'build/parts.json'
     write_json(parts_manifest, {'schema_version': 1, 'archives': archives})
     instructions = '''# agent OCR Preview 离线安装
@@ -228,9 +255,10 @@ def build(source, prerequisites, output, compiler):
 
 安装与数据目录使用独立的 OCR Preview 标识。卸载程序处理受管程序文件，用户导入的模型、文档、对话与数据库保存在应用数据目录。
 '''
+    instructions = instructions.replace('0.15.0-ocr-preview.1', version)
     (output / '安装与使用说明.md').write_text(instructions, encoding='utf-8')
-    setup = write_installer(source, output, payload_manifest, parts_manifest, compiler)
-    release = {'version': '0.15.0-ocr-preview.1', 'application_id': 'io.github.zcchou.agent.ocrpreview',
+    setup = write_installer(source, output, payload_manifest, parts_manifest, compiler, version=version)
+    release = {'version': version, 'application_id': 'io.github.zcchou.agent.ocrpreview',
                'distribution': 'offline-preview-multipart-installer', 'application_build': 'debug-portable-tested',
                'authenticode_signed': False, 'updater_enabled': False,
                'application_source_commit': original['source_commit'],
@@ -248,5 +276,7 @@ if __name__ == '__main__':
     parser.add_argument('--prerequisites', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--nsis', required=True)
+    parser.add_argument('--version', default='0.15.0-ocr-preview.1')
+    parser.add_argument('--reuse-runtime-archives')
     args = parser.parse_args()
-    build(args.source, args.prerequisites, args.output, args.nsis)
+    build(args.source, args.prerequisites, args.output, args.nsis, args.version, args.reuse_runtime_archives)

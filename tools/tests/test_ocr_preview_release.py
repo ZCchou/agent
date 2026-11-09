@@ -41,10 +41,20 @@ def test_changed_tested_application_is_rejected(tmp_path):
     for name in release.APPLICATION:
         (tmp_path / name).write_bytes(b'tested')
         files[name] = {'bytes': 6, 'sha256': hashlib.sha256(b'tested').hexdigest()}
-    release.verify_application(tmp_path, {'files': files})
+    release.verify_application(tmp_path, {'application_id': 'io.github.zcchou.agent.ocrpreview', 'files': files})
     (tmp_path / 'agent-core.exe').write_bytes(b'changed')
     with pytest.raises(ValueError, match='mismatch'):
-        release.verify_application(tmp_path, {'files': files})
+        release.verify_application(tmp_path, {'application_id': 'io.github.zcchou.agent.ocrpreview', 'files': files})
+
+
+def test_ocr_installer_rejects_document_preview_application_identity(tmp_path):
+    release = module()
+    files = {}
+    for name in release.APPLICATION:
+        (tmp_path / name).write_bytes(b'tested')
+        files[name] = {'bytes': 6, 'sha256': hashlib.sha256(b'tested').hexdigest()}
+    with pytest.raises(ValueError, match='identity'):
+        release.verify_application(tmp_path, {'application_id': 'io.github.zcchou.agent.documentpreview', 'files': files})
 
 
 def test_uninstaller_cleans_owned_extraction_stage_before_components(tmp_path, monkeypatch):
@@ -54,7 +64,7 @@ def test_uninstaller_cleans_owned_extraction_stage_before_components(tmp_path, m
     (output / 'build').mkdir(parents=True)
     for name in release.APPLICATION:
         (source / name).write_bytes(b'fixture')
-    (source / 'delivery-manifest.json').write_text(json.dumps({'files': {
+    (source / 'delivery-manifest.json').write_text(json.dumps({'application_id': 'io.github.zcchou.agent.ocrpreview', 'files': {
         name: {'bytes': 7, 'sha256': hashlib.sha256(b'fixture').hexdigest()} for name in release.APPLICATION}}))
     payload, parts = tmp_path / 'payload.json', tmp_path / 'parts.json'
     payload.write_text('{}')
@@ -82,6 +92,48 @@ def test_ocr_hook_explicitly_enables_ocr_components(tmp_path):
     assert '-IncludeOcr -Action Install' in text
     assert '-IncludeOcr -Action Commit' in text
     assert '-IncludeOcr -Action Uninstall' in text
+
+
+def test_new_preview_version_is_used_in_installer_identity(tmp_path, monkeypatch):
+    release = module()
+    source, output = tmp_path / 'source', tmp_path / 'output'
+    source.mkdir()
+    (output / 'build').mkdir(parents=True)
+    for name in release.APPLICATION:
+        (source / name).write_bytes(b'fixture')
+    (source / 'delivery-manifest.json').write_text(json.dumps({'application_id': 'io.github.zcchou.agent.ocrpreview', 'files': {
+        name: {'bytes': 7, 'sha256': hashlib.sha256(b'fixture').hexdigest()} for name in release.APPLICATION}}))
+    payload, parts = tmp_path / 'payload.json', tmp_path / 'parts.json'
+    payload.write_text('{}')
+    parts.write_text('{}')
+    monkeypatch.setattr(release.subprocess, 'run', lambda *args, **kwargs: None)
+    result = release.write_installer(source, output, payload, parts, tmp_path / 'compiler', version='0.15.0-ocr-preview.2')
+    assert result.name == 'agent-0.15.0-ocr-preview.2-windows-x64-setup.exe'
+    script = (output / 'build/setup.nsi').read_text(encoding='utf-8-sig')
+    assert 'VIProductVersion "0.15.0.2"' in script
+    assert '0.15.0-ocr-preview.1' not in script
+
+
+def test_archive_reuse_checks_payload_and_archive_identities(tmp_path):
+    release = module()
+    old, output = tmp_path / 'old', tmp_path / 'new'
+    (old / 'build').mkdir(parents=True)
+    output.mkdir()
+    payload = {'files': {'rag-runtime/fixture': {'bytes': 1, 'sha256': 'a' * 64}}}
+    (old / 'build/payload-manifest.json').write_text(json.dumps(payload))
+    archive = old / 'agent-0.15.0-ocr-preview.1-offline.part01.zip'
+    archive.write_bytes(b'fixture archive')
+    previous = {'name': archive.name, 'bytes': archive.stat().st_size,
+                'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
+    (old / 'build/parts.json').write_text(json.dumps({'archives': [previous]}))
+    result = release.reuse_archives(old, output, payload, '0.15.0-ocr-preview.2')
+    assert result[0]['name'] == 'agent-0.15.0-ocr-preview.2-offline.part01.zip'
+    assert (output / result[0]['name']).read_bytes() == archive.read_bytes()
+    with pytest.raises(ValueError, match='payload'):
+        release.reuse_archives(old, output, {'files': {}}, '0.15.0-ocr-preview.2')
+    archive.write_bytes(b'changed archive')
+    with pytest.raises(ValueError, match='mismatch'):
+        release.reuse_archives(old, tmp_path / 'other', payload, '0.15.0-ocr-preview.3')
 
 
 @pytest.mark.parametrize('fault', ['', 'long', 'missing', 'corrupt', 'escape', 'oversized'])
