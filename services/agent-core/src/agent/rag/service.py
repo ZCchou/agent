@@ -32,9 +32,10 @@ class RagService:
         self._tasks = {}
         self._closed = False
         from agent.ocr.pipeline import OcrPipeline
-        self.ocr = OcrPipeline(self.repository)
+        self.ocr = OcrPipeline(self.repository, parser=self.parser)
         self._index_locks = {}
         self._pending_indexes = {}
+        self._binding_revisions = {}
 
     def _model(self, model_id, role=None, digest=None):
         records = self.models.list_models()
@@ -122,7 +123,10 @@ class RagService:
                 self._model(params['reranker_model_id'], 'reranker')
             return {'library': self.repository.update_library(params)}
         if action == 'library.bind':
-            return self.repository.bind(params)
+            result = self.repository.bind(params)
+            key = (params.get('project_id'), params.get('library_id'))
+            self._binding_revisions[key] = self._binding_revisions.get(key, 0) + 1
+            return result
         if action == 'library.remove':
             result = self.repository.remove_library(params.get('library_id'))
             for job in self.repository.jobs(params.get('library_id')):
@@ -162,6 +166,8 @@ class RagService:
                 if options.get('auto_apply_project_id'):
                     with closing(self.repository.connect()) as connection:
                         self.repository._project(connection, options['auto_apply_project_id'])
+                    key = (options['auto_apply_project_id'], params.get('library_id'))
+                    options['_adoption_revision'] = self._binding_revisions.get(key, 0)
             for path in paths:
                 job = self.repository.new_job('document.import', params.get('library_id'))
                 self._start(job, self._import_document(job, Path(path), options))
@@ -172,13 +178,20 @@ class RagService:
         if action == 'document.confirm':
             return self.repository.confirm(params)
         if action == 'document.withdraw':
-            return self.repository.withdraw(params.get('version_id'))
+            preview = self.repository.preview(params.get('version_id'), limit=1)
+            result = self.repository.withdraw(params.get('version_id'))
+            job_id = preview['version']['ocr_summary'].get('job_id')
+            task = self._tasks.get(job_id)
+            if task:
+                task.cancel()
+            return result
         if action == 'job.list':
             return {'jobs': self.repository.jobs(params.get('library_id'))}
         if action == 'job.cancel':
             job_id = params.get('job_id')
             self.repository.job(job_id)
             self.repository.update_job(job_id, status='cancelled')
+            self._pending_indexes.pop(self.repository.job(job_id)['library_id'], None)
             task = self._tasks.get(job_id)
             if task:
                 task.cancel()
@@ -212,6 +225,13 @@ class RagService:
             self.repository.update_job(job['id'], status='failed', error=str(error)[:2000])
         finally:
             coroutine.close()
+            if job['kind'] == 'index.build' and job['library_id'] in self._pending_indexes and not self._closed:
+                options = self._pending_indexes.pop(job['library_id'])
+                try:
+                    next_job = self.repository.new_job('index.build', job['library_id'])
+                except CoreDataError:
+                    return
+                self._start(next_job, self._auto_index(next_job, options))
 
     def _extract_original(self, path):
         if path.suffix.lower() not in SUPPORTED_SUFFIXES:
@@ -253,33 +273,26 @@ class RagService:
             except CoreDataError as error:
                 if error.code != 'rag_job_active':
                     raise
-                self._pending_indexes[job['library_id']] = options.get('auto_apply_project_id')
+                self._pending_indexes[job['library_id']] = options
             else:
-                self._start(index_job, self._auto_index(index_job, options.get('auto_apply_project_id')))
+                self._start(index_job, self._auto_index(index_job, options))
 
-    async def _auto_index(self, job, project_id):
+    async def _auto_index(self, job, options):
         library_id = job['library_id']
         lock = self._index_locks.setdefault(library_id, asyncio.Lock())
         async with lock:
-            try:
-                documents = self.repository.list_libraries()
-                library = next(item for item in documents if item['id'] == library_id)
-                latest = {}
-                for document in library['documents']:
-                    if document['status'] == 'confirmed':
-                        latest[document['id']] = document['version_id']
-                await self._build_index(job, list(latest.values()))
-                if project_id:
-                    self.repository.bind({'library_id': library_id, 'project_id': project_id, 'enabled': True})
-            except BaseException:
-                self._pending_indexes.pop(library_id, None)
-                raise
-            else:
-                if library_id in self._pending_indexes and not self._closed:
-                    target = self._pending_indexes.pop(library_id)
-                    self.repository.update_job(job['id'], status='completed', progress=1)
-                    next_job = self.repository.new_job('index.build', library_id)
-                    self._start(next_job, self._auto_index(next_job, target))
+            library = next(item for item in self.repository.list_libraries() if item['id'] == library_id)
+            latest = {}
+            for document in library['documents']:
+                if document['status'] == 'confirmed':
+                    latest[document['id']] = document['version_id']
+            await self._build_index(job, list(latest.values()))
+            project_id = options.get('auto_apply_project_id')
+            key = (project_id, library_id)
+            # This service owns all binding mutations. User changes invalidate
+            # the import's in-memory adoption permission for its remaining life.
+            if project_id and self._binding_revisions.get(key, 0) == options.get('_adoption_revision', 0):
+                self.repository.bind({'library_id': library_id, 'project_id': project_id, 'enabled': True})
 
     async def _build_index(self, job, version_ids):
         library_id = job['library_id']
@@ -456,6 +469,7 @@ class RagService:
         tasks = list(self._tasks.values())
         for job_id, task in list(self._tasks.items()):
             self.repository.update_job(job_id, status='cancelled')
+            self._pending_indexes.pop(self.repository.job(job_id)['library_id'], None)
             task.cancel()
         await self.parser.close()
         await self.ocr.close()

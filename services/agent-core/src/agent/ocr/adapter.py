@@ -54,7 +54,10 @@ class OcrAdapter:
             use_seal_recognition=False, use_chart_recognition=False, use_region_detection=False)
 
     def recognize_page(self, image, page):
-        result = next(iter(self.pipeline.predict(image, use_table_orientation_classify=False)))
+        # PaddleX 3.7.2 disables the table subpipeline's OCR model when page OCR
+        # is supplied. Cell re-recognition can dereference that absent model.
+        result = next(iter(self.pipeline.predict(image, use_table_orientation_classify=False,
+            use_ocr_results_with_table_cells=False)))
         raw = result.json['res']
         # The pipeline's page-space dimensions accompany all result coordinates.
         normalized = normalize_page(raw, page, raw['width'], raw['height'])

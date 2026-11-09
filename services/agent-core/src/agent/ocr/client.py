@@ -43,7 +43,7 @@ def runtime_command():
 
 class OcrClient:
     def __init__(self, data_dir, *, command=None):
-        self.data_dir = Path(data_dir).absolute()
+        self.data_dir = Path(data_dir).resolve()
         self.command = command
         self.worker = None
 
@@ -60,7 +60,7 @@ class OcrClient:
                 import asyncio
                 await asyncio.to_thread(verify_runtime, Path(command[0]).parent.parent)
             self.worker = WorkerClient(command, timeout=360, memory_limit=4 * 1024 ** 3)
-        return await self.worker.request(action, {'data_dir': str(self.data_dir), 'path': str(path), **params})
+        return await self.worker.request(action, {'data_dir': str(self.data_dir), 'path': str(Path(path).resolve()), **params})
 
     async def close(self):
         if self.worker:

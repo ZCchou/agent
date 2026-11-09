@@ -15,8 +15,9 @@ from agent.storage import CoreDataError, _utc_now
 
 
 class OcrPipeline:
-    def __init__(self, repository, *, client=None):
+    def __init__(self, repository, *, client=None, parser=None):
         self.repository = repository
+        self.parser = parser
         self.models = OcrModelStore(repository.data_dir / 'ocr-models')
         self.client = client or OcrClient(repository.data_dir)
         self.preview_client = OcrClient(repository.data_dir)
@@ -27,7 +28,7 @@ class OcrPipeline:
         return {**self.models.list_models(), 'runtime': self.client.available()}
 
     def _cache_key(self, digest, page, profile_id, device):
-        identity = [digest, page, profile_id, device, 'pp-structure-v3-page-v1-200dpi']
+        identity = [digest, page, profile_id, device, 'pp-structure-v3-page-v2-200dpi-page-ocr']
         return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
     def _cached(self, key):
@@ -60,8 +61,9 @@ class OcrPipeline:
                     (job['id'], json.dumps(options)))
             self.progress(job['id'], phase='page_analysis', original_path=str(original), original_hash=digest)
             if not self.client.available()['available']:
-                from agent.rag.documents import parse_document
-                parsed = await asyncio.to_thread(parse_document, original)
+                if self.parser is None:
+                    raise CoreDataError('ocr_runtime_missing', 'OCR and managed parser are unavailable')
+                parsed = await self.parser.parse(original)
                 parsed['warnings'].append('OCR runtime unavailable. Image regions have not been recognized.')
                 parsed['ocr'] = {'coverage': 'partial', 'failed_pages': [], 'runtime_missing': True}
                 return parsed
