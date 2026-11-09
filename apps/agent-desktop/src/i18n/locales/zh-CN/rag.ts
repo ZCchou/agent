@@ -1,4 +1,6 @@
 export default {
+  ocrInitialSnapshot: "这是原生文字初始快照，待识别页面的图片文字尚未纳入。请在后台任务中查看文档导入的当前状态。",
+  ocrHelp: "PDF 默认自动 OCR。可在下方“PDF 识别与自动入库”中调整模式，并在“辅助模型”中查看 OCR 模型包。",
   evidenceFragment: "引用片段", evidenceParentContext: "原文上下文", evidenceContextScopes: { clause: "完整条款", table: "完整表格", block: "原文段落" },
   indexVersions: "建立索引所用版本", indexVersionsHelp: "每份资料选择一个已确认版本，也可选择暂不纳入。有多个已确认版本时，需要明确选择。",
   excludeDocument: "暂不纳入此资料", chooseRevisionRequired: "请为有多个版本的资料选择一个版本，或选择暂不纳入。",

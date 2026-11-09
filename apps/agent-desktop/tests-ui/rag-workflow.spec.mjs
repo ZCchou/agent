@@ -57,6 +57,14 @@ async function openKnowledge(page) {
           jobs.push({ id: "index-job", kind: "index.build", library_id: library.id, status: "completed", progress: 1 });
           return { job: structuredClone(jobs[0]) };
         case "job.list": return structuredClone({ jobs });
+        case "document.preview": return {
+          version: { ...version, id: params.version_id, revision: "R1", source: "Local PDF", document_number: "DO-160" },
+          warnings: ["OCR is running. Image regions are not yet included."],
+          chunks: Array.from({ length: 200 }, (_, index) => ({
+            id: `chunk-${index}`, text: `Clause ${index + 1}. Environmental qualification requirements. `.repeat(12), locator: { page: index + 1 },
+          })),
+          total_chunks: 386,
+        };
         default: throw new Error(`Unexpected RAG action: ${action}`);
       }
     };
@@ -66,6 +74,21 @@ async function openKnowledge(page) {
   await page.getByRole("navigation").getByRole("button", { name: "Local knowledge", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Local knowledge", level: 2 })).toBeVisible();
 }
+
+test("document preview keeps its passages readable in a desktop-sized window", async ({ page }) => {
+  await openKnowledge(page);
+  await page.setViewportSize({ width: 1002, height: 723 });
+  await page.getByRole("button", { name: "Review and confirm" }).first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  const passages = dialog.locator(".rag-passages");
+  await expect(passages.locator("article")).toHaveCount(200);
+  await expect.poll(() => passages.evaluate((element) => element.clientHeight)).toBeGreaterThan(120);
+  await passages.scrollIntoViewIfNeeded();
+  await expect(passages.locator("article").first()).toBeVisible();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+});
 
 test("auxiliary model import uses a native path grant and can be probed", async ({ page }) => {
   await openKnowledge(page);

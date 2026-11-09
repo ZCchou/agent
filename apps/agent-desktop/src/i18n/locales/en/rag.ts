@@ -1,4 +1,6 @@
 export default {
+  ocrInitialSnapshot: "This initial snapshot contains native text. Image text from pending pages is not included. Check the document import status under Background tasks.",
+  ocrHelp: "PDF OCR is automatic by default. Change its mode under PDF recognition and automatic import below. View the OCR model package under Auxiliary models.",
   evidenceFragment: "Cited passage", evidenceParentContext: "Surrounding source context", evidenceContextScopes: { clause: "Full clause", table: "Full table", block: "Source paragraph" },
   indexVersions: "Source revisions for indexing", indexVersionsHelp: "Choose one confirmed revision per source, or exclude the source. Multiple confirmed revisions require an explicit choice.",
   excludeDocument: "Exclude this source", chooseRevisionRequired: "Choose a revision for sources with multiple revisions, or explicitly exclude them.",

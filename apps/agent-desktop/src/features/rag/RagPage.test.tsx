@@ -39,6 +39,12 @@ it("formats structured and legacy string source locations", () => {
   expect(formatRagLocator({ page: 2, heading: "§3", unsafe: { path: "C:/secret" } })).toBe("2 · §3");
   expect(formatRagLocator(undefined)).toBe("");
 });
+
+it("describes saved initial OCR snapshots without claiming the task is still running", () => {
+  const html = renderToStaticMarkup(<DocumentReview preview={{ ...preview, warnings: ["OCR is running. Image regions are not yet included."] }} busy={false} onClose={() => {}} onMore={() => {}} onConfirm={() => {}} />);
+  expect(html).toContain("rag.ocrInitialSnapshot");
+  expect(html).not.toContain("OCR is running");
+});
 it("gates index construction until duplicate confirmed revisions have a choice", () => {
   const document = { ...preview.version, id: "document", status: "confirmed" };
   const library: RagLibrary = { id: "library", name: "Library", embedding_model_id: "embedding", reranker_model_id: "ranking", active_index_id: null, generation: 1, documents: [{ ...document, version_id: "v1", revision: "R1" }, { ...document, version_id: "v2", revision: "R2" }] };
