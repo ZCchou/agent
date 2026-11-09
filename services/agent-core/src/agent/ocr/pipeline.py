@@ -45,6 +45,11 @@ class OcrPipeline:
                 (key, digest, profile_id, page, encoded, _utc_now()))
 
     def progress(self, job_id, **changes):
+        phase = changes.get('phase')
+        if phase == 'page_analysis':
+            self.repository.task_progress(job_id, 'parsing')
+        elif phase == 'recognizing':
+            self.repository.task_progress(job_id, 'ocr')
         allowed = {'total_pages', 'completed_pages', 'phase', 'latest_version_id', 'original_path', 'original_hash'}
         if not set(changes).issubset(allowed):
             raise ValueError('Invalid OCR progress fields')
@@ -99,6 +104,7 @@ class OcrPipeline:
                     cpu_bundle = 'paddlepaddle' in profile['manifest'].get('runtime', {})
                 if options.get('device', 'auto') != 'cuda' and cpu_bundle and system_memory().get('available_physical_bytes', 0) >= 12 * 1024 ** 3 and (os.cpu_count() or 1) >= 8:
                     self.clients.append(OcrClient(self.repository.data_dir))
+            self.repository.task_progress(job['id'], 'ocr', 0, len(selected))
             queue = asyncio.Queue()
             for page in selected:
                 queue.put_nowait(page)
@@ -140,6 +146,7 @@ class OcrPipeline:
                         warnings.append(f'Physical page {number}: {getattr(error, "code", "ocr_page_failed")}')
                     completed += 1
                     self.progress(job['id'], completed_pages=completed)
+                    self.repository.task_progress(job['id'], 'ocr', completed, len(selected))
                     self.repository.update_job(job['id'], progress=.1 + .65 * completed / max(1, len(selected)))
             workers = self.clients[:1] if options.get('device') == 'cuda' else self.clients
             tasks = [asyncio.create_task(recognize_pages(client)) for client in workers]

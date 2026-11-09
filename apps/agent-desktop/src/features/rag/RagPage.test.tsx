@@ -68,6 +68,6 @@ it("shows cached library data immediately without a blocking processing indicato
 it("keeps the initial loading indicator when this project has no display snapshot", async () => {
   vi.stubGlobal("window", { sessionStorage: { getItem: () => null, removeItem: () => {} } });
   await loadRagPageData(ragRepository, "another-project");
-  expect(renderToStaticMarkup(<RagPage />)).toContain("rag.loading");
+  expect(renderToStaticMarkup(<RagPage />)).toContain("首次读取资料库");
   vi.unstubAllGlobals();
 });

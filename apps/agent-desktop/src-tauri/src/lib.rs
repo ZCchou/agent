@@ -359,6 +359,7 @@ pub fn run() {
             local_model_commands::local_model_select_path,
             local_model_commands::local_model_revoke_path,
             rag_commands::rag_request,
+            rag_commands::rag_open_original,
             rag_commands::rag_select_paths,
             rag_commands::rag_revoke_paths,
             skill_commands::save_skill,

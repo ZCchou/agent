@@ -1,3 +1,4 @@
+import { ProjectLibraries } from "../../features/rag/ProjectLibraries";
 import { Box, BriefcaseBusiness, MessageCircle, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -163,6 +164,7 @@ export function TopBar() {
       </div>
 
       <div className="top-bar__actions">
+        {currentPage === "chat" && (activeConversation?.project_id || (draft.kind === "project_work" && draft.projectId)) ? <ProjectLibraries key={activeConversation?.project_id || draft.projectId} projectId={(activeConversation?.project_id || draft.projectId)!} compact /> : null}
         {action.error || loadError || scopeLoadError ? <span className="top-bar__error" role="alert">{action.error ?? t("buttonAudit.actionFailed")}
           {loadError || scopeLoadError ? <button disabled={action.busy} onClick={() => setLoadRevision(value => value + 1)}>{t("actions.retry")}</button> : null}
         </span> : null}

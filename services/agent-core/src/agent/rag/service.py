@@ -35,8 +35,8 @@ class RagService:
         from agent.ocr.pipeline import OcrPipeline
         self.ocr = OcrPipeline(self.repository, parser=self.parser)
         self._index_locks = {}
-        self._pending_indexes = {}
-        self._binding_revisions = {}
+        from agent.rag.workflow import ImportWorkflow
+        self.workflow = ImportWorkflow(self)
 
     def _model(self, model_id, role=None, digest=None):
         records = self.models.list_models()
@@ -103,7 +103,7 @@ class RagService:
         if action == 'ocr.model.import':
             return await asyncio.to_thread(self.ocr.models.import_bundle, params.get('path'))
         if action == 'document.ocr.pages':
-            return self.repository.ocr_pages(params.get('version_id'))
+            return self.repository.ocr_pages(params.get('version_id'), params.get('page'))
         if action == 'document.ocr.render':
             path = self.repository.original_for_version(params.get('version_id'))
             result = await self.ocr.preview_client.request('render', path, page=params.get('page'))
@@ -111,11 +111,36 @@ class RagService:
             return result
         if action.startswith('model.'):
             return await self._model_action(action, params)
+        if action == 'library.overview':
+            return self.repository.overview(params.get('project_id'))
+        if action == 'document.list':
+            return self.repository.documents(params.get('library_id'), params.get('offset', 0), params.get('limit', 50), params.get('query', ''), params.get('include_withdrawn', False))
+        if action == 'document.history':
+            return self.repository.version_history(params.get('document_id'))
+        if action == 'document.inspect':
+            return await asyncio.to_thread(self.workflow.inspect_files, params.get('library_id'), params.get('paths'))
+        if action == 'job.detail':
+            return self.repository.task_detail(params.get('job_id'))
+        if action == 'job.resume':
+            return await self.workflow.resume(params.get('job_id'), accept_partial=params.get('accept_partial', False))
+        if action == 'library.search':
+            return await self.search_library(params.get('library_id'), params.get('query'))
+        if action == 'document.metadata':
+            return await self.update_metadata(params)
+        if action == 'document.original':
+            return {'path': str(self.repository.original_for_version(params.get('version_id')))}
         if action == 'library.list':
             return {'libraries': self.repository.list_libraries(params.get('project_id'))}
         if action == 'library.create':
-            self._model(params.get('embedding_model_id'), 'embedding')
-            self._model(params.get('reranker_model_id'), 'reranker')
+            params = dict(params)
+            available = self.models.list_models()
+            if isinstance(available, dict):
+                available = available.get('models', [])
+            for role, key in [('embedding', 'embedding_model_id'), ('reranker', 'reranker_model_id')]:
+                if not params.get(key):
+                    params[key] = next((m['id'] for m in available if m['role'] == role and m.get('status') == 'ready'), '')
+                if params[key]:
+                    self._model(params[key], role)
             return {'library': self.repository.create_library(params)}
         if action == 'library.update':
             if 'embedding_model_id' in params:
@@ -124,13 +149,11 @@ class RagService:
                 self._model(params['reranker_model_id'], 'reranker')
             return {'library': self.repository.update_library(params)}
         if action == 'library.bind':
-            result = self.repository.bind(params)
-            key = (params.get('project_id'), params.get('library_id'))
-            self._binding_revisions[key] = self._binding_revisions.get(key, 0) + 1
-            return result
+            return self.repository.bind(params)
         if action == 'library.remove':
             result = self.repository.remove_library(params.get('library_id'))
             for job in self.repository.jobs(params.get('library_id')):
+                self.repository.terminate_task(job['id'], 'library_removal')
                 task = self._tasks.get(job['id'])
                 if task:
                     task.cancel()
@@ -150,57 +173,38 @@ class RagService:
                 raise asyncio.CancelledError
             return self.repository.save_version(params.get('library_id'), title, parsed, digest, title + '.txt', 'text/plain', document_id=params.get('document_id'))
         if action == 'document.import':
-            paths = params.get('paths')
-            if not isinstance(paths, list) or not 1 <= len(paths) <= 32 or any(not isinstance(path, str) or not path for path in paths):
-                raise CoreDataError('rag_invalid_request', 'Select between 1 and 32 document paths.')
-            jobs = []
-            options = None
-            if 'ocr_mode' in params:
-                if params['ocr_mode'] not in {'auto', 'force', 'off'} or params.get('device', 'auto') not in {'auto', 'cpu', 'cuda'}:
-                    raise CoreDataError('rag_invalid_request', 'Invalid OCR mode or device')
-                if not isinstance(params.get('auto_index', True), bool):
-                    raise CoreDataError('rag_invalid_request', 'Auto index must be boolean')
-                pages = params.get('pages', [])
-                if not isinstance(pages, list) or len(pages) > 10_000 or any(type(page) is not int or not 1 <= page <= 10_000 for page in pages):
-                    raise CoreDataError('rag_invalid_request', 'Invalid OCR page selection')
-                options = {key: params[key] for key in ('ocr_mode', 'device', 'profile_id', 'auto_index', 'pages', 'auto_apply_project_id') if key in params}
-                if options.get('auto_apply_project_id'):
-                    with closing(self.repository.connect()) as connection:
-                        self.repository._project(connection, options['auto_apply_project_id'])
-                    key = (options['auto_apply_project_id'], params.get('library_id'))
-                    options['_adoption_revision'] = self._binding_revisions.get(key, 0)
-            for path in paths:
-                job = self.repository.new_job('document.import', params.get('library_id'))
-                self._start(job, self._import_document(job, Path(path), options))
-                jobs.append(job)
-            return {'job': jobs[0], 'jobs': jobs}
+            return await self.workflow.start(params)
         if action == 'document.preview':
-            return self.repository.preview(params.get('version_id'), params.get('offset', 0), params.get('limit', 200))
+            return self.repository.preview(params.get('version_id'), params.get('offset', 0), params.get('limit', 200), params.get('page'))
         if action == 'document.confirm':
             return self.repository.confirm(params)
         if action == 'document.withdraw':
             preview = self.repository.preview(params.get('version_id'), limit=1)
             result = self.repository.withdraw(params.get('version_id'))
             job_id = preview['version']['ocr_summary'].get('job_id')
+            if job_id:
+                job = self.repository.job(job_id)
+                job_id = job.get('parent_id') or job_id
+                self.repository.terminate_task(job_id, 'document_withdrawal')
             task = self._tasks.get(job_id)
             if task:
                 task.cancel()
             return result
         if action == 'job.list':
             return {'jobs': self.repository.jobs(params.get('library_id'))}
-        if action == 'job.cancel':
+        if action in {'job.cancel','job.pause'}:
             job_id = params.get('job_id')
             self.repository.job(job_id)
-            self.repository.update_job(job_id, status='cancelled')
-            self._pending_indexes.pop(self.repository.job(job_id)['library_id'], None)
+            self.repository.terminate_task(job_id, 'user_action' if action == 'job.cancel' else 'user_pause', interrupted=action == 'job.pause')
             task = self._tasks.get(job_id)
             if task:
                 task.cancel()
             return {'job': self.repository.job(job_id)}
         if action == 'index.build':
+            self._require_index_idle(params.get('library_id'))
             versions = self.repository.index_versions(params.get('library_id'), params.get('version_ids'))
-            job = self.repository.new_job('index.build', params.get('library_id'))
-            self._start(job, self._build_index(job, versions))
+            job = self.repository.new_job('index.build', params.get('library_id'), payload={'version_ids': versions})
+            self._start(job, self._manual_index(job, versions))
             return {'job': job}
         if action == 'search':
             return await self.search(params.get('project_id'), params.get('query'), params.get('run_id'), params.get('library_ids'), params.get('version_ids'), params.get('limit', 8))
@@ -220,19 +224,22 @@ class RagService:
         try:
             self.repository.update_job(job['id'], status='running')
             await coroutine
+            self.repository.update_job(job['id'], status='completed', progress=1)
         except asyncio.CancelledError:
-            self.repository.update_job(job['id'], status='cancelled')
+            current = self.repository.job(job['id'])
+            if current['status'] in {'queued','running'}:
+                self.repository.terminate_task(job['id'], 'system_failure', interrupted=True)
         except Exception as error:
-            self.repository.update_job(job['id'], status='failed', error=str(error)[:2000])
+            if self.repository.job(job['id'])['status'] not in {'queued','running'}:
+                return
+            attention = getattr(error, 'code', '') in {'rag_needs_attention','rag_models_missing','rag_ocr_missing'}
+            self.repository.update_job(job['id'], status='interrupted' if attention else 'failed', error=str(error)[:2000])
+            with closing(self.repository.connect()) as c, c:
+                c.execute('UPDATE rag_jobs SET phase=?,termination_source=?,error_code=? WHERE id=?',
+                          ('needs_attention' if attention else 'failed', 'system_failure', getattr(error, 'code', 'rag_operation_failed'), job['id']))
+            self.repository.task_event(job['id'], 'needs_attention' if attention else 'failed', 'system_failure')
         finally:
             coroutine.close()
-            if job['kind'] == 'index.build' and job['library_id'] in self._pending_indexes and not self._closed:
-                options = self._pending_indexes.pop(job['library_id'])
-                try:
-                    next_job = self.repository.new_job('index.build', job['library_id'])
-                except CoreDataError:
-                    return
-                self._start(next_job, self._auto_index(next_job, options))
 
     def _extract_original(self, path):
         if path.suffix.lower() not in SUPPORTED_SUFFIXES:
@@ -243,57 +250,6 @@ class RagService:
             raise CoreDataError('rag_document_too_large', 'The document exceeds 100 MiB.')
         digest, original = self.repository.save_original(content, path.suffix.lower())
         return digest, original
-
-    async def _import_document(self, job, path, options=None):
-        try:
-            digest, original = await asyncio.wait_for(
-                asyncio.to_thread(self._extract_original, path), timeout=DOCUMENT_PARSE_TIMEOUT)
-        except TimeoutError as error:
-            raise CoreDataError('rag_document_timeout', 'Document import exceeded its time limit.') from error
-        if options is not None and path.suffix.lower() == '.pdf':
-            async def publish_initial(parsed):
-                self._publish_ocr(job, path, digest, parsed, options)
-            parsed = await self.ocr.process(job, original, digest, options, on_initial=publish_initial)
-            self._publish_ocr(job, path, digest, parsed, options)
-            self.repository.update_job(job['id'], status='completed', progress=1)
-            return
-        # ParserService bounds execution after its permit, excluding queue time.
-        parsed = await self.parser.parse(original)
-        if self._closed:
-            raise CoreDataError('rag_closed', 'The RAG service closed before the document was saved.')
-        self.repository.save_version(job['library_id'], path.stem, parsed, digest, path.name,
-                                     MEDIA_TYPES.get(path.suffix.lower(), 'application/octet-stream'),
-                                     str(path.resolve()), job['id'])
-
-    def _publish_ocr(self, job, path, digest, parsed, options):
-        preview = self.repository.save_version(job['library_id'], path.stem, parsed, digest,
-            path.name, MEDIA_TYPES['.pdf'], str(path.resolve()), job_id=job['id'], machine_confirm=True)
-        if options.get('auto_index', True):
-            try:
-                index_job = self.repository.new_job('index.build', job['library_id'])
-            except CoreDataError as error:
-                if error.code != 'rag_job_active':
-                    raise
-                self._pending_indexes[job['library_id']] = options
-            else:
-                self._start(index_job, self._auto_index(index_job, options))
-
-    async def _auto_index(self, job, options):
-        library_id = job['library_id']
-        lock = self._index_locks.setdefault(library_id, asyncio.Lock())
-        async with lock:
-            library = next(item for item in self.repository.list_libraries() if item['id'] == library_id)
-            latest = {}
-            for document in library['documents']:
-                if document['status'] == 'confirmed':
-                    latest[document['id']] = document['version_id']
-            await self._build_index(job, list(latest.values()))
-            project_id = options.get('auto_apply_project_id')
-            key = (project_id, library_id)
-            # This service owns all binding mutations. User changes invalidate
-            # the import's in-memory adoption permission for its remaining life.
-            if project_id and self._binding_revisions.get(key, 0) == options.get('_adoption_revision', 0):
-                self.repository.bind({'library_id': library_id, 'project_id': project_id, 'enabled': True})
 
     async def _build_index(self, job, version_ids):
         library_id = job['library_id']
@@ -320,6 +276,7 @@ class RagService:
             staging_path = Path(temporary) / 'vectors.db'
             with closing(sqlite3.connect(staging_path)) as staging:
                 staging.execute('CREATE TABLE vectors(chunk_id TEXT PRIMARY KEY,embedding BLOB NOT NULL)')
+                self.repository.task_progress(job['id'], 'indexing', 0, len(chunks))
                 for offset in range(0, len(chunks), 32):
                     batch = chunks[offset:offset + 32]
                     vectors = await self.models.embed(embedding['id'], [row['text'] for row in batch])
@@ -331,6 +288,8 @@ class RagService:
                                         [(row['id'], vector_blob(vector, dimension)) for row, vector in zip(batch, vectors)])
                     staging.commit()
                     self.repository.update_job(job['id'], progress=min(.95, (offset + len(batch)) / len(chunks) * .95))
+                    self.repository.task_progress(job['id'], 'indexing', offset + len(batch), len(chunks))
+                self.repository.task_progress(job['id'], 'publishing')
                 with closing(self.repository.connect()) as connection, connection:
                     # Verify the extension before publishing a searchable index.
                     load_vector_extension(connection)
@@ -427,6 +386,53 @@ class RagService:
                     raise CoreDataError('rag_version_forbidden', 'A selected version is outside the authorized active indexes.')
         if not indexes:
             raise CoreDataError('rag_no_index', 'Build an authorized library index before searching.')
+        chosen, index_by_chunk = await self._retrieve_indexes(indexes, query, version_ids, limit)
+        evidence = []
+        search_id = identifier()
+        if self._closed:
+            raise CoreDataError('rag_closed', 'The RAG service closed before retrieval completed.')
+        with closing(self.repository.connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current = self.repository.state(project_id, connection)
+            if current['generation'] != state['generation']:
+                raise CoreDataError('rag_generation_changed', 'The project evidence changed during retrieval. Search again.')
+            connection.execute('''INSERT INTO rag_searches(id,project_id,run_id,query,generation,index_ids,created_at)
+                VALUES (?,?,?,?,?,?,?)''', (search_id, project_id, run_id, query, state['generation'], json.dumps([index['id'] for index in indexes]), _utc_now()))
+            for row in chosen:
+                index = index_by_chunk[row['id']]
+                version = connection.execute('SELECT status FROM rag_versions WHERE id=?', (row['version_id'],)).fetchone()
+                if not version or version['status'] != 'confirmed':
+                    raise CoreDataError('rag_evidence_invalid', 'A retrieved document was withdrawn during retrieval.')
+                record = {'id': 'rag-' + identifier(), 'library_id': index['library_id'], 'version_id': row['version_id'],
+                          'title': row['title'], 'revision': row['revision'], 'source': row['source'], 'document_number': row['document_number'],
+                          'clause_number': row['clause_number'], 'locator': json.loads(row['locator']), 'text': row['text'],
+                          'text_hash': row['text_hash'], 'score': row['score'], 'external_untrusted': True,
+                          'run_id': run_id, 'search_id': search_id, 'index_id': index['id']}
+                if record['locator'].get('splitting_version') != SPLITTING_VERSION:
+                    record['warnings'] = [LEGACY_SPLITTING_WARNING]
+                connection.execute('''INSERT INTO rag_evidence(id,search_id,project_id,library_id,index_id,version_id,chunk_id,payload)
+                    VALUES (?,?,?,?,?,?,?,?)''', (record['id'], search_id, project_id, index['library_id'], index['id'], row['version_id'], row['id'], json.dumps(record, ensure_ascii=False)))
+                evidence.append(record)
+        return {'evidence': evidence, 'generation': state['generation'], 'index_ids': [index['id'] for index in indexes],
+                'external_untrusted': True, 'search_id': search_id,
+                'warnings': [LEGACY_SPLITTING_WARNING] if any(
+                    set(json.loads(index['splitter_versions'])) != {SPLITTING_VERSION} for index in indexes) else []}
+
+    async def close(self):
+        self._closed = True
+        tasks = list(self._tasks.values())
+        for job_id, task in list(self._tasks.items()):
+            self.repository.terminate_task(job_id, 'app_exit', interrupted=True)
+            task.cancel()
+        await self.parser.close()
+        await self.ocr.close()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        result = self.models.close()
+        if inspect.isawaitable(result):
+            await result
+
+    async def _retrieve_indexes(self, indexes, query, version_ids=None, limit=8):
         retrieved = []
         index_by_chunk = {}
         for index in indexes:
@@ -471,48 +477,81 @@ class RagService:
         chosen = ranked[:limit]
         if not chosen:
             raise CoreDataError('rag_no_evidence', 'No confirmed evidence matches the authorized search scope.')
-        evidence = []
-        search_id = identifier()
-        if self._closed:
-            raise CoreDataError('rag_closed', 'The RAG service closed before retrieval completed.')
-        with closing(self.repository.connect()) as connection, connection:
-            connection.execute('BEGIN IMMEDIATE')
-            current = self.repository.state(project_id, connection)
-            if current['generation'] != state['generation']:
-                raise CoreDataError('rag_generation_changed', 'The project evidence changed during retrieval. Search again.')
-            connection.execute('''INSERT INTO rag_searches(id,project_id,run_id,query,generation,index_ids,created_at)
-                VALUES (?,?,?,?,?,?,?)''', (search_id, project_id, run_id, query, state['generation'], json.dumps([index['id'] for index in indexes]), _utc_now()))
-            for row in chosen:
-                index = index_by_chunk[row['id']]
-                version = connection.execute('SELECT status FROM rag_versions WHERE id=?', (row['version_id'],)).fetchone()
-                if not version or version['status'] != 'confirmed':
-                    raise CoreDataError('rag_evidence_invalid', 'A retrieved document was withdrawn during retrieval.')
-                record = {'id': 'rag-' + identifier(), 'library_id': index['library_id'], 'version_id': row['version_id'],
-                          'title': row['title'], 'revision': row['revision'], 'source': row['source'], 'document_number': row['document_number'],
-                          'clause_number': row['clause_number'], 'locator': json.loads(row['locator']), 'text': row['text'],
-                          'text_hash': row['text_hash'], 'score': row['score'], 'external_untrusted': True,
-                          'run_id': run_id, 'search_id': search_id, 'index_id': index['id']}
-                if record['locator'].get('splitting_version') != SPLITTING_VERSION:
-                    record['warnings'] = [LEGACY_SPLITTING_WARNING]
-                connection.execute('''INSERT INTO rag_evidence(id,search_id,project_id,library_id,index_id,version_id,chunk_id,payload)
-                    VALUES (?,?,?,?,?,?,?,?)''', (record['id'], search_id, project_id, index['library_id'], index['id'], row['version_id'], row['id'], json.dumps(record, ensure_ascii=False)))
-                evidence.append(record)
-        return {'evidence': evidence, 'generation': state['generation'], 'index_ids': [index['id'] for index in indexes],
-                'external_untrusted': True, 'search_id': search_id,
-                'warnings': [LEGACY_SPLITTING_WARNING] if any(
-                    set(json.loads(index['splitter_versions'])) != {SPLITTING_VERSION} for index in indexes) else []}
+        return chosen, index_by_chunk
 
-    async def close(self):
-        self._closed = True
-        tasks = list(self._tasks.values())
-        for job_id, task in list(self._tasks.items()):
-            self.repository.update_job(job_id, status='cancelled')
-            self._pending_indexes.pop(self.repository.job(job_id)['library_id'], None)
-            task.cancel()
-        await self.parser.close()
-        await self.ocr.close()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        result = self.models.close()
-        if inspect.isawaitable(result):
-            await result
+    async def search_library(self, library_id, query):
+        query = required_text(query, 'Search query', 2000)
+        with closing(self.repository.connect()) as c:
+            library = self.repository.library(c, library_id)
+            index = c.execute('SELECT * FROM rag_indexes WHERE id=?', (library['active_index_id'],)).fetchone()
+            if not index:
+                raise CoreDataError('rag_no_index', 'This library has no ready retrieval index.')
+        chosen, _ = await self._retrieve_indexes([dict(index)], query)
+        with closing(self.repository.connect()) as c:
+            current = self.repository.library(c, library_id)
+            if current['generation'] != library['generation']:
+                raise CoreDataError('rag_generation_changed', 'The library changed. Search again.')
+            result = []
+            for row in chosen:
+                version = self.repository.version(c, row['version_id'])
+                if version['status'] != 'confirmed':
+                    raise CoreDataError('rag_evidence_invalid', 'The source is no longer available.')
+                result.append({**row, 'locator': json.loads(row['locator']), 'version_id': row['version_id']})
+        return {'evidence': result, 'index_id': index['id']}
+
+    async def update_metadata(self, params):
+        version_id = params.get('version_id')
+        if params.get('warnings_acknowledged') is not True:
+            raise CoreDataError('rag_warnings_unaccepted', 'Confirm that you reviewed the source and parsing notices.')
+        with closing(self.repository.connect()) as c:
+            old = self.repository.version(c, version_id)
+        self._require_index_idle(old['library_id'])
+        if old['status'] == 'withdrawn':
+            raise CoreDataError('rag_evidence_invalid', 'This version was withdrawn.')
+        values = {field: required_text(params.get(field, old[field]), field) for field in ('title','revision','source','document_number')}
+        new_id = identifier()
+        job_id = identifier()
+        summary = json.loads(old['ocr_summary'])
+        if 'job_id' in summary:
+            summary['origin_job_id'] = summary.pop('job_id')
+        with closing(self.repository.connect()) as c, c:
+            c.execute('BEGIN IMMEDIATE')
+            current = self.repository.version(c, version_id)
+            if current['status'] == 'withdrawn':
+                raise CoreDataError('rag_evidence_invalid', 'This version was withdrawn.')
+            c.execute("""INSERT INTO rag_versions(id,document_id,title,revision,source,document_number,original_hash,original_name,media_type,
+                status,warnings,chunk_count,created_at,confirmed_at,ocr_summary,processing_stage,human_reviewed)
+                VALUES (?,?,?,?,?,?,?,?,?,'confirmed',?,?,?,?,?,'final',1)""",
+                (new_id,old['document_id'],values['title'],values['revision'],values['source'],values['document_number'],
+                 old['original_hash'],old['original_name'],old['media_type'],old['warnings'],old['chunk_count'],_utc_now(),_utc_now(),json.dumps(summary)))
+            rows = c.execute('SELECT * FROM rag_chunks WHERE version_id=? ORDER BY ordinal', (version_id,)).fetchall()
+            from agent.rag.documents import MAX_CHUNKS
+            count = c.execute('SELECT count(*) FROM rag_chunks ch JOIN rag_versions v ON v.id=ch.version_id JOIN rag_documents d ON d.id=v.document_id WHERE d.library_id=?', (old['library_id'],)).fetchone()[0]
+            if count + len(rows) > MAX_CHUNKS:
+                raise CoreDataError('rag_capacity_exceeded', 'This library has reached its stored fragment limit.')
+            if c.execute("SELECT 1 FROM rag_jobs WHERE library_id=? AND kind='index.build' AND status IN ('queued','running')", (old['library_id'],)).fetchone():
+                raise CoreDataError('rag_job_active', 'Wait for the current index task before saving a reviewed version.')
+            from agent.rag.retrieval import lexical_tokens
+            for chunk in rows:
+                cid = identifier()
+                c.execute('INSERT INTO rag_chunks(id,version_id,ordinal,text,text_hash,clause_number,locator) VALUES (?,?,?,?,?,?,?)',
+                    (cid,new_id,chunk['ordinal'],chunk['text'],chunk['text_hash'],chunk['clause_number'],chunk['locator']))
+                c.execute('INSERT INTO rag_fts(chunk_id,tokens) VALUES (?,?)', (cid, ' '.join(lexical_tokens(chunk['text']))))
+            self.repository.bump_library(c, old['library_id'], revoke_projects=False)
+            versions = self.repository.adopted_versions(old['library_id'], {old['document_id']: new_id})
+            c.execute("INSERT INTO rag_jobs(id,kind,library_id,status,payload,created_at,updated_at) VALUES (?,'index.build',?,'queued',?,?,?)",
+                      (job_id,old['library_id'],json.dumps({'version_ids':versions}),_utc_now(),_utc_now()))
+        job = self.repository.job(job_id)
+        self.repository.task_event(job_id, 'created', 'user_action')
+        self._start(job, self._manual_index(job, versions))
+        return {'version_id': new_id, 'job': job}
+
+    def _require_index_idle(self, library_id):
+        with closing(self.repository.connect()) as c:
+            if c.execute("SELECT 1 FROM rag_jobs WHERE library_id=? AND kind='import.batch' AND status IN ('queued','running')", (library_id,)).fetchone():
+                raise CoreDataError('rag_job_active', 'Files are still being processed. Wait for the import before rebuilding an index.')
+
+    async def _manual_index(self, job, versions):
+        lock = self._index_locks.setdefault(job['library_id'], asyncio.Lock())
+        async with lock:
+            await self._build_index(job, versions)

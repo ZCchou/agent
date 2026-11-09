@@ -28,7 +28,7 @@ def test_auto_pdf_import_publishes_indexes_and_binds_only_requested_project(tmp_
         job = service.repository.job(result['job']['id'])
         assert job['status'] == 'completed', job
         documents = service.repository.list_libraries()[0]['documents']
-        assert documents and all(document['status'] == 'confirmed' for document in documents)
+        assert documents and len([doc for doc in documents if doc['status'] == 'confirmed']) == 1
         found = await service.search(project['id'], 'Category A temperature')
         assert any('-55' in item['text'] for item in found['evidence'])
         assert any(item['locator'].get('extraction_method') == 'ocr' for item in found['evidence'])

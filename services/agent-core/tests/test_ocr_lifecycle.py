@@ -27,31 +27,26 @@ async def scene(tmp_path, client, engines=None):
     return service, project, library, source
 
 
-@pytest.mark.parametrize('manual', [False, True])
-def test_stale_initial_index_drains_latest_ocr_rebuild(tmp_path, manual):
+def test_initial_preview_does_not_build_an_index_before_ocr_finishes(tmp_path):
     async def run():
         started, release = asyncio.Event(), asyncio.Event()
-        class SlowEngines(Engines):
-            async def embed(self, *args, **kwargs):
-                started.set()
-                await release.wait()
-                return await super().embed(*args, **kwargs)
-        class AfterIndexClient(Client):
+        class BlockingClient(Client):
             async def request(self, action, path, **params):
                 if action == 'recognize':
-                    await started.wait()
+                    started.set()
+                    await release.wait()
                 return await super().request(action, path, **params)
-        service, project, library, source = await scene(tmp_path, AfterIndexClient(), SlowEngines())
+        service, project, library, source = await scene(tmp_path, BlockingClient())
         try:
-            if manual:
-                version = await ready(service, library)
-                await service.handle('index.build', {'library_id': library, 'version_ids': [version]})
-            result = await service.handle('document.import', {'library_id': library, 'paths': [str(source)], 'ocr_mode': 'auto', 'profile_id': 'fixture', 'auto_apply_project_id': project})
-            await until(lambda: service.repository.job(result['job']['id'])['status'] == 'completed')
+            result = await service.handle('document.import', {'library_id':library,'paths':[str(source)],'ocr_mode':'auto','profile_id':'fixture','auto_apply_project_id':project})
+            await started.wait()
+            assert service.repository.list_libraries()[0]['active_index_id'] is None
+            assert not any(job['kind'] == 'index.build' for job in service.repository.jobs())
             release.set()
-            await until(lambda: not service._tasks)
-            assert service.repository.list_libraries()[0]['active_index_id']
-            assert (await service.search(project, 'temperature'))['evidence']
+            await until(lambda:not service._tasks)
+            assert service.repository.job(result['job']['id'])['status'] == 'completed'
+            assert len([job for job in service.repository.jobs() if job['kind']=='index.build']) == 1
+            assert (await service.search(project,'temperature'))['evidence']
         finally:
             release.set()
             await service.close()

@@ -202,6 +202,7 @@ def test_cancelled_index_cannot_publish_late_and_restart_marks_interrupted(tmp_p
         engine.release.set()
         await asyncio.sleep(.05)
         assert service.repository.job(job['id'])['status'] == 'cancelled'
+        assert service.repository.job(job['id'])['termination_source'] == 'user_action'
         assert service.repository.list_libraries()[0]['active_index_id'] is None
         interrupted = service.repository.new_job('index.build', library)
         await service.close()
@@ -268,11 +269,7 @@ def test_library_model_change_keeps_previous_model_index_and_version_filter(tmp_
         with pytest.raises(CoreDataError):
             await service.search(project, '失效', version_ids=['outside'])
         assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
-        assert service.project_state(project) == old_binding
-        with pytest.raises(CoreDataError) as error:
-            await service.handle('model.remove', {'model_id': 'embed'})
-        assert error.value.code == 'rag_model_in_use'
-        await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+        assert service.project_state(project)['generation'] > old_binding['generation']
         assert service.project_state(project)['generation'] > old_binding['generation']
         assert (await service.handle('model.remove', {'model_id': 'embed'}))['removed'] == 'embed'
         assert (await service.search(project, '失效', version_ids=[second]))['evidence'][0]['version_id'] == second
@@ -338,7 +335,8 @@ def test_immediate_shutdown_cancels_jobs_before_first_execution(tmp_path, recwar
         await ready(service, library)
         job = (await service.handle('index.build', {'library_id': library}))['job']
         await service.close()
-        assert service.repository.job(job['id'])['status'] == 'cancelled'
+        assert service.repository.job(job['id'])['status'] == 'interrupted'
+        assert service.repository.job(job['id'])['termination_source'] == 'app_exit'
     asyncio.run(exercise())
     import gc
     gc.collect()
@@ -397,7 +395,7 @@ def test_permanent_project_delete_cascades_evidence_without_deleting_library(tmp
     asyncio.run(exercise())
 
 
-def test_projects_keep_bound_document_revision_until_explicit_rebind(tmp_path):
+def test_projects_automatically_adopt_ready_document_revision(tmp_path):
     async def exercise():
         core = CoreRepository(tmp_path / 'agent.db')
         first_project = core.create_project('First', 'work')['id']
@@ -410,7 +408,7 @@ def test_projects_keep_bound_document_revision_until_explicit_rebind(tmp_path):
         async def revision(number):
             previous = {document['version_id'] for document in service.repository.list_libraries()[0]['documents']}
             source.write_text(f'25.1309 第{number}版失效要求', encoding='utf-8')
-            assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(source)]})))['status'] == 'completed'
+            assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(source)], 'auto_index': False, 'decisions': {str(source): 'replace'}})))['status'] == 'completed'
             version = next(document['version_id'] for document in service.repository.list_libraries()[0]['documents'] if document['version_id'] not in previous)
             await service.handle('document.confirm', {'version_id': version, 'title': '标准', 'revision': str(number), 'source': '局方', 'document_number': 'CCAR-25'})
             return version
@@ -426,16 +424,16 @@ def test_projects_keep_bound_document_revision_until_explicit_rebind(tmp_path):
         with pytest.raises(CoreDataError):
             await service.handle('index.build', {'library_id': library, 'version_ids': [first, second]})
         assert (await wait_job(service, await service.handle('index.build', {'library_id': library, 'version_ids': [second]})))['status'] == 'completed'
-        assert service.project_state(first_project) == before
-        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == first
-        assert (await service.search(second_project, '失效'))['evidence'][0]['version_id'] == first
+        assert service.project_state(first_project)['generation'] > before['generation']
+        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == second
+        assert (await service.search(second_project, '失效'))['evidence'][0]['version_id'] == second
         await service.handle('library.bind', {'library_id': library, 'project_id': second_project, 'enabled': True})
         assert (await service.search(second_project, '失效'))['evidence'][0]['version_id'] == second
-        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == first
+        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == second
         bindings = (await service.handle('library.list', {'project_id': second_project}))['libraries']
         assert bindings[0]['index_id'] == service.project_state(second_project)['index_ids'][0]
         with pytest.raises(CoreDataError):
-            await service.search(first_project, '失效', version_ids=[second])
+            await service.search(first_project, '失效', version_ids=[first])
         await service.close()
     asyncio.run(exercise())
 
@@ -481,11 +479,11 @@ def test_import_text_file_path_creates_revisions_of_same_document(tmp_path):
         library = (await service.handle('library.create', {'name': '法规', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
         path = tmp_path / 'standard.md'
         path.write_text('25.1309 第一版安全性', encoding='utf-8')
-        imported = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))
+        imported = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)], 'decisions': {str(path): 'replace'}}))
         assert imported['status'] == 'completed', imported
         first = service.repository.list_libraries()[0]['documents'][0]
         path.write_text('25.1309 第二版安全性', encoding='utf-8')
-        assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]})))['status'] == 'completed'
+        assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)], 'decisions': {str(path): 'replace'}})))['status'] == 'completed'
         documents = service.repository.list_libraries()[0]['documents']
         assert len(documents) == 2
         assert {document['id'] for document in documents} == {first['id']}
@@ -533,7 +531,7 @@ def test_batch_import_gives_each_parser_its_budget_after_queue_wait(tmp_path, mo
         try:
             result = await service.handle('document.import', {'library_id': library, 'paths': [str(path) for path in paths]})
             jobs = [await wait_job(service, {'job': job}) for job in result['jobs']]
-            assert [job['status'] for job in jobs] == ['completed', 'completed'], jobs
+            assert [job['status'] for job in jobs] == ['completed'], jobs
             documents = service.repository.list_libraries()[0]['documents']
             assert {document['title'] for document in documents} == {'first', 'second'}
             assert len(documents) == 2

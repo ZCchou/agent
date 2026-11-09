@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -396,6 +396,18 @@ class CoreRepository:
                 try:
                     migrate_documents(connection)
                     connection.execute('UPDATE schema_info SET version = 27')
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                version = 27
+            if version == 27:
+                from agent.migrations.v28_rag_workspace import migrate as migrate_rag_workspace
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_rag_workspace(connection)
+                    connection.execute('UPDATE schema_info SET version = 28')
                     self._validate_database(connection)
                     connection.commit()
                 except Exception:
