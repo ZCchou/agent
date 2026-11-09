@@ -35,13 +35,25 @@ def is_public_file(name):
     return (name in APPLICATION or relative.parts[0] in COMPONENTS) and '__pycache__' not in relative.parts and relative.suffix != '.pyc'
 
 
+def verify_application(source, manifest):
+    application = {}
+    for name in APPLICATION:
+        entry = manifest['files'].get(name)
+        if not isinstance(entry, dict):
+            raise ValueError('Missing tested application identity')
+        check_file(source / name, entry)
+        application[name] = entry
+    return application
+
+
 def nsis_path(path):
     return str(Path(path).resolve()).replace('$', '$$').replace('"', '$\\"')
 
 
 def write_installer(source, output, payload_manifest, parts_manifest, compiler):
     build = output / 'build'
-    application = {name: {'bytes': (source / name).stat().st_size, 'sha256': sha256(source / name)} for name in APPLICATION}
+    original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
+    application = verify_application(source, original)
     application_manifest = build / 'application-manifest.json'
     write_json(application_manifest, {'schema_version': 1, 'files': application})
     hook = build / 'hooks.nsh'
@@ -66,7 +78,10 @@ def write_installer(source, output, payload_manifest, parts_manifest, compiler):
   SetOutPath "$PLUGINSDIR"
   File /oname=prepare.ps1 "''' + nsis_path(helper) + '''"
   nsExec::ExecToLog '"$WINDIR\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\prepare.ps1" -Action Cleanup -InstallDirectory "$INSTDIR"'
-  Pop $0'''
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "Owned extraction cleanup failed. The uninstaller can retry cleanup."
+  ${EndIf}'''
     script = f'''Unicode true
 ManifestDPIAware true
 !include MUI2.nsh
@@ -126,7 +141,7 @@ Section Install
   WriteRegStr HKCU "Software\\agentOCRPreview" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayName" "agent OCR Preview"
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayVersion" "0.15.0-ocr-preview.1"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "UninstallString" '$\"$INSTDIR\\uninstall.exe$\"'
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "UninstallString" '"$INSTDIR\\uninstall.exe"'
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentOCRPreview" "DisplayIcon" "$INSTDIR\\agent-desktop.exe"
   CreateDirectory "$SMPROGRAMS\\agent OCR Preview"
   CreateShortcut "$SMPROGRAMS\\agent OCR Preview\\agent OCR Preview.lnk" "$INSTDIR\\agent-desktop.exe"
@@ -134,6 +149,12 @@ Section Install
 {cleanup}
 SectionEnd
 Section Uninstall
+{cleanup}
+  ${{If}} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Extraction cleanup failed. Close processes using the installation directory and retry." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${{EndIf}}
   !insertmacro NSIS_HOOK_PREUNINSTALL
   Delete "$INSTDIR\\agent-desktop.exe"
   Delete "$INSTDIR\\agent-core.exe"
@@ -152,6 +173,7 @@ SectionEnd
     nsi = build / 'setup.nsi'
     nsi.write_text(script, encoding='utf-8-sig')
     subprocess.run([str(compiler), '/V3', str(nsi)], check=True)
+    verify_application(source, original)
     return setup
 
 
@@ -162,6 +184,7 @@ def build(source, prerequisites, output, compiler):
     output.mkdir(parents=True)
     (output / 'build').mkdir()
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
+    verify_application(source, original)
     records = []
     for name, entry in original['files'].items():
         if not is_public_file(name) or name in APPLICATION:

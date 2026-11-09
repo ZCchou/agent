@@ -35,6 +35,39 @@ def test_public_selection_excludes_local_qa_and_user_data():
     assert [name for name in names if release.is_public_file(name)] == names[:5]
 
 
+def test_changed_tested_application_is_rejected(tmp_path):
+    release = module()
+    files = {}
+    for name in release.APPLICATION:
+        (tmp_path / name).write_bytes(b'tested')
+        files[name] = {'bytes': 6, 'sha256': hashlib.sha256(b'tested').hexdigest()}
+    release.verify_application(tmp_path, {'files': files})
+    (tmp_path / 'agent-core.exe').write_bytes(b'changed')
+    with pytest.raises(ValueError, match='mismatch'):
+        release.verify_application(tmp_path, {'files': files})
+
+
+def test_uninstaller_cleans_owned_extraction_stage_before_components(tmp_path, monkeypatch):
+    release = module()
+    source, output = tmp_path / 'source', tmp_path / 'output'
+    source.mkdir()
+    (output / 'build').mkdir(parents=True)
+    for name in release.APPLICATION:
+        (source / name).write_bytes(b'fixture')
+    (source / 'delivery-manifest.json').write_text(json.dumps({'files': {
+        name: {'bytes': 7, 'sha256': hashlib.sha256(b'fixture').hexdigest()} for name in release.APPLICATION}}))
+    payload, parts = tmp_path / 'payload.json', tmp_path / 'parts.json'
+    payload.write_text('{}')
+    parts.write_text('{}')
+    monkeypatch.setattr(release.subprocess, 'run', lambda *args, **kwargs: None)
+    release.write_installer(source, output, payload, parts, tmp_path / 'compiler')
+    script = (output / 'build/setup.nsi').read_text(encoding='utf-8-sig')
+    uninstall = script.split('Section Uninstall', 1)[1]
+    assert uninstall.index('-Action Cleanup') < uninstall.index('NSIS_HOOK_PREUNINSTALL')
+    registry_line = next(line for line in script.splitlines() if '"UninstallString"' in line)
+    assert "'\"$INSTDIR\\uninstall.exe\"'" in registry_line
+
+
 def test_ocr_hook_explicitly_enables_ocr_components(tmp_path):
     import sys
     sys.path.insert(0, str(TOOLS))

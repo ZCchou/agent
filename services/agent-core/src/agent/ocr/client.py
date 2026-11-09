@@ -38,7 +38,7 @@ def runtime_command():
         executable = Path(sys.executable).parent / 'ocr-runtime' / 'python' / 'python.exe'
     if not executable.is_file():
         raise CoreDataError('ocr_runtime_missing', 'OCR runtime is missing. Import the offline OCR runtime package.')
-    return [str(executable), '-m', 'agent.ocr.worker']
+    return [str(executable), '-B', '-m', 'agent.ocr.worker']
 
 
 class OcrClient:

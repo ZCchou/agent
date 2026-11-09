@@ -38,3 +38,14 @@ def test_client_sends_canonical_managed_paths(tmp_path):
         assert params['data_dir'] == str(root.resolve())
         assert params['path'] == str(original.resolve())
     asyncio.run(run())
+
+
+def test_packaged_ocr_command_prevents_runtime_bytecode_mutation(tmp_path, monkeypatch):
+    import sys
+    from agent.ocr.client import runtime_command
+    executable = tmp_path / 'ocr-runtime/python/python.exe'
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b'fixture')
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'agent-core.exe'))
+    assert runtime_command() == [str(executable), '-B', '-m', 'agent.ocr.worker']
