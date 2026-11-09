@@ -22,7 +22,7 @@ def test_terminal_audit_is_dispatched_through_actual_stdio_entrypoint(tmp_path, 
                             duration_ms=12, timed_out=False, cancelled=False,
                             stdout_truncated=False, stderr_truncated=False))
     tools.transition(operation['id'], {'requested'}, 'completed', result_summary=result)
-    request = {'v': 19, 'id': 'stdio-audit', 'type': 'tool.operation.list_conversation',
+    request = {'v': 20, 'id': 'stdio-audit', 'type': 'tool.operation.list_conversation',
                'params': {'conversation_id': run['conversation_id']}}
     monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(request) + '\n'))
     asyncio.run(_run(repository, logging.getLogger('terminal-stdio-test')))
@@ -102,14 +102,14 @@ def test_schema21_migration_preserves_tool_rows_reviews_indexes_and_wal_backup(t
     keeper.commit()
     CoreRepository(repository.database_path)
     with repository._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 26
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 27
         assert [tuple(row) for row in connection.execute('SELECT * FROM tool_operations')] == before
         assert [tuple(row) for row in connection.execute('SELECT * FROM tool_reviews')] == reviews
         assert not connection.execute('PRAGMA foreign_key_check').fetchall()
         indexes = {row[1] for row in connection.execute('PRAGMA index_list(tool_operations)')}
         assert {'idx_tool_operations_run', 'idx_tool_operations_status'} <= indexes
     tools.create(run['id'], attempt['id'], 2, ToolCall('new', 'terminal.run', {'command': 'exit 0'}))
-    backups = list(tmp_path.glob('*.pre-schema26-*.bak'))
+    backups = list(tmp_path.glob('*.pre-schema27-*.bak'))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as connection:
         assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 21

@@ -11,4 +11,4 @@ def test_ocr_preview_has_separate_app_and_protocol_identity():
     assert config['identifier'] == 'io.github.zcchou.agent.ocrpreview'
     assert config['productName'] == 'agent OCR Preview'
     assert (CORE_VERSION, PROTOCOL_VERSION, SCHEMA_VERSION, BUILD_ID) == (
-        '0.15.0', 19, 26, 'schema26-auto-ocr-v1')
+        '0.15.0', 20, 27, 'schema27-office-attachments-v1')

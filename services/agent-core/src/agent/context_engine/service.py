@@ -600,6 +600,15 @@ class ContextEngineService:
                     if item.get("kind") == "text.utf8"
                 ), None)
                 content = self._read_attachment(attachment, text=True, artifact=artifact)
+                if artifact and artifact.get("processor_id") == "builtin.document" and "source_start" not in attachment:
+                    from agent.document_attachments import document_excerpt
+                    count = max(1, len(message.get("attachments", [])))
+                    excerpt, start, end = document_excerpt(content, message["content"], max(200, 1600 // count))
+                    if len(excerpt) < len(content):
+                        extra_text.append('<system-observation>Document attachment ' + html.escape(attachment["name"])
+                            + f' is partially included: characters {start} to {end} of {len(content)}. '
+                            + 'Do not claim to have read the full document. Ask for a narrower section or an explicit attachment range when needed.</system-observation>')
+                        attachment = {**attachment, "source_start": start, "source_end": end}
                 content, start, end = text_range(attachment, content)
                 attachment = {**attachment, "source_start": start, "source_end": end}
                 name = html.escape(attachment["name"], quote=True)

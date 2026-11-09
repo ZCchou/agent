@@ -16,7 +16,7 @@ TIMEOUT = 125
 MARKER = '.agent-parser-owned'
 RESULT = 'result.ndjson'
 STAGE_NAME = re.compile(r'parser-[0-9a-f]{32}')
-ORIGINAL_NAME = re.compile(r'([0-9a-f]{64})(\.(?:txt|md|markdown|pdf|docx))')
+ORIGINAL_NAME = re.compile(r'([0-9a-f]{64})(\.(?:txt|md|markdown|pdf|docx|docm|dotx|dotm|doc|dot|rtf|wps|wpt|xlsx|xlsm|xltx|xltm|xls|xlt|xlsb|et|ett|pptx|pptm|potx|potm|ppsx|ppsm|ppt|pot|pps|dps|dpt))')
 
 
 def invalid(message='The document worker returned an invalid result.'):
@@ -126,7 +126,7 @@ def write_result(path, request_id, parsed, result_limit):
 
 
 def validate_locator(locator, text_length):
-    if locator.get('kind') not in {'docx', 'pdf', 'text', 'markdown'}:
+    if locator.get('kind') not in {'docx', 'pdf', 'text', 'markdown', 'xlsx', 'pptx'}:
         raise invalid()
     for field in ('block_id', 'clause_parent_id', 'splitting_version'):
         if not isinstance(locator.get(field), str) or not locator[field]:
@@ -148,6 +148,10 @@ def validate_locator(locator, text_length):
         if field in locator and (type(locator[field]) is not int or locator[field] < 1):
             raise invalid()
     if locator['kind'] == 'pdf' and 'page' not in locator:
+        raise invalid()
+    if locator['kind'] == 'xlsx' and (not isinstance(locator.get('sheet'), str) or not locator['sheet']):
+        raise invalid()
+    if locator['kind'] == 'pptx' and (type(locator.get('slide')) is not int or locator['slide'] < 1):
         raise invalid()
     if locator['kind'] in {'text', 'markdown'}:
         if not {'paragraph', 'line_start', 'line_end'}.issubset(locator) or locator['line_start'] > locator['line_end']:

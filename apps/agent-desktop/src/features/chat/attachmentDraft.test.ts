@@ -12,11 +12,59 @@ function attachment(id: string, sha256: string, byteSize = 1): MessageAttachment
   };
 }
 
+function documentAttachment(id: string, byteSize = 100 * 1024 * 1024): MessageAttachment {
+  return { ...attachment(id, id, byteSize), name: `${id}.pdf`, media_type: "application/pdf", artifacts: [{
+    artifact_id: id, kind: "document.source", processor_id: "builtin.document", processor_version: "office-document-v1",
+    media_type: "application/pdf", byte_size: byteSize, sha256: id,
+  }] };
+}
+
 function rejection(id: string): RejectedAttachment {
   return { receipt_id: id, display_name: `${id}.bin`, error_code: "attachment_type_unsupported" };
 }
 
 describe("mergeAttachmentBatch", () => {
+  it("accepts two 100 MiB documents within the 200 MiB draft budget", () => {
+    const result = mergeAttachmentBatch([], [], {
+      accepted: [documentAttachment("one"), documentAttachment("two")],
+      rejected: [],
+    });
+    expect(result.accepted).toHaveLength(2);
+    expect(result.errorCode).toBeNull();
+  });
+
+  it("keeps the 25 MiB budget for images and plain text", () => {
+    const files = ["one", "two", "three"].map((id) => ({ ...attachment(id, id, 10 * 1024 * 1024), kind: "image" as const }));
+    const result = mergeAttachmentBatch([], [], { accepted: files, rejected: [] });
+    expect(result.accepted).toHaveLength(2);
+    expect(result.discardedIds).toEqual(["three"]);
+    expect(result.errorCode).toBe("attachments_too_large");
+  });
+
+  it("widens the budget when the document is last in an import batch", () => {
+    const files = ["one", "two", "three"].map((id) => attachment(id, id, 10 * 1024 * 1024));
+    const result = mergeAttachmentBatch([], [], { accepted: [...files, documentAttachment("last")], rejected: [] });
+    expect(result.accepted).toHaveLength(4);
+    expect(result.errorCode).toBeNull();
+  });
+
+  it("keeps the wider budget across imports when a document is already staged", () => {
+    const result = mergeAttachmentBatch([documentAttachment("existing")], [], {
+      accepted: [attachment("new", "new", 10 * 1024 * 1024)], rejected: [],
+    });
+    expect(result.accepted).toHaveLength(1);
+  });
+
+  it("does not widen the budget for a document beyond the remaining attachment slots", () => {
+    const current = Array.from({ length: 6 }, (_, index) => attachment(`a${index}`, `a${index}`, 4 * 1024 * 1024));
+    const result = mergeAttachmentBatch(current, [], {
+      accepted: [attachment("one", "one", 1024 * 1024), attachment("two", "two", 1024 * 1024), documentAttachment("overflow")],
+      rejected: [],
+    });
+    expect(result.accepted).toHaveLength(1);
+    expect(result.errorCode).toBe("attachments_too_large");
+  });
+
   it("deduplicates new files by trusted content hash", () => {
     const result = mergeAttachmentBatch(
       [attachment("existing", "same")], [],

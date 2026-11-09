@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from agent.storage import CoreDataError
 from agent.context_engine.policy import estimate_tokens
+from agent.rag.followup import followup_context
 
 
 ANSWER_INSTRUCTION = """适航资料问答输出约定
@@ -51,16 +52,22 @@ class RagGrounding:
         self.runs: dict[str, dict] = {}
 
     async def prepare(self, run: dict, conversation: dict) -> None:
+        self.runs.pop(run['id'], None)
         project_id = conversation.get("project_id")
         if not project_id or not self.service.project_state(project_id).get("enabled"):
             return
-        user = next(message for message in conversation["messages"] if message["id"] == run["user_message_id"])
-        result = await self.service.search(project_id, user["content"], run_id=run["id"])
+        prior_ids, query = followup_context(conversation["messages"], run["user_message_id"])
+        aliases = {}
+        if prior_ids:
+            result = self.service.reauthorize_evidence(project_id, prior_ids, run_id=run["id"])
+            aliases = result.get('aliases', {})
+        else:
+            result = await self.service.search(project_id, query, run_id=run["id"])
         if not result["evidence"]:
             raise CoreDataError("rag_evidence_missing", "当前资料库未检索到可用于回答的证据。")
         self.runs[run["id"]] = {"project_id": project_id, "generation": result["generation"],
                                  "evidence": {item["id"]: item for item in result["evidence"]}, "admitted": {},
-                                 "budget": 6000, "used_tokens": 0}
+                                 "aliases": aliases, "budget": 6000, "used_tokens": 0}
 
     def evidence(self, run_id: str) -> list[dict]:
         return list(self.runs.get(run_id, {}).get("evidence", {}).values())
@@ -149,10 +156,14 @@ class RagGrounding:
             for citation in citations:
                 key = citation.get("id") if isinstance(citation, dict) else None
                 quote = citation.get("quote") if isinstance(citation, dict) else None
+                details = {"citation_id": key[:128] if isinstance(key, str) and re.fullmatch(r'[A-Za-z0-9_-]+', key) else None,
+                           "allowed_evidence_ids": list(state["admitted"])[:8]}
+                if isinstance(key, str):
+                    key = state['aliases'].get(key, key)
                 if not isinstance(key, str) or key not in state["admitted"]:
-                    raise CoreDataError("rag_citation_invalid", "回答引用了未送入当前模型的证据。")
+                    raise CoreDataError("rag_citation_invalid", "回答引用了未送入当前模型的证据。", details)
                 if not isinstance(quote, str) or not quote.strip() or quote not in state["admitted"][key]:
-                    raise CoreDataError("rag_quote_invalid", "引用摘录与证据原文不一致。")
+                    raise CoreDataError("rag_quote_invalid", "引用摘录与证据原文不一致。", details)
                 self.service.validate_evidence(state["project_id"], [key], run_id=run_id)
                 source = state["evidence"][key]
                 label = " · ".join(str(source.get(field) or "") for field in ["title", "revision", "clause_number"])

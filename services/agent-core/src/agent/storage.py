@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -384,6 +384,18 @@ class CoreRepository:
                 try:
                     migrate_ocr(connection)
                     connection.execute('UPDATE schema_info SET version = 26')
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                version = 26
+            if version == 26:
+                from agent.migrations.v27_document_attachments import migrate as migrate_documents
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_documents(connection)
+                    connection.execute('UPDATE schema_info SET version = 27')
                     self._validate_database(connection)
                     connection.commit()
                 except Exception:
@@ -1247,7 +1259,9 @@ class CoreRepository:
                 text=attachment["kind"] == "text", model_variant=attachment["kind"] == "image", artifact=artifact)
             if attachment["kind"] == "text":
                 _, start, end = text_range(attachment, content)
-                attachment.update(source_start=start, source_end=end)
+                document_source = any(item['kind'] == 'document.source' for item in attachment['artifacts'])
+                if not document_source or 'source_start' in reference or 'source_end' in reference:
+                    attachment.update(source_start=start, source_end=end)
             elif "source_start" in reference or "source_end" in reference:
                 raise CoreDataError("attachment_reference_range_invalid", "Images do not have text ranges.")
             result.append(attachment)
@@ -2193,7 +2207,15 @@ class CoreRepository:
                 raise CoreDataError("invalid_attachments", "Attachment metadata is invalid.")
             if len(name) > 255 or len(storage_key) > 500 or ".." in storage_key.replace("\\", "/").split("/"):
                 raise CoreDataError("invalid_attachments", "Attachment metadata is invalid.")
-            limit = 10 * 1024 * 1024 if kind == "image" else 1024 * 1024
+            source_artifacts = value.get("artifacts", [])
+            if not isinstance(source_artifacts, list):
+                raise CoreDataError("attachment_artifact_invalid", "Attachment artifacts are invalid.")
+            document = any(isinstance(item, dict) and item.get("kind") == "document.source" for item in source_artifacts)
+            limit = 1024 * 1024
+            if document:
+                limit = 100 * 1024 * 1024
+            elif kind == "image":
+                limit = 10 * 1024 * 1024
             if byte_size > limit:
                 raise CoreDataError("attachment_too_large", "An attachment exceeds its size limit.")
             if kind == "image":
@@ -2242,14 +2264,22 @@ class CoreRepository:
                 artifact_key = artifact.get("storage_key")
                 processor_id = artifact.get("processor_id")
                 processor_version = artifact.get("processor_version")
-                if artifact_kind not in {"text.utf8", "image.normalized"} or not all(
+                artifact_limit = 10 * 1024 * 1024
+                if artifact_kind == "document.source":
+                    artifact_limit = 100 * 1024 * 1024
+                elif document and artifact_kind == "text.utf8":
+                    artifact_limit = 80 * 1024 * 1024
+                if artifact_kind not in {"text.utf8", "image.normalized", "document.source"} or not all(
                     isinstance(item, str) and item for item in (
                         artifact_id, artifact_media, artifact_hash, artifact_key,
                         processor_id, processor_version,
                     )
                 ) or isinstance(artifact_size, bool) or not isinstance(artifact_size, int) \
-                        or not 0 <= artifact_size <= 10 * 1024 * 1024:
+                        or not 0 <= artifact_size <= artifact_limit:
                     raise CoreDataError("attachment_artifact_invalid", "Attachment artifacts are invalid.")
+                if artifact_kind == "document.source" and (kind != "text" or processor_id != "builtin.document"
+                        or artifact_key != storage_key or artifact_hash != sha256 or artifact_size != byte_size):
+                    raise CoreDataError("attachment_artifact_invalid", "Document source identity differs from its original.")
                 if artifact_id in artifact_ids or len(artifact_key) > 500 \
                         or ".." in artifact_key.replace("\\", "/").split("/"):
                     raise CoreDataError("attachment_artifact_invalid", "Attachment artifacts are invalid.")
@@ -2258,7 +2288,9 @@ class CoreRepository:
                 artifact_ids.add(artifact_id)
             total += byte_size
             result.append(dict(value))
-        if total > 25 * 1024 * 1024:
+        document_batch = any(any(a.get('kind') == 'document.source' for a in item.get('artifacts', [])) for item in result)
+        total_limit = (200 if document_batch else 25) * 1024 * 1024
+        if total > total_limit:
             raise CoreDataError("attachments_too_large", "Attachments exceed the per-message size limit.")
         return result
 

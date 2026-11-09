@@ -22,7 +22,7 @@ def test_new_database_seeds_global_instructions_and_schema_v20(tmp_path) -> None
     ).hexdigest()
 
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 26
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 27
         assert connection.execute(
             "SELECT COUNT(*) FROM global_instructions WHERE id = 1"
         ).fetchone()[0] == 1
@@ -59,14 +59,14 @@ def test_global_instruction_protocol_round_trip(tmp_path) -> None:
     repository = CoreRepository(tmp_path / "global-instructions-protocol.db")
 
     loaded = handle_message(
-        {"v": 19, "id": "get", "type": "memory.global_instructions.get", "params": {}},
+        {"v": 20, "id": "get", "type": "memory.global_instructions.get", "params": {}},
         repository,
     )
     assert loaded["result"]["global_instructions"]["revision"] == 1
 
     saved = handle_message(
         {
-            "v": 19,
+            "v": 20,
             "id": "update",
             "type": "memory.global_instructions.update",
             "params": {"content": "使用简洁中文回答。", "enabled": True},
@@ -76,7 +76,7 @@ def test_global_instruction_protocol_round_trip(tmp_path) -> None:
     assert saved["result"]["global_instructions"]["content"] == "使用简洁中文回答。"
 
     reset = handle_message(
-        {"v": 19, "id": "reset", "type": "memory.global_instructions.reset", "params": {}},
+        {"v": 20, "id": "reset", "type": "memory.global_instructions.reset", "params": {}},
         repository,
     )
     assert reset["result"]["global_instructions"]["revision"] == 3

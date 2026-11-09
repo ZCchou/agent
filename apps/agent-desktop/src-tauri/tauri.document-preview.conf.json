@@ -1,0 +1,24 @@
+{
+  "productName": "agent Document Preview",
+  "identifier": "io.github.zcchou.agent.documentpreview",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "agent Document Preview",
+        "width": 1000,
+        "height": 720,
+        "minWidth": 1000,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "decorations": false,
+        "dragDropEnabled": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-networking --disable-component-update --disable-sync --no-first-run"
+      }
+    ]
+  }
+}

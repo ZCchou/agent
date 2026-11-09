@@ -43,6 +43,81 @@ async def wait_job(service, result):
     raise AssertionError('job did not finish')
 
 
+def test_reauthorization_is_project_scoped_atomic_and_fresh_on_retry(tmp_path):
+    from contextlib import closing
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        project = core.create_project('Project', 'work')['id']
+        other = core.create_project('Other', 'work')['id']
+        service = RagService(core, Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Rules', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            await ready(service, library)
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            old = (await service.search(project, '失效', run_id='old'))['evidence'][0]
+            first = service.reauthorize_evidence(project, [old['id']], run_id='retry')['evidence'][0]
+            second = service.reauthorize_evidence(project, [old['id']], run_id='retry')['evidence'][0]
+            assert len({old['id'], first['id'], second['id']}) == 3
+            with pytest.raises(CoreDataError):
+                service.reauthorize_evidence(other, [old['id']], run_id='new')
+            with closing(service.repository.connect()) as connection:
+                before = connection.execute('SELECT count(*) FROM rag_searches').fetchone()[0]
+            with pytest.raises(CoreDataError):
+                service.reauthorize_evidence(project, [old['id'], 'missing'], run_id='new')
+            with closing(service.repository.connect()) as connection:
+                assert connection.execute('SELECT count(*) FROM rag_searches').fetchone()[0] == before
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': False})
+            with pytest.raises(CoreDataError):
+                service.reauthorize_evidence(project, [old['id']], run_id='new')
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_legacy_separator_chunks_are_filtered_during_search_and_reindex(tmp_path):
+    from contextlib import closing
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        project = core.create_project('Project', 'work')['id']
+        service = RagService(core, Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Rules', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            await ready(service, library, content='Valid requirement.\n\nLegacy separator.')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            with closing(service.repository.connect()) as connection, connection:
+                connection.execute("UPDATE rag_chunks SET text='| --- |' WHERE text='Legacy separator.'")
+                connection.execute("UPDATE rag_indexes SET splitter_versions='[\"source-block-v2\"]'")
+            result = await service.search(project, 'requirement')
+            assert [item['text'] for item in result['evidence']] == ['Valid requirement.']
+            assert any('Reimport' in warning for warning in result['warnings'])
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            with closing(service.repository.connect()) as connection:
+                assert connection.execute('SELECT chunk_count FROM rag_indexes ORDER BY created_at DESC LIMIT 1').fetchone()[0] == 1
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_office_import_uses_normal_parser_and_preserves_cell_locator(tmp_path):
+    from test_office_documents import package, spreadsheet
+    async def exercise():
+        service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Sheets', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            path = package(tmp_path, '.xlsx', spreadsheet())
+            job = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))
+            assert job['status'] == 'completed', job
+            version = service.repository.list_libraries()[0]['documents'][0]['version_id']
+            preview = service.repository.preview(version)
+            assert preview['chunks'][0]['text'] == 'Shared text'
+            assert preview['chunks'][0]['locator']['cell'] == 'B3'
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
 def test_isolation_confirmation_index_withdraw_generation(tmp_path):
     async def exercise():
         core = CoreRepository(tmp_path / 'agent.db')
@@ -659,6 +734,6 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         with closing(service.repository.connect()) as connection:
             versions = connection.execute('SELECT splitter_versions FROM rag_indexes').fetchone()[0]
         import json
-        assert json.loads(versions) == ['source-block-v2']
+        assert json.loads(versions) == ['source-block-v3']
         await service.close()
     asyncio.run(exercise())

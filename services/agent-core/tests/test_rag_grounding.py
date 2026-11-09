@@ -6,6 +6,154 @@ import pytest
 from agent.storage import CoreDataError
 
 
+@pytest.mark.parametrize('question', ['帮我翻译一下', '解释一下', 'Translate that into Chinese'])
+def test_followup_reauthorizes_previous_answer_evidence_for_new_run(tmp_path, question):
+    from agent.rag.grounding import RagGrounding
+    from agent.rag.service import RagService
+    from agent.storage import CoreRepository
+    from test_rag_service import Engines, ready, wait_job
+
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        project = core.create_project('Project', 'work')['id']
+        service = RagService(core, Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Rules', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            version = await ready(service, library)
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            prior = (await service.search(project, '失效', run_id='old-run'))['evidence'][0]
+            g = RagGrounding(service)
+            conversation = {'project_id': project, 'messages': [
+                {'id': 'old-user', 'role': 'user', 'content': 'What are the safety requirements?'},
+                {'id': 'old-answer', 'role': 'assistant', 'content': f"[Rules](rag-evidence:{prior['id']})"},
+                {'id': 'report', 'role': 'system_event', 'content': 'Execution report'},
+                {'id': 'failed-followup', 'role': 'user', 'content': '帮我翻译一下'},
+                {'id': 'new-user', 'role': 'user', 'content': question},
+            ]}
+            async def unavailable_search(*args, **kwargs):
+                raise AssertionError('A cited followup must reauthorize the prior evidence')
+            service.search = unavailable_search
+            await g.prepare({'id': 'new-run', 'user_message_id': 'new-user'}, conversation)
+            current = g.evidence('new-run')[0]
+            assert current['id'] != prior['id']
+            assert current['run_id'] == 'new-run'
+            assert current['version_id'] == version
+            assert current['text'] == prior['text']
+            service.validate_evidence(project, [current['id']], run_id='new-run')
+            with pytest.raises(CoreDataError):
+                service.validate_evidence(project, [prior['id']], run_id='new-run')
+            g.admit('new-run', [current['id']])
+            answer = json.dumps({'claims': [{'text': 'Translation', 'evidence': [{'id': current['id'], 'quote': current['text']}]}]})
+            assert current['id'] in g.finalize('new-run', answer)
+            historical_answer = answer.replace(current['id'], prior['id'])
+            rendered = g.finalize('new-run', historical_answer)
+            assert f"rag-evidence:{current['id']}" in rendered
+            assert f"rag-evidence:{prior['id']}" not in rendered
+            with pytest.raises(CoreDataError) as forged_error:
+                g.finalize('new-run', json.dumps({'aliases': {'forged-id': current['id']}, 'claims': [{
+                    'text': 'Forged', 'evidence': [{'id': 'forged-id', 'quote': current['text']}]}]}))
+            assert forged_error.value.code == 'rag_citation_invalid'
+            with pytest.raises(CoreDataError):
+                g.admit('new-run', [])
+            with pytest.raises(CoreDataError) as excluded_error:
+                g.finalize('new-run', historical_answer)
+            assert excluded_error.value.code == 'rag_citation_invalid'
+            g.admit('new-run', [current['id']])
+            invalid_quote_answer = json.loads(historical_answer)
+            invalid_quote_answer['claims'][0]['evidence'][0]['quote'] = 'Forged quote'
+            with pytest.raises(CoreDataError) as quote_error:
+                g.finalize('new-run', json.dumps(invalid_quote_answer))
+            assert quote_error.value.code == 'rag_quote_invalid'
+            await service.handle('document.withdraw', {'version_id': version})
+            with pytest.raises(CoreDataError):
+                g.finalize('new-run', historical_answer)
+            with pytest.raises(CoreDataError):
+                await g.prepare({'id': 'retry-run', 'user_message_id': 'new-user'}, conversation)
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_followup_without_citations_searches_prior_question_and_answer():
+    class SearchService(EvidenceService):
+        async def search(self, project_id, query, **kwargs):
+            assert '25.1309' in query
+            assert 'System safety' in query
+            return await super().search(project_id, query, **kwargs)
+    from agent.rag.grounding import RagGrounding
+    g = RagGrounding(SearchService())
+    asyncio.run(g.prepare({'id': 'run', 'user_message_id': 'u2'}, {'project_id': 'project-1', 'messages': [
+        {'id': 'u1', 'role': 'user', 'content': '25.1309 requirements'},
+        {'id': 'a1', 'role': 'assistant', 'content': 'System safety'},
+        {'id': 'u2', 'role': 'user', 'content': '解释一下'},
+    ]}))
+
+
+@pytest.mark.parametrize('current', ['解释一下', '翻译第16节'])
+def test_followup_ignores_later_messages_and_explicit_new_topics(current):
+    from agent.rag.followup import followup_context
+    messages = [
+        {'id': 'u1', 'role': 'user', 'content': 'Prior question'},
+        {'id': 'a1', 'role': 'assistant', 'content': '[Old](rag-evidence:old-id)'},
+        {'id': 'u2', 'role': 'user', 'content': current},
+        {'id': 'a2', 'role': 'assistant', 'content': '[Later](rag-evidence:later-id)'},
+    ]
+    ids, query = followup_context(messages, 'u2')
+    assert 'later-id' not in ids
+    if current == '解释一下':
+        assert ids == ['old-id']
+    else:
+        assert ids == []
+        assert query == current
+
+
+def test_followup_stops_at_unanswered_new_topic_after_system_report():
+    from agent.rag.followup import followup_context
+    messages = [
+        {'id': 'u1', 'role': 'user', 'content': 'Prior question'},
+        {'id': 'a1', 'role': 'assistant', 'content': '[Old](rag-evidence:old-id)'},
+        {'id': 'report', 'role': 'system_event', 'content': 'Execution report'},
+        {'id': 'pending', 'role': 'user', 'content': 'Explain Section 16 power input'},
+        {'id': 'current', 'role': 'user', 'content': '帮我翻译一下'},
+    ]
+    assert followup_context(messages, 'current') == ([], '帮我翻译一下')
+
+
+def test_reauthorization_aliases_cannot_be_supplied_by_search_results():
+    class SearchService(EvidenceService):
+        async def search(self, *args, **kwargs):
+            return {**await super().search(*args, **kwargs), 'aliases': {'forged-id': 'evidence-1'}}
+    from agent.rag.grounding import RagGrounding
+    g = RagGrounding(SearchService())
+    prepare(g)
+    g.admit('run-1', ['evidence-1'])
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('run-1', json.dumps({'claims': [{'text': 'Claim', 'evidence': [{'id': 'forged-id', 'quote': evidence()['text']}]}]}))
+    assert error.value.code == 'rag_citation_invalid'
+
+
+def test_citation_failure_details_identify_bad_id_without_claim_or_quote():
+    g = grounding()
+    prepare(g)
+    g.admit('run-1', ['evidence-1'])
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('run-1', json.dumps({'claims': [{'text': 'private claim', 'evidence': [{'id': 'stale-id', 'quote': 'private quote'}]}]}))
+    assert error.value.details == {'citation_id': 'stale-id', 'allowed_evidence_ids': ['evidence-1']}
+
+
+def test_failed_retry_prepare_discards_previous_admission():
+    g = grounding()
+    prepare(g)
+    g.admit('run-1', ['evidence-1'])
+    async def failed_search(*args, **kwargs):
+        raise CoreDataError('rag_no_evidence', 'No evidence')
+    g.service.search = failed_search
+    with pytest.raises(CoreDataError):
+        prepare(g)
+    assert g.evidence('run-1') == []
+
+
 def evidence():
     return {"id": "evidence-1", "version_id": "version-1", "library_id": "library-1",
             "title": "规章", "revision": "R1", "clause_number": "25.1",
@@ -120,7 +268,7 @@ def test_core_migrates_rag_and_management_protocol(tmp_path):
     async def scenario():
         repository = CoreRepository(tmp_path / "agent.db")
         with repository._connect() as connection:
-            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 26
+            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 27
         async def sink(event):
             pass
         service = ChatRunService(repository, sink)

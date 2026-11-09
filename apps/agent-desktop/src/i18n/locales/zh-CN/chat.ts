@@ -174,6 +174,7 @@ const chat = {
     },
   },
   attachments: {
+    processing: { parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
     referenceSelection: "引用所选文本",
     reference: "引用此附件", referenceNamed: "引用 {{name}}",
     references: "本轮引用的附件", fromHistory: "来自当前会话",
@@ -191,7 +192,7 @@ const chat = {
     drop: {
       title: "松开以添加 {{count}} 个文件",
       processing: "正在处理 {{count}} 个文件…",
-      hint: "支持图片和 UTF-8 文本；文件只会加入当前消息草稿",
+      hint: "支持图片、UTF-8 文本、PDF、Office 和 WPS 文档。文档每个 100 MiB，图片 10 MiB，文本 1 MiB。含文档时合计 200 MiB，其他附件合计 25 MiB。文件只会加入当前消息草稿。",
     },
     rejection: {
       attachment_type_unsupported: "当前版本无法读取此文件类型；发送后 Agent 会明确说明未读取。",

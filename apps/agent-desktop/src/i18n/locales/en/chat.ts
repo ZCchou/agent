@@ -174,6 +174,7 @@ const chat = {
     },
   },
   attachments: {
+    processing: { parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
     referenceSelection: "Reference selected text",
     reference: "Reference this attachment", referenceNamed: "Reference {{name}}",
     references: "Referenced attachments", fromHistory: "From this conversation",
@@ -191,7 +192,7 @@ const chat = {
     drop: {
       title: "Drop to add {{count}} files",
       processing: "Processing {{count}} files…",
-      hint: "Images and UTF-8 text are supported; files are only added to this message draft",
+      hint: "Supports images, UTF-8 text, PDF, Office and WPS documents. Documents up to 100 MiB, images 10 MiB, text 1 MiB. Total 200 MiB with documents, otherwise 25 MiB. Files are added to this draft.",
     },
     rejection: {
       attachment_type_unsupported: "This file type cannot be read yet; the Agent will report it as unread.",

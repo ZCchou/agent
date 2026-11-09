@@ -59,7 +59,7 @@ export interface MessageAttachment {
 
 export interface AttachmentArtifact {
   artifact_id: string;
-  kind: "text.utf8" | "image.normalized" | "document.text" | "document.page_image" | "audio.transcript" | "archive.manifest";
+  kind: "document.source" | "text.utf8" | "image.normalized" | "document.text" | "document.page_image" | "audio.transcript" | "archive.manifest";
   processor_id: string;
   processor_version: string;
   media_type: string;
@@ -339,7 +339,7 @@ export interface ProjectModelScope {
 export interface ModelRunEvent {
   run_id: string;
   sequence: number;
-  event_type: "run.progress_recorded" | "run.state_changed" | "run.chunk" | "run.draft_checkpoint" | "run.completed" | "run.failed" | "run.cancelled" | "run.tool_requested" | "run.tool_status_changed" | "run.change_set_ready" | "run.waiting_approval" | "run.tool_completed" | "run.web_search_started" | "run.web_search_completed" | "run.web_search_failed" | "run.web_evidence_evaluated" | "run.grounding_fallback_started" | "run.grounding_fallback_completed" | "run.intent_follow_up_pending" | "run.context_compaction_started" | "run.context_compaction_completed" | "run.context_compaction_failed" | "run.waiting_context" | "run.planning_started" | "run.plan_ready" | "run.waiting_permission" | "run.waiting_budget" | "run.step_started" | "run.step_completed" | "run.step_failed" | "run.synthesis_started" | "run.invocation_prepared" | "run.invocation_dispatched" | "run.invocation_retrying" | "run.response_recovering" | "run.invocation_completed" | "run.invocation_failed";
+  event_type: "run.document_processing" | "run.progress_recorded" | "run.state_changed" | "run.chunk" | "run.draft_checkpoint" | "run.completed" | "run.failed" | "run.cancelled" | "run.tool_requested" | "run.tool_status_changed" | "run.change_set_ready" | "run.waiting_approval" | "run.tool_completed" | "run.web_search_started" | "run.web_search_completed" | "run.web_search_failed" | "run.web_evidence_evaluated" | "run.grounding_fallback_started" | "run.grounding_fallback_completed" | "run.intent_follow_up_pending" | "run.context_compaction_started" | "run.context_compaction_completed" | "run.context_compaction_failed" | "run.waiting_context" | "run.planning_started" | "run.plan_ready" | "run.waiting_permission" | "run.waiting_budget" | "run.step_started" | "run.step_completed" | "run.step_failed" | "run.synthesis_started" | "run.invocation_prepared" | "run.invocation_dispatched" | "run.invocation_retrying" | "run.response_recovering" | "run.invocation_completed" | "run.invocation_failed";
   timestamp: string;
   data: Record<string, unknown>;
 }

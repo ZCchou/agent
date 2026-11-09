@@ -11,7 +11,7 @@ import sqlite3
 import tempfile
 
 from agent.document_parser import ParserService
-from agent.rag.documents import MAX_FILE_BYTES, MAX_TEXT_CHARS, SUPPORTED_SUFFIXES
+from agent.rag.documents import MAX_FILE_BYTES, MAX_TEXT_CHARS, SUPPORTED_SUFFIXES, SPLITTING_VERSION, has_readable_text
 from agent.rag.repository import RagRepository, identifier, required_text
 from agent.rag.retrieval import candidates, load_vector_extension, vector_blob
 from agent.storage import CoreDataError, _utc_now
@@ -19,6 +19,7 @@ from agent.storage import CoreDataError, _utc_now
 DOCUMENT_PARSE_TIMEOUT = 125
 MEDIA_TYPES = {'.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown'}
+LEGACY_SPLITTING_WARNING = 'Reimport the original documents and rebuild their indexes to refresh section and clause metadata from the updated parser.'
 
 
 class RagService:
@@ -235,7 +236,7 @@ class RagService:
 
     def _extract_original(self, path):
         if path.suffix.lower() not in SUPPORTED_SUFFIXES:
-            raise CoreDataError('rag_document_unsupported', 'Supported documents are DOCX, text PDF, UTF-8 TXT and Markdown.')
+            raise CoreDataError('rag_document_unsupported', 'Supported documents are Office, WPS, PDF, UTF-8 TXT and Markdown.')
         with path.open('rb') as source:
             content = source.read(MAX_FILE_BYTES + 1)
         if len(content) > MAX_FILE_BYTES:
@@ -261,7 +262,7 @@ class RagService:
         if self._closed:
             raise CoreDataError('rag_closed', 'The RAG service closed before the document was saved.')
         self.repository.save_version(job['library_id'], path.stem, parsed, digest, path.name,
-                                     MEDIA_TYPES[path.suffix.lower()],
+                                     MEDIA_TYPES.get(path.suffix.lower(), 'application/octet-stream'),
                                      str(path.resolve()), job['id'])
 
     def _publish_ocr(self, job, path, digest, parsed, options):
@@ -303,6 +304,7 @@ class RagService:
                 JOIN rag_versions v ON v.id=c.version_id JOIN rag_documents d ON d.id=v.document_id
                 WHERE d.library_id=? AND v.status='confirmed' AND v.id IN (SELECT value FROM json_each(?))
                 ORDER BY c.version_id,c.ordinal''', (library_id, json.dumps(version_ids))).fetchall()
+        chunks = [row for row in chunks if has_readable_text(row['text'])]
         if not chunks:
             raise CoreDataError('rag_no_confirmed_documents', 'Confirm a readable document before building its index.')
         embedding = self._model(library['embedding_model_id'], 'embedding')
@@ -366,6 +368,36 @@ class RagService:
     def read_evidence(self, project_id, evidence_id, offset=0, length=8000):
         return self.repository.read_evidence_context(project_id, evidence_id, offset, length)
 
+    def reauthorize_evidence(self, project_id, evidence_ids, *, run_id):
+        """Mint fresh run identities only while all original sources remain authorized."""
+        if self._closed:
+            raise CoreDataError('rag_closed', 'The RAG service is closed.')
+        if not isinstance(evidence_ids, list) or not 1 <= len(evidence_ids) <= 8 or any(not isinstance(value, str) for value in evidence_ids):
+            raise CoreDataError('rag_evidence_invalid', 'Select between one and eight evidence identifiers.')
+        search_id = identifier()
+        with closing(self.repository.connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            state = self.repository.state(project_id, connection)
+            sources = [self.repository.checked_evidence(project_id, key, connection=connection)
+                       for key in dict.fromkeys(evidence_ids)]
+            if any(not has_readable_text(item['text']) for item in sources):
+                raise CoreDataError('rag_evidence_invalid', 'The previous evidence has no readable text. Search again.')
+            connection.execute('''INSERT INTO rag_searches(id,project_id,run_id,query,generation,index_ids,created_at)
+                VALUES (?,?,?,?,?,?,?)''', (search_id, project_id, run_id, '', state['generation'], json.dumps(state['index_ids']), _utc_now()))
+            evidence, aliases = [], {}
+            for source in sources:
+                record = {**source, 'id': 'rag-' + identifier(), 'run_id': run_id, 'search_id': search_id}
+                if source.get('locator', {}).get('splitting_version') != SPLITTING_VERSION:
+                    record['warnings'] = [LEGACY_SPLITTING_WARNING]
+                connection.execute('''INSERT INTO rag_evidence(id,search_id,project_id,library_id,index_id,version_id,chunk_id,payload)
+                    SELECT ?,?,?,?,?,?,chunk_id,? FROM rag_evidence WHERE id=?''',
+                    (record['id'], search_id, project_id, record['library_id'], record['index_id'], record['version_id'],
+                     json.dumps(record, ensure_ascii=False), source['id']))
+                evidence.append(record)
+                aliases[source['id']] = record['id']
+        return {'evidence': evidence, 'generation': state['generation'], 'index_ids': state['index_ids'],
+                'external_untrusted': True, 'search_id': search_id, 'aliases': aliases}
+
     async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8):
         if self._closed:
             raise CoreDataError('rag_closed', 'The RAG service is closed.')
@@ -414,6 +446,8 @@ class RagService:
                 by_id = {row['id']: dict(row) for row in rows}
                 ordered = [by_id[chunk_id] for chunk_id in ids]
             for row in ordered:
+                if not has_readable_text(row['text']):
+                    continue
                 row['fusion_score'] = scores[row['id']]
                 retrieved.append(row)
                 index_by_chunk[row['id']] = index
@@ -458,11 +492,15 @@ class RagService:
                           'clause_number': row['clause_number'], 'locator': json.loads(row['locator']), 'text': row['text'],
                           'text_hash': row['text_hash'], 'score': row['score'], 'external_untrusted': True,
                           'run_id': run_id, 'search_id': search_id, 'index_id': index['id']}
+                if record['locator'].get('splitting_version') != SPLITTING_VERSION:
+                    record['warnings'] = [LEGACY_SPLITTING_WARNING]
                 connection.execute('''INSERT INTO rag_evidence(id,search_id,project_id,library_id,index_id,version_id,chunk_id,payload)
                     VALUES (?,?,?,?,?,?,?,?)''', (record['id'], search_id, project_id, index['library_id'], index['id'], row['version_id'], row['id'], json.dumps(record, ensure_ascii=False)))
                 evidence.append(record)
         return {'evidence': evidence, 'generation': state['generation'], 'index_ids': [index['id'] for index in indexes],
-                'external_untrusted': True, 'search_id': search_id}
+                'external_untrusted': True, 'search_id': search_id,
+                'warnings': [LEGACY_SPLITTING_WARNING] if any(
+                    set(json.loads(index['splitter_versions'])) != {SPLITTING_VERSION} for index in indexes) else []}
 
     async def close(self):
         self._closed = True

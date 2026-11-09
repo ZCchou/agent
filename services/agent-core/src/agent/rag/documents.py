@@ -10,18 +10,24 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from agent.storage import CoreDataError
+from agent.document_parser.office import OFFICE_SUFFIXES
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_EXPANDED_BYTES = 200 * 1024 * 1024
 MAX_TEXT_CHARS = 20_000_000
 MAX_CHUNKS = 100_000
 CHUNK_CHARS = 1200
-SPLITTING_VERSION = 'source-block-v2'
+SPLITTING_VERSION = 'source-block-v3'
 PDF_PARSE_TIMEOUT = 120
-SUPPORTED_SUFFIXES = {'.docx', '.pdf', '.txt', '.md', '.markdown'}
+SUPPORTED_SUFFIXES = OFFICE_SUFFIXES | {'.pdf', '.txt', '.md', '.markdown'}
 _PDF_LOCK = threading.Lock()
 NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 CLAUSE = re.compile(r'^\s*(?:§\s*)?((?:[A-Z]+[- ]?)?\d+(?:\.\d+)+(?:\([a-zA-Z0-9]+\))*)(?=$|[^0-9A-Za-z.])')
+SECTION = re.compile(r'^\s*(?:section[ \t]+\d+\b|第[一二三四五六七八九十百零〇\d]+[章节])', re.IGNORECASE | re.MULTILINE)
+
+
+def has_readable_text(text):
+    return any(character.isalnum() for character in text)
 
 
 def _split_block(text):
@@ -47,11 +53,12 @@ def _chunks(blocks, warnings, max_chars=MAX_TEXT_CHARS):
     chunks, parents = [], []
     total = 0
     clause = clause_parent = None
+    section = None
     clause_heading_path = []
     by_block = {}
     for ordinal, (text, locator) in enumerate(blocks, 1):
         text = text.replace('\x00', '').strip()
-        if not text:
+        if not has_readable_text(text):
             continue
         total += len(text)
         if total > max_chars:
@@ -65,11 +72,15 @@ def _chunks(blocks, warnings, max_chars=MAX_TEXT_CHARS):
             locator['heading_path'] = anchor['locator'].get('heading_path', []) if anchor else []
         else:
             match = CLAUSE.match(text)
+            section_match = SECTION.search(text) if locator.get('kind') == 'pdf' else SECTION.match(text)
+            new_section = ' '.join(section_match.group(0).split()).casefold() if section_match else None
             if match:
                 clause, clause_parent = match.group(1), block_id
                 clause_heading_path = locator.get('heading_path', [])
-            elif locator.get('heading_level') and locator.get('heading_path', [])[:1] != clause_heading_path[:1]:
+            elif (new_section and new_section != section) or (locator.get('heading_level') and locator.get('heading_path', [])[:1] != clause_heading_path[:1]):
                 clause = clause_parent = None
+            if new_section:
+                section = new_section
             block_clause, block_parent = clause, clause_parent or block_id
         locator['clause_parent_id'] = block_parent
         parent = {'text': text, 'locator': locator, 'clause_number': block_clause}
@@ -86,6 +97,8 @@ def _chunks(blocks, warnings, max_chars=MAX_TEXT_CHARS):
             warnings.append('Long source blocks are split into linked fragments. Read their parent context before using conditions or exceptions.')
         for fragment_index, (start, end, boundary) in enumerate(fragments):
             excerpt = text[start:end]
+            if not has_readable_text(excerpt):
+                continue
             chunks.append({'text': excerpt, 'text_hash': hashlib.sha256(excerpt.encode('utf-8')).hexdigest(),
                            'clause_number': parent['clause_number'], 'locator': {
                                **locator, 'offset': start, 'parent_length': len(text),
@@ -332,7 +345,7 @@ def parse_document(path: Path, max_expanded_bytes=MAX_EXPANDED_BYTES):
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
-        raise CoreDataError('rag_document_unsupported', 'Supported documents are DOCX, text PDF, UTF-8 TXT and Markdown.')
+        raise CoreDataError('rag_document_unsupported', 'Supported documents are Office, WPS, PDF, UTF-8 TXT and Markdown.')
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             raise CoreDataError('rag_document_too_large', 'The document exceeds 100 MiB.')
@@ -340,6 +353,9 @@ def parse_document(path: Path, max_expanded_bytes=MAX_EXPANDED_BYTES):
         raise CoreDataError('rag_document_unavailable', 'The document file is unavailable.') from error
     if suffix == '.docx':
         return _parse_docx(path, max_expanded_bytes)
+    if suffix in OFFICE_SUFFIXES:
+        from agent.document_parser.office import parse_office_document
+        return parse_office_document(path, max_expanded_bytes=max_expanded_bytes)
     if suffix == '.pdf':
         return _parse_pdf(path)
     return _parse_text_file(path)

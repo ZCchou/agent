@@ -48,6 +48,7 @@ import { VisionCapabilityPrompt } from "./VisionCapabilityPrompt";
 import { RoutingBudgetPrompt } from "./RoutingBudgetPrompt";
 import { ConversationRoutingControl, type RoutingModelOption } from "./ConversationRoutingControl";
 import { applyRunFailure, runErrorTranslationKey } from "./runErrors";
+import { documentProcessingLabel } from "./documentProcessing";
 
 const MODEL_RUN_STATUSES = new Set<ModelRun["status"]>([
   "queued", "building_context", "waiting_context", "waiting_permission", "waiting_budget", "generating", "waiting_tool",
@@ -296,6 +297,9 @@ export function ChatPage() {
             setSending(true);
           }
         }
+      } else if (event.event_type === "run.document_processing") {
+        const label = documentProcessingLabel(event.data, (key, values) => tChat(key, values));
+        if (label) setRunActivityLabel(label);
       } else if (event.event_type === "run.plan_ready") {
         setRunActivityLabel(tChat("routing.status.planning"));
       } else if (event.event_type === "run.step_started") {

@@ -97,6 +97,8 @@ class ChatRunService:
         self.event_sink = event_sink
         self.skills = SkillRegistry(repository.database_path.parent / "skills.json")
         self.rag = RagService(repository)
+        from agent.document_attachments import DocumentAttachments
+        self.document_attachments = DocumentAttachments(repository, parser=self.rag.parser)
         from agent.gpu_resources import GpuResources
         self.gpu_resources = GpuResources(self.rag.models.release_cuda)
         self.rag.models.gpu_resources = self.gpu_resources
@@ -1739,6 +1741,7 @@ class ChatRunService:
         self.repository.interrupt_active_runs()
         self.tool_loop.shutdown()
         await self.rag.close()
+        await self.document_attachments.close()
         await self.local_models.close()
 
     async def _execute(self, run_id: str) -> None:
@@ -1775,6 +1778,7 @@ class ChatRunService:
                 (message for message in current_conversation["messages"]
                  if message["id"] == run["user_message_id"]), None,
             )
+            current_conversation = await self._prepare_document_attachments(run, current_conversation)
             await self.rag_grounding.prepare(run, current_conversation)
             if execution_plan is None and run.get("parent_run_id") \
                     and current_user and current_user.get("attachments"):
@@ -2425,6 +2429,7 @@ class ChatRunService:
                 pass
             await self._compaction_event(run_id, "run.failed", {
                 "error_code": code, "message": message,
+                "details": error.details if isinstance(error, CoreDataError) else None,
                 "fallback_content": fallback_content,
                 "used_images": used_images and not has_vision_specialist,
                 "provider_profile_id": event_provider_id,
@@ -2433,6 +2438,28 @@ class ChatRunService:
             })
         finally:
             self.run_tasks.pop(run_id, None)
+
+    async def _prepare_document_attachments(self, run, conversation):
+        from agent.document_attachments import is_document
+        message = next(item for item in conversation["messages"] if item["id"] == run["user_message_id"])
+        for attachment in message.get("attachments", []):
+            if not is_document(attachment) or any(a["kind"] == "text.utf8" for a in attachment.get("artifacts", [])):
+                continue
+            async def progress(status):
+                await self._emit(run["id"], "run.document_processing", {"attachment_id": attachment["id"], **status})
+            extracted = await self.document_attachments.extract(attachment, progress=progress)
+            artifact = next(a for a in extracted["artifacts"] if a["kind"] == "text.utf8")
+            with self.repository._connect() as connection:
+                state = connection.execute("SELECT status FROM model_runs WHERE id=?", (run["id"],)).fetchone()
+                if state is None or state["status"] != "building_context":
+                    raise asyncio.CancelledError
+                connection.execute("""INSERT INTO attachment_artifacts
+                    (id,attachment_id,kind,processor_id,processor_version,media_type,byte_size,sha256,storage_key,width,height,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL,?)""",
+                    (artifact["artifact_id"], attachment["id"], artifact["kind"], artifact["processor_id"],
+                     artifact["processor_version"], artifact["media_type"], artifact["byte_size"], artifact["sha256"],
+                     artifact["storage_key"], _utc_now()))
+        return self.repository.get_run_conversation(run["id"])
 
     def _validate_planned_model(
         self, conversation: dict[str, Any], step: dict[str, Any],

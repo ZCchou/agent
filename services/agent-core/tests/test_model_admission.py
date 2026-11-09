@@ -49,7 +49,7 @@ def test_v5_to_v6_adds_model_scope_without_changing_records(tmp_path: Path) -> N
         }
         version = connection.execute("SELECT version FROM schema_info").fetchone()[0]
         policy = connection.execute("SELECT model_scope_policy FROM projects WHERE id = 'p'").fetchone()[0]
-        assert version == 26
+        assert version == 27
     assert before == after
     assert policy == "inherit_global"
     assert "model_scope_policy" in columns
