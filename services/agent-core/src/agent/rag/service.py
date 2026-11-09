@@ -31,6 +31,10 @@ class RagService:
         self.parser = parser if parser is not None else ParserService(self.repository.data_dir)
         self._tasks = {}
         self._closed = False
+        from agent.ocr.pipeline import OcrPipeline
+        self.ocr = OcrPipeline(self.repository)
+        self._index_locks = {}
+        self._pending_indexes = {}
 
     def _model(self, model_id, role=None, digest=None):
         records = self.models.list_models()
@@ -90,6 +94,17 @@ class RagService:
             raise CoreDataError('rag_closed', 'The RAG service is closed.')
         if not isinstance(params, dict):
             raise CoreDataError('rag_invalid_request', 'RAG parameters must be an object.')
+        if action == 'ocr.model.list':
+            return await asyncio.to_thread(self.ocr.status)
+        if action == 'ocr.model.inspect':
+            return await asyncio.to_thread(self.ocr.models.inspect, params.get('path'))
+        if action == 'ocr.model.import':
+            return await asyncio.to_thread(self.ocr.models.import_bundle, params.get('path'))
+        if action == 'document.ocr.pages':
+            return self.repository.ocr_pages(params.get('version_id'))
+        if action == 'document.ocr.render':
+            path = self.repository.original_for_version(params.get('version_id'))
+            return await self.ocr.client.request('render', path, page=params.get('page'))
         if action.startswith('model.'):
             return await self._model_action(action, params)
         if action == 'library.list':
@@ -132,9 +147,22 @@ class RagService:
             if not isinstance(paths, list) or not 1 <= len(paths) <= 32 or any(not isinstance(path, str) or not path for path in paths):
                 raise CoreDataError('rag_invalid_request', 'Select between 1 and 32 document paths.')
             jobs = []
+            options = None
+            if 'ocr_mode' in params:
+                if params['ocr_mode'] not in {'auto', 'force', 'off'} or params.get('device', 'auto') not in {'auto', 'cpu', 'cuda'}:
+                    raise CoreDataError('rag_invalid_request', 'Invalid OCR mode or device')
+                if not isinstance(params.get('auto_index', True), bool):
+                    raise CoreDataError('rag_invalid_request', 'Auto index must be boolean')
+                pages = params.get('pages', [])
+                if not isinstance(pages, list) or len(pages) > 10_000 or any(type(page) is not int or not 1 <= page <= 10_000 for page in pages):
+                    raise CoreDataError('rag_invalid_request', 'Invalid OCR page selection')
+                options = {key: params[key] for key in ('ocr_mode', 'device', 'profile_id', 'auto_index', 'pages', 'auto_apply_project_id') if key in params}
+                if options.get('auto_apply_project_id'):
+                    with closing(self.repository.connect()) as connection:
+                        self.repository._project(connection, options['auto_apply_project_id'])
             for path in paths:
                 job = self.repository.new_job('document.import', params.get('library_id'))
-                self._start(job, self._import_document(job, Path(path)))
+                self._start(job, self._import_document(job, Path(path), options))
                 jobs.append(job)
             return {'job': jobs[0], 'jobs': jobs}
         if action == 'document.preview':
@@ -193,12 +221,19 @@ class RagService:
         digest, original = self.repository.save_original(content, path.suffix.lower())
         return digest, original
 
-    async def _import_document(self, job, path):
+    async def _import_document(self, job, path, options=None):
         try:
             digest, original = await asyncio.wait_for(
                 asyncio.to_thread(self._extract_original, path), timeout=DOCUMENT_PARSE_TIMEOUT)
         except TimeoutError as error:
             raise CoreDataError('rag_document_timeout', 'Document import exceeded its time limit.') from error
+        if options is not None and path.suffix.lower() == '.pdf':
+            async def publish_initial(parsed):
+                self._publish_ocr(job, path, digest, parsed, options)
+            parsed = await self.ocr.process(job, original, digest, options, on_initial=publish_initial)
+            self._publish_ocr(job, path, digest, parsed, options)
+            self.repository.update_job(job['id'], status='completed', progress=1)
+            return
         # ParserService bounds execution after its permit, excluding queue time.
         parsed = await self.parser.parse(original)
         if self._closed:
@@ -206,6 +241,51 @@ class RagService:
         self.repository.save_version(job['library_id'], path.stem, parsed, digest, path.name,
                                      MEDIA_TYPES[path.suffix.lower()],
                                      str(path.resolve()), job['id'])
+
+    def _publish_ocr(self, job, path, digest, parsed, options):
+        with closing(self.repository.connect()) as connection:
+            self.repository.require_running(connection, job['id'])
+        preview = self.repository.save_version(job['library_id'], path.stem, parsed, digest,
+            path.name, MEDIA_TYPES['.pdf'], str(path.resolve()))
+        version_id = preview['version']['id']
+        with closing(self.repository.connect()) as connection, connection:
+            self.repository.require_running(connection, job['id'])
+            connection.execute('UPDATE rag_versions SET ocr_summary=? WHERE id=?',
+                (json.dumps(parsed.get('ocr', {})), version_id))
+        self.repository.confirm({'version_id': version_id, 'title': path.stem,
+            'revision': '未标注', 'source': '本机导入 · 机器识别', 'document_number': path.stem,
+            'warnings_acknowledged': True})
+        self.ocr.progress(job['id'], latest_version_id=version_id)
+        if options.get('auto_index', True):
+            try:
+                index_job = self.repository.new_job('index.build', job['library_id'])
+            except CoreDataError as error:
+                if error.code != 'rag_job_active':
+                    raise
+                self._pending_indexes[job['library_id']] = options.get('auto_apply_project_id')
+            else:
+                self._start(index_job, self._auto_index(index_job, options.get('auto_apply_project_id')))
+
+    async def _auto_index(self, job, project_id):
+        library_id = job['library_id']
+        lock = self._index_locks.setdefault(library_id, asyncio.Lock())
+        async with lock:
+            try:
+                documents = self.repository.list_libraries()
+                library = next(item for item in documents if item['id'] == library_id)
+                latest = {}
+                for document in library['documents']:
+                    if document['status'] == 'confirmed':
+                        latest[document['id']] = document['version_id']
+                await self._build_index(job, list(latest.values()))
+                if project_id:
+                    self.repository.bind({'library_id': library_id, 'project_id': project_id, 'enabled': True})
+            finally:
+                if library_id in self._pending_indexes and not self._closed:
+                    target = self._pending_indexes.pop(library_id)
+                    self.repository.update_job(job['id'], status='completed', progress=1)
+                    next_job = self.repository.new_job('index.build', library_id)
+                    self._start(next_job, self._auto_index(next_job, target))
 
     async def _build_index(self, job, version_ids):
         library_id = job['library_id']
@@ -384,6 +464,7 @@ class RagService:
             self.repository.update_job(job_id, status='cancelled')
             task.cancel()
         await self.parser.close()
+        await self.ocr.close()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         result = self.models.close()

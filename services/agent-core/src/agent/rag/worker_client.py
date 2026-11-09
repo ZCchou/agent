@@ -12,9 +12,10 @@ from agent.infrastructure.processes import WindowsJob
 
 
 class WorkerClient:
-    def __init__(self, command: list[str], timeout: float = 300):
+    def __init__(self, command: list[str], timeout: float = 300, memory_limit: int | None = None):
         self.command = command
         self.timeout = timeout
+        self.memory_limit = memory_limit
         self.process: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
         self._sequence = 0
@@ -45,7 +46,7 @@ class WorkerClient:
         )
         if os.name == "nt":
             try:
-                self._job = WindowsJob(self.process.pid)
+                self._job = WindowsJob(self.process.pid, self.memory_limit)
             except BaseException:
                 await self._stop()
                 raise

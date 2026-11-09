@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -372,6 +372,18 @@ class CoreRepository:
                 try:
                     migrate_local_models(connection)
                     connection.execute("UPDATE schema_info SET version = 25")
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                version = 25
+            if version == 25:
+                from agent.migrations.v26_ocr import migrate as migrate_ocr
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_ocr(connection)
+                    connection.execute('UPDATE schema_info SET version = 26')
                     self._validate_database(connection)
                     connection.commit()
                 except Exception:

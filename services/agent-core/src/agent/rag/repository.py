@@ -192,9 +192,28 @@ class RagRepository:
         with closing(self.connect()) as connection:
             version = self.version(connection, version_id)
             version['warnings'] = json.loads(version['warnings'])
+            version['ocr_summary'] = json.loads(version.get('ocr_summary', '{}'))
             chunks = connection.execute('SELECT * FROM rag_chunks WHERE version_id=? ORDER BY ordinal LIMIT ? OFFSET ?', (version_id, limit, offset)).fetchall()
             return {'version': version, 'chunks': [{**dict(row), 'locator': json.loads(row['locator'])} for row in chunks],
                     'warnings': version['warnings'], 'total_chunks': version['chunk_count'], 'offset': offset}
+
+    def original_for_version(self, version_id):
+        with closing(self.connect()) as connection:
+            version = self.version(connection, version_id)
+            if version['status'] == 'withdrawn':
+                raise CoreDataError('rag_evidence_invalid', 'The document was withdrawn')
+        suffix = Path(version['original_name']).suffix.lower()
+        return self.data_dir / 'originals' / version['original_hash'][:2] / (version['original_hash'] + suffix)
+
+    def ocr_pages(self, version_id):
+        with closing(self.connect()) as connection:
+            version = self.version(connection, version_id)
+            if version['status'] == 'withdrawn':
+                raise CoreDataError('rag_evidence_invalid', 'The document was withdrawn')
+            summary = json.loads(version.get('ocr_summary', '{}'))
+            rows = connection.execute('SELECT page,payload FROM rag_ocr_pages WHERE original_hash=? AND profile_id=? ORDER BY page',
+                (version['original_hash'], summary.get('profile_id'))).fetchall()
+            return {'pages': [json.loads(row['payload']) for row in rows], 'summary': summary}
 
     def confirm(self, params):
         with closing(self.connect()) as connection, connection:
