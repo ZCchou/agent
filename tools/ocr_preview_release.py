@@ -247,7 +247,8 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
 1. 下载 setup.exe 和所有 offline.partNN.zip，保存到同一文件夹。
 2. 运行 setup.exe，选择至少有 20 GiB 可用空间的安装盘。安装器会校验并解压同目录 ZIP，再安装运行组件。
 3. 安装完成后运行 agent OCR Preview。主模型在“系统功能 → 模型”中选择本机 GGUF 文件导入和加载。
-4. OCR 模型位于安装目录的 ocr-model-package，在资料库辅助模型页面导入该目录。嵌入和重排序模型按 README 的下载方法准备后本地导入。
+4. OCR 模型位于安装目录的 ocr-model-package，在“系统功能 → 模型 → OCR 模型”中导入该目录。嵌入和重排序模型按 README 准备，在“模型 → 检索模型”中本地导入。
+5. 在“本地资料库”导入文件，处理完成后通过“项目设置 → 资料与 RAG”启用一个或多个资料库。
 
 安装组件包含 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR CPU、OCR 模型、WebView2 和微软运行库。显卡驱动由电脑提供。
 
