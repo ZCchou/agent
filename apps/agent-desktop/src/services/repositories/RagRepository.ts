@@ -1,4 +1,4 @@
-import type { RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
+import type { OcrImportOptions, OcrCatalog, OcrPage, RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
 
 export interface RagRepository {
   selectPaths(kind: RagPathKind, modelFile?: boolean): Promise<RagPathSelection | null>;
@@ -15,7 +15,11 @@ export interface RagRepository {
   updateLibrary(libraryId: string, draft: RagLibraryDraft): Promise<unknown>;
   removeLibrary(libraryId: string): Promise<unknown>;
   bindLibrary(libraryId: string, projectId: string, enabled: boolean): Promise<unknown>;
-  importDocuments(libraryId: string, selection: RagPathSelection): Promise<unknown>;
+  importDocuments(libraryId: string, selection: RagPathSelection, options?: OcrImportOptions): Promise<unknown>;
+  listOcrModels(): Promise<OcrCatalog>;
+  importOcrModel(selection: RagPathSelection): Promise<unknown>;
+  ocrPages(versionId: string): Promise<{ pages: OcrPage[]; summary: Record<string, unknown> }>;
+  renderOcrPage(versionId: string, page: number): Promise<{ data_url: string }>;
   pasteDocument(libraryId: string, title: string, content: string): Promise<unknown>;
   previewDocument(versionId: string, offset?: number, limit?: number): Promise<RagDocumentPreview>;
   confirmDocument(confirmation: RagDocumentConfirmation): Promise<unknown>;

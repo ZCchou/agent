@@ -49,6 +49,7 @@ def test_ocr_merges_native_and_image_pages_and_keeps_locators(tmp_path):
         assert any('-55' in chunk['text'] and chunk['locator']['page'] == 2 for chunk in result['chunks'])
         assert any('Equipment' in chunk['text'] for chunk in result['chunks'])
         assert result['ocr']['failed_pages'] == []
+        assert len(result['ocr']['cache_keys']) == 1
         again = await pipeline.process(job, original, digest, {'profile_id': 'fixture'})
         assert client.calls == 1
         assert again['chunks'] == result['chunks']
@@ -63,4 +64,38 @@ def test_failed_page_keeps_other_text_searchable_and_records_gap(tmp_path):
         assert result['ocr']['failed_pages'] == [2]
         assert any('Equipment' in chunk['text'] for chunk in result['chunks'])
         assert any('2' in warning for warning in result['warnings'])
+    asyncio.run(run())
+
+
+def test_cpu_scheduler_can_overlap_two_page_workers(tmp_path):
+    async def run():
+        repository, job, digest, original, pipeline, _ = setup(tmp_path)
+        active = 0
+        peak = 0
+        class ParallelClient(Client):
+            async def request(self, action, path, **params):
+                nonlocal active, peak
+                if action == 'scan':
+                    return {'pages': [{'page': n, 'text': '', 'needs_ocr': True} for n in range(1, 5)]}
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(.02)
+                active -= 1
+                return {'page': params['page'], 'regions': [{'id': 'region', 'kind': 'text', 'text': 'Recognized clause', 'bbox': [0, 0, 1, 1]}], 'status': 'completed'}
+        pipeline.clients = [ParallelClient(), ParallelClient()]
+        pipeline.client = pipeline.clients[0]
+        result = await pipeline.process(job, original, digest, {'profile_id': 'fixture', 'device': 'cpu'})
+        assert peak == 2
+        assert result['ocr']['failed_pages'] == []
+        await pipeline.close()
+    asyncio.run(run())
+
+
+def test_native_only_import_reports_unrecognized_image_pages(tmp_path):
+    async def run():
+        _, job, digest, original, pipeline, client = setup(tmp_path)
+        result = await pipeline.process(job, original, digest, {'ocr_mode': 'off'})
+        assert client.calls == 0
+        assert result['ocr']['coverage'] == 'partial'
+        assert result['ocr']['pending_pages'] == [2]
     asyncio.run(run())

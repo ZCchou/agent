@@ -104,7 +104,9 @@ class RagService:
             return self.repository.ocr_pages(params.get('version_id'))
         if action == 'document.ocr.render':
             path = self.repository.original_for_version(params.get('version_id'))
-            return await self.ocr.client.request('render', path, page=params.get('page'))
+            result = await self.ocr.preview_client.request('render', path, page=params.get('page'))
+            self.repository.original_for_version(params.get('version_id'))
+            return result
         if action.startswith('model.'):
             return await self._model_action(action, params)
         if action == 'library.list':
@@ -243,19 +245,8 @@ class RagService:
                                      str(path.resolve()), job['id'])
 
     def _publish_ocr(self, job, path, digest, parsed, options):
-        with closing(self.repository.connect()) as connection:
-            self.repository.require_running(connection, job['id'])
         preview = self.repository.save_version(job['library_id'], path.stem, parsed, digest,
-            path.name, MEDIA_TYPES['.pdf'], str(path.resolve()))
-        version_id = preview['version']['id']
-        with closing(self.repository.connect()) as connection, connection:
-            self.repository.require_running(connection, job['id'])
-            connection.execute('UPDATE rag_versions SET ocr_summary=? WHERE id=?',
-                (json.dumps(parsed.get('ocr', {})), version_id))
-        self.repository.confirm({'version_id': version_id, 'title': path.stem,
-            'revision': '未标注', 'source': '本机导入 · 机器识别', 'document_number': path.stem,
-            'warnings_acknowledged': True})
-        self.ocr.progress(job['id'], latest_version_id=version_id)
+            path.name, MEDIA_TYPES['.pdf'], str(path.resolve()), job_id=job['id'], machine_confirm=True)
         if options.get('auto_index', True):
             try:
                 index_job = self.repository.new_job('index.build', job['library_id'])
@@ -280,7 +271,10 @@ class RagService:
                 await self._build_index(job, list(latest.values()))
                 if project_id:
                     self.repository.bind({'library_id': library_id, 'project_id': project_id, 'enabled': True})
-            finally:
+            except BaseException:
+                self._pending_indexes.pop(library_id, None)
+                raise
+            else:
                 if library_id in self._pending_indexes and not self._closed:
                     target = self._pending_indexes.pop(library_id)
                     self.repository.update_job(job['id'], status='completed', progress=1)

@@ -1,6 +1,6 @@
 [package]
 name = "agent-desktop"
-version = "0.14.2"
+version = "0.15.0"
 description = "Local-first desktop agent with auditable model, tool, vision, and web routing"
 authors = ["agent contributors"]
 license = "MIT"

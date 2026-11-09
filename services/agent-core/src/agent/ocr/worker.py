@@ -34,7 +34,7 @@ def scan_pdf(path):
             ratio = min(1, image_area / (width * height))
             pages.append({'page': index + 1, 'text': text, 'width_points': width,
                 'height_points': height, 'image_ratio': ratio,
-                'needs_ocr': ratio > .25 or (ratio > .01 and len(text.strip()) < 80)})
+                'needs_ocr': len(text.strip()) < 40 or ratio > .25 or (ratio > .01 and len(text.strip()) < 80)})
             page.close()
     return {'pages': pages}
 
@@ -58,6 +58,7 @@ def render_pdf(path, number, dpi=200):
 def main():
     engine = None
     profile_id = None
+    engine_device = None
     output = sys.stdout
     for line in sys.stdin:
         request_id = None
@@ -73,11 +74,12 @@ def main():
                 if request['action'] == 'scan':
                     result = scan_pdf(original)
                 elif request['action'] == 'recognize':
-                    if engine is None or profile_id != params['profile_id']:
+                    if engine is None or profile_id != params['profile_id'] or engine_device != params.get('device', 'auto'):
                         from agent.ocr.adapter import OcrAdapter
                         profile = OcrModelStore(data_dir / 'ocr-models').get_profile(params['profile_id'])
                         engine = OcrAdapter(profile, params.get('device', 'auto'), params.get('threads', 2))
                         profile_id = profile['id']
+                        engine_device = params.get('device', 'auto')
                     result = engine.recognize_page(render_pdf(original, params['page']), params['page'])
                 elif request['action'] == 'render':
                     import base64

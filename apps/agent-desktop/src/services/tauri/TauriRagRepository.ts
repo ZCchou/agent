@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { RagRepository } from "../repositories/RagRepository";
-import type { RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
+import type { OcrImportOptions, OcrCatalog, OcrPage, RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
 
 function request<T = unknown>(action: string, params: object = {}): Promise<T> {
   return invoke<T>("rag_request", { action, params });
@@ -23,7 +23,11 @@ export class TauriRagRepository implements RagRepository {
   updateLibrary(libraryId: string, draft: RagLibraryDraft) { return request("library.update", { library_id: libraryId, ...draft }); }
   removeLibrary(libraryId: string) { return request("library.remove", { library_id: libraryId }); }
   bindLibrary(libraryId: string, projectId: string, enabled: boolean) { return request("library.bind", { library_id: libraryId, project_id: projectId, enabled }); }
-  importDocuments(libraryId: string, selection: RagPathSelection) { return request("document.import", { library_id: libraryId, ...selection }); }
+  importDocuments(libraryId: string, selection: RagPathSelection, options?: OcrImportOptions) { return request("document.import", { library_id: libraryId, ...selection, ...options }); }
+  listOcrModels() { return request<OcrCatalog>("ocr.model.list"); }
+  importOcrModel(selection: RagPathSelection) { return request("ocr.model.import", pathParams(selection)); }
+  ocrPages(versionId: string) { return request<{ pages: OcrPage[]; summary: Record<string, unknown> }>("document.ocr.pages", { version_id: versionId }); }
+  renderOcrPage(versionId: string, page: number) { return request<{ data_url: string }>("document.ocr.render", { version_id: versionId, page }); }
   pasteDocument(libraryId: string, title: string, content: string) { return request("document.paste", { library_id: libraryId, title, content }); }
   previewDocument(versionId: string, offset = 0, limit = 200) { return request<RagDocumentPreview>("document.preview", { version_id: versionId, offset, limit }); }
   confirmDocument(confirmation: RagDocumentConfirmation) { return request("document.confirm", confirmation); }

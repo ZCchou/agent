@@ -171,16 +171,16 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
                      'tokenizer.json', 'LICENSE', 'NOTICE', 'model.onnx', 'weights.bin'):
             self.assertFalse(assets.excluded(Path(name)))
 
-    def test_release_sidecar_contract_is_ipc18_schema25(self):
+    def test_release_sidecar_contract_is_ipc19_schema26(self):
         import re
         root = TOOLS.parent
         protocol = (root / 'services/agent-core/src/agent/protocol.py').read_text(encoding='utf-8')
         storage = (root / 'services/agent-core/src/agent/storage.py').read_text(encoding='utf-8')
         bridge = (root / 'apps/agent-desktop/src-tauri/src/core_bridge.rs').read_text(encoding='utf-8')
-        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*18\b')
-        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*25\b')
-        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*18\b')
-        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*25\b')
+        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*19\b')
+        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*26\b')
+        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*19\b')
+        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*26\b')
         verifier = (TOOLS / 'verify-python-sidecar.ps1').read_text(encoding='utf-8')
         self.assertIn('$actual.schema_version -ne $expectedSchema', verifier)
         self.assertIn('$actual.protocol_version -ne $expectedProtocol', verifier)

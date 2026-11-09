@@ -4,6 +4,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { TauriRagRepository } from "./TauriRagRepository";
 
 beforeEach(() => vi.mocked(invoke).mockReset());
+it("passes OCR options and a single target project with the native document grant", async () => {
+  vi.mocked(invoke).mockResolvedValue({});
+  const repository = new TauriRagRepository();
+  await repository.importDocuments("library", { grant_id: "file", paths: ["C:/DO160.pdf"] }, {
+    ocr_mode: "auto", device: "cpu", auto_index: true, auto_apply_project_id: "project",
+  });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("rag_request", { action: "document.import", params: {
+    library_id: "library", grant_id: "file", paths: ["C:/DO160.pdf"], ocr_mode: "auto",
+    device: "cpu", auto_index: true, auto_apply_project_id: "project",
+  } });
+});
 it("sends the exact reviewed revision selection when building an index", async () => {
   vi.mocked(invoke).mockResolvedValue({});
   await new TauriRagRepository().buildIndex("library", ["revision-1", "revision-3"]);

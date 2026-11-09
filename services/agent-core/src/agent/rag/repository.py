@@ -127,7 +127,7 @@ class RagRepository:
                 library = dict(row)
                 documents = connection.execute('''SELECT d.id,v.id AS version_id,v.title,v.revision,v.status,v.warnings,v.chunk_count,
                     v.source,v.document_number FROM rag_documents d JOIN rag_versions v ON v.document_id=d.id
-                    WHERE d.library_id=? ORDER BY v.created_at,v.id''', (row['id'],)).fetchall()
+                    WHERE d.library_id=? ORDER BY v.created_at,v.rowid''', (row['id'],)).fetchall()
                 library['documents'] = [{**dict(item), 'warnings': json.loads(item['warnings'])} for item in documents]
                 result.append(library)
             return result
@@ -145,7 +145,7 @@ class RagRepository:
                 temporary.unlink(missing_ok=True)
         return digest, destination
 
-    def save_version(self, library_id, title, parsed, original_hash, original_name, media_type, source_key=None, job_id=None, document_id=None):
+    def save_version(self, library_id, title, parsed, original_hash, original_name, media_type, source_key=None, job_id=None, document_id=None, machine_confirm=False):
         now, version_id = _utc_now(), identifier()
         with closing(self.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -175,7 +175,15 @@ class RagRepository:
                 connection.execute('''INSERT INTO rag_chunks(id,version_id,ordinal,text,text_hash,clause_number,locator)
                     VALUES (?,?,?,?,?,?,?)''', (chunk_id, version_id, ordinal, chunk['text'], chunk['text_hash'], chunk.get('clause_number'), json.dumps(chunk['locator'], ensure_ascii=False)))
                 connection.execute('INSERT INTO rag_fts(chunk_id,tokens) VALUES (?,?)', (chunk_id, ' '.join(lexical_tokens(chunk['text']))))
-            if job_id:
+            if machine_confirm:
+                if not job_id:
+                    raise ValueError('Automatic snapshots require an active job')
+                summary = {**parsed.get('ocr', {}), 'job_id': job_id}
+                connection.execute("UPDATE rag_versions SET ocr_summary=?,revision=?,source=?,document_number=?,status='confirmed',confirmed_at=? WHERE id=?",
+                    (json.dumps(summary), '未标注', '本机导入 · 机器识别', title, now, version_id))
+                connection.execute('UPDATE rag_ocr_jobs SET latest_version_id=? WHERE job_id=?', (version_id, job_id))
+                self.bump_library(connection, library_id, revoke_projects=False)
+            if job_id and not machine_confirm:
                 connection.execute("UPDATE rag_jobs SET status='completed',progress=1,updated_at=? WHERE id=?", (now, job_id))
         return self.preview(version_id)
 
@@ -211,9 +219,11 @@ class RagRepository:
             if version['status'] == 'withdrawn':
                 raise CoreDataError('rag_evidence_invalid', 'The document was withdrawn')
             summary = json.loads(version.get('ocr_summary', '{}'))
-            rows = connection.execute('SELECT page,payload FROM rag_ocr_pages WHERE original_hash=? AND profile_id=? ORDER BY page',
-                (version['original_hash'], summary.get('profile_id'))).fetchall()
+            keys = summary.get('cache_keys', [])
+            rows = connection.execute('SELECT payload FROM rag_ocr_pages WHERE original_hash=? AND cache_key IN (SELECT value FROM json_each(?)) ORDER BY page',
+                (version['original_hash'], json.dumps(keys))).fetchall()
             return {'pages': [json.loads(row['payload']) for row in rows], 'summary': summary}
+
 
     def confirm(self, params):
         with closing(self.connect()) as connection, connection:
@@ -232,13 +242,17 @@ class RagRepository:
         with closing(self.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
             version = self.version(connection, version_id)
-            if version['status'] != 'withdrawn':
-                connection.execute("UPDATE rag_versions SET status='withdrawn',withdrawn_at=? WHERE id=?", (_utc_now(), version_id))
-                self.bump_library(connection, version['library_id'], revoke_projects=False)
-                connection.execute('''UPDATE rag_projects SET generation=generation+1 WHERE project_id IN
-                    (SELECT b.project_id FROM rag_bindings b WHERE b.library_id=? AND b.enabled=1 AND EXISTS
-                        (SELECT 1 FROM rag_index_chunks ic JOIN rag_chunks c ON c.id=ic.chunk_id
-                         WHERE ic.index_id=b.index_id AND c.version_id=?))''', (version['library_id'], version_id))
+            summary = json.loads(version.get('ocr_summary', '{}'))
+            job_id = summary.get('job_id')
+            versions = [version_id]
+            if job_id:
+                versions = [row['id'] for row in connection.execute(
+                    "SELECT id FROM rag_versions WHERE document_id=? AND json_extract(ocr_summary,'$.job_id')=?",
+                    (version['document_id'], job_id))]
+                connection.execute("UPDATE rag_jobs SET status='cancelled',updated_at=? WHERE id=? AND status IN ('queued','running')", (_utc_now(), job_id))
+            connection.execute("UPDATE rag_versions SET status='withdrawn',withdrawn_at=? WHERE id IN (SELECT value FROM json_each(?))", (_utc_now(), json.dumps(versions)))
+            self.bump_library(connection, version['library_id'], revoke_projects=False)
+            connection.execute('''UPDATE rag_projects SET generation=generation+1 WHERE project_id IN (SELECT b.project_id FROM rag_bindings b WHERE b.library_id=? AND b.enabled=1 AND EXISTS (SELECT 1 FROM rag_index_chunks ic JOIN rag_chunks c ON c.id=ic.chunk_id WHERE ic.index_id=b.index_id AND c.version_id IN (SELECT value FROM json_each(?))))''', (version['library_id'], json.dumps(versions)))
         return {'withdrawn': True, 'version_id': version_id}
 
     def new_job(self, kind, library_id):

@@ -28,3 +28,20 @@ export interface RagEvidence {
   clause_number: string; locator: string | Record<string, unknown>; text: string; text_hash: string; score: number;
 }
 export interface RagSearchResult { evidence: RagEvidence[]; generation: number; index_ids: string[] }
+export interface OcrImportOptions {
+  ocr_mode: "auto" | "force" | "off";
+  device: "auto" | "cpu" | "cuda";
+  auto_index: boolean;
+  auto_apply_project_id?: string;
+  profile_id?: string;
+  pages?: number[];
+}
+export interface OcrRegion {
+  id: string; kind: string; text: string; bbox: number[]; review_status: string;
+  quality_warning?: string; table?: { rows: string[][] };
+}
+export interface OcrPage { page: number; regions: OcrRegion[] }
+export interface OcrCatalog {
+  models: { id: string; name?: string }[];
+  runtime: { available: boolean; error?: string };
+}

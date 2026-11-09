@@ -9,7 +9,7 @@ import threading
 
 def test_core_stdin_accepts_a_redirected_file_without_final_newline(tmp_path):
     input_path = tmp_path / "request.json"
-    input_path.write_text(json.dumps({"v": 18, "id": "file-input", "type": "ping", "params": {}}), encoding="utf-8")
+    input_path.write_text(json.dumps({"v": 19, "id": "file-input", "type": "ping", "params": {}}), encoding="utf-8")
     environment = {**os.environ, "AGENT_DATA_DIR": str(tmp_path / "data"),
                    "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
     with input_path.open("rb") as source:
@@ -41,7 +41,7 @@ def test_live_core_stdin_does_not_block_first_onnx_import(tmp_path):
         reader = threading.Thread(target=receive, daemon=True)
         reader.start()
         try:
-            request = {"v": 18, "id": "live-import", "type": "rag.request", "params": {
+            request = {"v": 19, "id": "live-import", "type": "rag.request", "params": {
                 "action": "model.inspect", "params": {"path": str(model), "profile": "bge-m3"}}}
             process.stdin.write(json.dumps(request) + "\n")
             process.stdin.flush()
@@ -53,10 +53,10 @@ def test_live_core_stdin_does_not_block_first_onnx_import(tmp_path):
             assert response["result"]["valid"] is False
             assert "Invalid ONNX" in " ".join(response["result"]["errors"])
             assert process.poll() is None
-            process.stdin.write(json.dumps({"v": 18, "id": "still-live", "type": "ping", "params": {}}) + "\r\n")
+            process.stdin.write(json.dumps({"v": 19, "id": "still-live", "type": "ping", "params": {}}) + "\r\n")
             process.stdin.flush()
             assert responses.get(timeout=5)["id"] == "still-live"
-            process.stdin.write(json.dumps({"v": 18, "id": "final-frame", "type": "ping", "params": {}}))
+            process.stdin.write(json.dumps({"v": 19, "id": "final-frame", "type": "ping", "params": {}}))
             process.stdin.flush()
             process.stdin.close()
             assert responses.get(timeout=5)["id"] == "final-frame"

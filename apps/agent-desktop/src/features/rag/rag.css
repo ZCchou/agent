@@ -22,3 +22,15 @@
 .rag-page .rag-radio { flex-direction: row; align-items: center; }
 .rag-page .rag-radio input { width: auto; flex: 0 0 auto; }
 @media (max-width: 650px) { .rag-card { padding: 14px; } .rag-modal-backdrop { padding: 12px; } .rag-modal { padding: 16px; } }
+
+.ocr-modal { width: min(1500px, 96vw); max-width: 96vw; }
+.ocr-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.ocr-image { position: relative; }
+.ocr-image img { display: block; width: 100%; }
+.ocr-highlight { position: absolute; background: #ffd70033; border: 2px solid #d99000; pointer-events: none; }
+.ocr-regions { min-width: 0; overflow: auto; max-height: 65vh; }
+.ocr-regions pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ocr-table { overflow: auto; }
+.ocr-table table { border-collapse: collapse; font-size: 12px; }
+.ocr-table td { border: 1px solid var(--border-color, #bbb); padding: 4px; min-width: 55px; white-space: pre-wrap; }
+@media (max-width: 900px) { .ocr-columns { grid-template-columns: 1fr; } }

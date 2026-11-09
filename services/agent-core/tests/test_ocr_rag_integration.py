@@ -32,5 +32,8 @@ def test_auto_pdf_import_publishes_indexes_and_binds_only_requested_project(tmp_
         found = await service.search(project['id'], 'Category A temperature')
         assert any('-55' in item['text'] for item in found['evidence'])
         assert any(item['locator'].get('extraction_method') == 'ocr' for item in found['evidence'])
+        final = next(document for document in documents if document['version_id'] == found['evidence'][0]['version_id'])
+        service.repository.withdraw(final['version_id'])
+        assert all(document['status'] == 'withdrawn' for document in service.repository.list_libraries()[0]['documents'])
         await service.close()
     asyncio.run(run())

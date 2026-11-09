@@ -49,7 +49,7 @@ impl RagPathGrants {
     }
     fn authorize(&mut self, action: &str, params: &mut Value) -> Result<(), String> {
         let kind = match action {
-            "model.inspect" | "model.import" => "model",
+            "model.inspect" | "model.import" | "ocr.model.inspect" | "ocr.model.import" => "model",
             "model.root" => "root",
             "document.import" => "documents",
             _ => return Ok(()),
@@ -96,7 +96,7 @@ impl RagPathGrants {
             params["path"] = json!(paths[0]);
         }
         // Inspection precedes import in the UI and keeps the same bounded grant.
-        if action == "model.inspect" {
+        if action == "model.inspect" || action == "ocr.model.inspect" {
             self.grants.insert(token, grant);
         }
         Ok(())
@@ -125,7 +125,10 @@ fn canonical_path(path: &Path) -> Result<PathBuf, String> {
 
 fn validate_params(action: &str, params: &Value) -> Result<(), String> {
     let fields: &[&str] = match action {
-        "model.list" | "job.list" => &[],
+        "model.list" | "job.list" | "ocr.model.list" => &[],
+        "ocr.model.inspect" | "ocr.model.import" => &["path", "grant_id"],
+        "document.ocr.pages" => &["version_id"],
+        "document.ocr.render" => &["version_id", "page"],
         "model.inspect" => &["path", "profile", "grant_id"],
         "model.import" => &["path", "profile", "device", "grant_id"],
         "model.root" => &["path", "grant_id"],
@@ -141,7 +144,7 @@ fn validate_params(action: &str, params: &Value) -> Result<(), String> {
         ],
         "library.remove" => &["library_id"],
         "library.bind" => &["library_id", "project_id", "enabled"],
-        "document.import" => &["library_id", "paths", "grant_id"],
+        "document.import" => &["library_id", "paths", "grant_id", "ocr_mode", "device", "auto_index", "auto_apply_project_id", "profile_id", "pages"],
         "document.paste" => &["library_id", "title", "content"],
         "document.preview" => &["version_id", "offset", "limit"],
         "document.withdraw" => &["version_id"],
@@ -165,8 +168,9 @@ fn validate_params(action: &str, params: &Value) -> Result<(), String> {
             return Err(format!("Unexpected operation parameter: {key}"));
         }
         let valid = match key.as_str() {
-            "enabled" | "warnings_acknowledged" => value.is_boolean(),
-            "offset" | "length" | "limit" => value.is_u64(),
+            "enabled" | "warnings_acknowledged" | "auto_index" => value.is_boolean(),
+            "offset" | "length" | "limit" | "page" => value.is_u64(),
+            "pages" => value.as_array().is_some_and(|items| items.len() <= 10_000 && items.iter().all(|item| item.as_u64().is_some_and(|page| page >= 1 && page <= 10_000))),
             "version_ids" => value
                 .as_array()
                 .is_some_and(|items| items.len() <= 100_000 && items.iter().all(Value::is_string)),

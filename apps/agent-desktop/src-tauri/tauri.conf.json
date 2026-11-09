@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "agent",
+  "productName": "agent OCR Preview",
   "version": "../package.json",
-  "identifier": "io.github.zcchou.agent",
+  "identifier": "io.github.zcchou.agent.ocrpreview",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "agent",
+        "title": "agent OCR Preview",
         "width": 1000,
         "height": 720,
         "minWidth": 1000,

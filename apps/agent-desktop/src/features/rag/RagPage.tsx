@@ -6,6 +6,7 @@ import { useApp } from "../../contexts/AppContext";
 import { ragRepository } from "../../services/runtime";
 import type { RagDocumentConfirmation, RagDocumentPreview, RagEvidence, RagJob, RagLibrary, RagLibraryDraft, RagModelList, RagPathSelection, RagProfile } from "../../types/rag";
 import { resolveIndexVersions, type IndexVersionChoices } from "./indexVersions";
+import { OcrPanel, OcrPreview } from "./OcrPanel";
 import "./rag.css";
 
 const profiles: RagProfile[] = ["qwen3-embedding-0.6b", "qwen3-reranker-0.6b", "bge-m3", "bge-reranker-v2-m3"];
@@ -67,7 +68,7 @@ export function RagPage() {
     {error && <p role="alert" className="state-message state-message--error">{t("rag.error")} {error}</p>}
     {busy && <p role="status">{t("rag.loading")}</p>}
     <section id={`rag-${tab}`} role="tabpanel" aria-labelledby={`rag-tab-${tab}`}>
-      {tab === "models" ? <ModelsPanel models={models} busy={busy} act={act} refresh={refresh} /> : <>
+      {tab === "models" ? <><OcrPanel /><ModelsPanel models={models} busy={busy} act={act} refresh={refresh} /></> : <>
         <label className="rag-field">{t("rag.project")}<select value={projectId} disabled={busy} onChange={(event) => setProjectId(event.target.value)}>
           <option value="">{t("rag.chooseProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         </select></label><p>{t("rag.bindingHelp")}</p>
@@ -142,6 +143,9 @@ function DeviceSelect({ value, disabled, onChange }: { value: string; disabled: 
 function LibrariesPanel({ libraries, models, projectId, busy, act, refresh }: PanelProps & { libraries: RagLibrary[]; models: RagModelList; projectId: string }) {
   const { t } = useTranslation("common");
   const [editor, setEditor] = useState<{ id?: string; draft: RagLibraryDraft } | null>(null);
+  const [ocrMode, setOcrMode] = useState<"auto" | "off">("auto");
+  const [ocrVersion, setOcrVersion] = useState<string | null>(null);
+  const [adoptIndex, setAdoptIndex] = useState(false);
   const [pasteId, setPasteId] = useState<string | null>(null);
   const [pasteTitle, setPasteTitle] = useState("");
   const [pasteContent, setPasteContent] = useState("");
@@ -149,7 +153,7 @@ function LibrariesPanel({ libraries, models, projectId, busy, act, refresh }: Pa
   const [removeId, setRemoveId] = useState<string | null>(null);
   const embeddings = models.models.filter((model) => model.role === "embedding");
   const rerankers = models.models.filter((model) => model.role === "reranker");
-  return <div className="rag-stack"><p>{t("rag.libraryHelp")}</p>
+  return <div className="rag-stack"><p>{t("rag.libraryHelp")}</p><details><summary>PDF 识别与自动入库</summary><label className="rag-field">OCR 模式<select value={ocrMode} onChange={(event) => setOcrMode(event.target.value as "auto" | "off")}><option value="auto">自动补充图片文字与表格</option><option value="off">仅提取已有文字</option></select></label><p>PDF 导入后自动形成机器识别快照并建立索引，修订版标记为未标注。</p><label><input type="checkbox" checked={adoptIndex} disabled={!projectId} onChange={(event) => setAdoptIndex(event.target.checked)} />本次导入完成后让所选项目采用新索引</label></details>
     <Button disabled={busy || !!editor || !embeddings.length || !rerankers.length} onClick={() => setEditor({ draft: { name: "", embedding_model_id: embeddings[0]?.id ?? "", reranker_model_id: rerankers[0]?.id ?? null } })}>{t("rag.createLibrary")}</Button>
     {!embeddings.length && <p>{t("rag.noEmbedding")}</p>}
     {editor && <Card className="rag-card"><h3>{t(editor.id ? "rag.editLibrary" : "rag.createLibrary")}</h3><div className="rag-fields">
@@ -167,7 +171,7 @@ function LibrariesPanel({ libraries, models, projectId, busy, act, refresh }: Pa
           {bound && <Button disabled={busy || !library.active_index_id || library.bound_index_id === library.active_index_id} onClick={() => void act(async () => { await ragRepository.bindLibrary(library.id, projectId, true); await refresh(); })}>{t("rag.adoptCurrentIndex")}</Button>}
           <Button disabled={busy || !!editor} onClick={() => setEditor({ id: library.id, draft: { name: library.name, embedding_model_id: library.embedding_model_id, reranker_model_id: library.reranker_model_id } })}>{t("rag.editLibrary")}</Button>
           <Button disabled={busy} onClick={() => setRemoveId(library.id)}>{t("rag.remove")}</Button>
-          <Button disabled={busy} onClick={() => void act(async () => { const selected = await ragRepository.selectPaths("documents"); if (selected) { await ragRepository.importDocuments(library.id, selected); await refresh(); } })}>{t("rag.importDocuments")}</Button>
+          <Button disabled={busy} onClick={() => void act(async () => { const selected = await ragRepository.selectPaths("documents"); if (selected) { await ragRepository.importDocuments(library.id, selected, { ocr_mode: ocrMode, device: "auto", auto_index: true, ...(adoptIndex && projectId ? { auto_apply_project_id: projectId } : {}) }); await refresh(); } })}>{t("rag.importDocuments")}</Button>
           <Button disabled={busy} onClick={() => { setPasteId(library.id); setPasteTitle(""); setPasteContent(""); }}>{t("rag.paste")}</Button></div>
         <IndexVersionPicker library={library} busy={busy} onBuild={(versionIds) => void act(async () => { await ragRepository.buildIndex(library.id, versionIds); await refresh(); })} />
         {removeId === library.id && <div role="alert"><p>{t("rag.removeConfirm", { name: library.name })}</p><div className="rag-actions"><Button disabled={busy} onClick={() => void act(async () => { await ragRepository.removeLibrary(library.id); setRemoveId(null); await refresh(); })}>{t("rag.confirm")}</Button><Button onClick={() => setRemoveId(null)}>{t("rag.cancel")}</Button></div></div>}
@@ -175,9 +179,11 @@ function LibrariesPanel({ libraries, models, projectId, busy, act, refresh }: Pa
         <h4>{t("rag.documents")}</h4>{!(library.documents ?? []).length && <p>{t("rag.empty")}</p>}
         {(library.documents ?? []).map((document) => <div className="rag-document" key={document.version_id}><div><strong>{document.title}</strong><p>{document.revision || "—"} · {t(`rag.statuses.${document.status}`, { defaultValue: document.status })} · {document.chunk_count} {t("rag.chunks")}</p></div><div className="rag-actions">
           <Button disabled={busy} onClick={() => void act(async () => setReview(await ragRepository.previewDocument(document.version_id)))}>{t("rag.preview")}</Button>
+          <Button disabled={busy || document.status === "withdrawn"} onClick={() => setOcrVersion(document.version_id)}>OCR 对照</Button>
           <Button disabled={busy || document.status === "withdrawn"} onClick={() => void act(async () => { await ragRepository.withdrawDocument(document.version_id); await refresh(); })}>{t("rag.withdraw")}</Button></div></div>)}
       </Card>;
     })}
+    {ocrVersion && <OcrPreview versionId={ocrVersion} onClose={() => setOcrVersion(null)} />}
     {review && <DocumentReview key={review.version.version_id ?? review.version.id} preview={review} busy={busy} onClose={() => setReview(null)} onMore={() => void act(async () => {
       const next = await ragRepository.previewDocument(review.version.version_id ?? review.version.id, review.chunks.length);
       setReview({ ...next, chunks: [...review.chunks, ...next.chunks] });
