@@ -49,7 +49,23 @@ def test_automatic_greeting_skips_all_retrieval_and_force_mode_checks_project(tm
         finally:
             await service.shutdown()
     asyncio.run(exercise())
-from test_tool_continuation_retry import configuration, fixture
+from test_tool_continuation_retry import configuration, fixture as base_fixture
+
+
+async def fixture(*args, **kwargs):
+    core, project, conversation, service = await base_fixture(*args, **kwargs)
+    # These tests exercise retrieval and citation generation. Semantic routing
+    # has its own integration coverage and is supplied at its service boundary.
+    async def advisor(**request):
+        from agent.rag.routing import decide_evidence
+        decision = decide_evidence(request['content'])
+        return {'rag_requirement': 'required' if decision['required'] else 'not_needed',
+                'files': 'none', 'tools': 'available', 'web': 'not_needed',
+                'web_evidence': 'optional', 'reasoning': 'standard',
+                'task_kinds': ['document_export'] if decision['task_type'] == 'document_export' else ['general'],
+                'explanation_code': 'citation_test'}, None
+    service._preflight_intent_advisor = advisor
+    return core, project, conversation, service
 
 
 @pytest.mark.parametrize("mode", ["text_only", "native", "structured"])

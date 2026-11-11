@@ -495,6 +495,7 @@ const chat = {
     execution_step_failed: "A specialist analysis step failed.",
     execution_step_unknown_outcome: "A specialist request may have been sent. It was not replayed automatically to avoid duplicate charges.",
     routing_intent_invalid: "Task intent analysis was invalid, so a conservative plan was used.",
+    routing_intent_uncertain: "Could not determine whether this task needs clause evidence. Clarify the task or enable Force RAG and retry. Your message and attachments are retained.",
     automatic_routing_not_available: "Automatic model selection is unavailable in the current environment.",
   },
 };

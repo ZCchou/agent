@@ -69,7 +69,7 @@ class ExecutionCoordinator:
             raise ValueError("routing intent must be an object")
         allowed_fields = {
             "files", "tools", "web", "web_evidence", "reasoning",
-            "task_kinds", "explanation_code", "follow_up",
+            "task_kinds", "explanation_code", "follow_up", "rag_requirement",
         }
         if set(value) - allowed_fields:
             raise ValueError("routing intent contains unsupported fields")
@@ -87,7 +87,10 @@ class ExecutionCoordinator:
         task_kinds = value.get("task_kinds")
         explanation = value.get("explanation_code")
         follow_up = value.get("follow_up", "none")
-        allowed_kinds = {"vision", "research", "file_work", "reasoning", "general"}
+        allowed_kinds = {"vision", "research", "file_work", "reasoning", "general", "airworthiness", "document_export", "attachment_summary"}
+        rag_requirement = value.get("rag_requirement", "uncertain")
+        if not isinstance(rag_requirement, str) or rag_requirement not in {"required", "not_needed", "uncertain"}:
+            raise ValueError("routing intent evidence requirement is invalid")
         if files not in {"none", "read", "write", "available"} \
                 or tools not in {"none", "preferred", "required", "available"} \
                 or web_evidence not in {"optional", "required"} \
@@ -109,6 +112,7 @@ class ExecutionCoordinator:
             "task_kinds": list(dict.fromkeys(task_kinds)),
             "explanation_code": explanation,
             "follow_up": follow_up,
+            "rag_requirement": rag_requirement,
         }
 
     @staticmethod

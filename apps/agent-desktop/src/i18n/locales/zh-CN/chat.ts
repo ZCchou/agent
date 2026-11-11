@@ -495,6 +495,7 @@ const chat = {
     execution_step_failed: "专用分析步骤失败。",
     execution_step_unknown_outcome: "专用请求可能已经发出，为避免重复计费，未自动重试。",
     routing_intent_invalid: "任务意图判断结果无效，已使用保守方案。",
+    routing_intent_uncertain: "未能确定本轮是否需要条款依据。请明确任务，或开启强制 RAG 后重试。输入与附件已保留。",
     automatic_routing_not_available: "当前环境无法使用自动模型选择。",
   },
 };

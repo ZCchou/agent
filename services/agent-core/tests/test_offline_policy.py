@@ -68,6 +68,11 @@ def test_offline_chat_forces_web_off_and_rejects_managed_profile_spoofing(tmp_pa
             pass
         core = CoreRepository(tmp_path / "agent.db")
         service = ChatRunService(core, sink, offline=True)
+        async def advisor(**kwargs):
+            return {'files': 'none', 'tools': 'available', 'web': 'required',
+                    'web_evidence': 'required', 'reasoning': 'standard',
+                    'task_kinds': ['general'], 'rag_requirement': 'not_needed'}, None
+        service._preflight_intent_advisor = advisor
         with pytest.raises(CoreDataError) as denied:
             service.configure_provider({"id": "managed:spoof", "name": "spoof", "kind": "fake", "base_url": "memory://fake"})
         assert denied.value.code == "managed_provider_reserved"

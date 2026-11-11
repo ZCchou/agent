@@ -1,5 +1,6 @@
 """Task evidence decisions from user-authored intent and saved task state."""
 import re
+import json
 
 from agent.storage import CoreDataError
 from agent.rag.followup import FOLLOWUP
@@ -56,3 +57,61 @@ def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evide
     return {'requested_mode': mode, 'required': required, 'reason': reason,
             'reuse_evidence': required and previous_evidence and (continuation or contextual_question or (export and refers_to_answer and not business)),
             'task_type': 'document_export' if export else 'evidence_answer' if required else 'chat'}
+
+
+def merge_evidence_intent(decision, intent, *, error_code=None):
+    """Apply descriptive model intent while retaining executor evidence obligations."""
+    result = {**decision, 'source': 'rules'}
+    if intent is None:
+        result.update(source='fallback', advisor_error_code=error_code,
+                      needs_confirmation=not decision['required'])
+        return result
+    requirement = intent.get('rag_requirement', 'uncertain')
+    result['source'] = 'advisor'
+    result['semantic_requirement'] = requirement
+    protected = decision['reason'] in {'user_required', 'skill_required', 'template_fill'}
+    if not protected:
+        if requirement == 'uncertain':
+            result['needs_confirmation'] = True
+        else:
+            result.update(required=requirement == 'required', reason='semantic_evidence' if requirement == 'required' else 'semantic_ordinary')
+            result['reuse_evidence'] = bool(result['required'] and decision.get('reuse_evidence'))
+    if 'document_export' in intent.get('task_kinds', []):
+        result['task_type'] = 'document_export'
+    elif decision['task_type'] != 'document_export':
+        result['task_type'] = 'evidence_answer' if result['required'] else 'chat'
+    return result
+
+
+def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes):
+    """Bound classifier data independently from attachment bodies and generation history."""
+    def clip(text, limit):
+        return str(text).encode('utf8')[:limit].decode('utf8', errors='ignore')
+
+    value = {'request': '', 'request_truncated': False, 'attachments': [],
+             'work_kind': conversation_kind, 'recent_conversation': []}
+    def render():
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+
+    for attachment in attachments[:8]:
+        entry = {'name': clip(attachment.get('name', 'attachment'), 100),
+                 'purpose': attachment.get('purpose', 'reference')}
+        value['attachments'].append(entry)
+        if len(render().encode('utf8')) > budget_bytes // 3:
+            value['attachments'].pop()
+            break
+    request_budget = max(0, budget_bytes - len(render().encode('utf8')) - 64)
+    value['request'] = clip(content, request_budget)
+    value['request_truncated'] = value['request'] != content
+    # JSON escaping can expand control characters. Remove tails until the
+    # serialized payload fits, retaining the beginning of the user request.
+    while len(render().encode('utf8')) > budget_bytes and value['request']:
+        value['request'] = value['request'][:-32]
+        value['request_truncated'] = True
+    for message in reversed(recent_messages[-6:]):
+        entry = {'role': message['role'], 'content': clip(message.get('content', ''), 256)}
+        value['recent_conversation'].insert(0, entry)
+        if len(render().encode('utf8')) > budget_bytes:
+            value['recent_conversation'].pop(0)
+            break
+    return render()
