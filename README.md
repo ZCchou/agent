@@ -16,7 +16,7 @@
 4. 创建资料库，导入并核对资料版本，等待处理和索引完成，在“项目设置 → 资料与 RAG”启用资料库。
 5. 项目对话默认自动分流。纯寒暄直接回复，其他请求由所选本地模型参与意图识别。可开启输入框旁的“强制 RAG”，该设置会保存在当前对话。
 
-完整离线包的安装、迁移和故障恢复操作见说明。当前实测交付为未签名本机验证包，干净 Windows 断网环境等验收状态单独列出。[安装与迁移](docs/offline-windows-operations.zh-CN.md) · [验收报告](docs/offline-windows-acceptance.zh-CN.md)
+完整离线包的安装、迁移和故障恢复操作见说明。统一版安装器无 Authenticode 签名，程序更新包和更新清单使用独立密钥签名。干净 Windows 断网环境等验收状态单独列出。[安装与迁移](docs/offline-windows-operations.zh-CN.md) · [验收报告](docs/offline-windows-acceptance.zh-CN.md)
 
 ## 统一版迁移与更新
 

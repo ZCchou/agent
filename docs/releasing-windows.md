@@ -6,9 +6,9 @@ This project uses the public repository `ZCchou/agent` for both source and distr
 
 Use Windows, Node.js 24.14.0, Rust 1.98.1/MSVC and the `agent` Conda environment with Python 3.12. Install the locked dependencies described in the root README. Microsoft Edge is required for UI tests.
 
-The tracked updater public key in `apps/agent-desktop/src-tauri/tauri.conf.json` is intentionally empty. Before publishing updates, generate an independent Tauri signing key outside the repository, configure its public key, and supply the matching private key through `TAURI_SIGNING_PRIVATE_KEY`. Never commit private keys. Set the private key as a repository Actions secret before running an official build. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is currently supplied as an empty string by the workflow; use a key and workflow configuration that agree.
+The unified application has an independent updater public key in `apps/agent-desktop/src-tauri/tauri.conf.json`. Keep the matching private key outside the repository. The program release tool signs the program ZIP and channel feed and verifies the public key before publication. CI publishing requires separately provisioning the matching key through protected secrets. Never commit private keys.
 
-Feeds are `https://raw.githubusercontent.com/ZCchou/agent/main/updates/preview.json` and `stable.json`. Feed signatures and installers must use the new key. Update checks stop before making requests while no public key is configured.
+Unified feeds are `https://raw.githubusercontent.com/ZCchou/agent/main/updates/airworthiness-preview.json` and `airworthiness-stable.json`, with detached `.sig` files. Use `tools/program_release.py` to produce signed program-only updates. Each package includes Host, Core, the application DLL and updater helper. Inference components and model weights are maintained through full offline delivery or local import. Legacy release tooling below remains available for its corresponding package format.
 
 ## Local packaging
 
