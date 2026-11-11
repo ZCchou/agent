@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowLeft, ListTodo, Plus, RefreshCw, Upload } from 'lucide-react';
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { useApp } from "../../contexts/AppContext";
@@ -164,13 +165,14 @@ export function RagWorkspace() {
           </p>
         </div>
         <div className="rag-actions">
-          <Button onClick={() => setView({ kind: "tasks" })}>
+          <Button icon={<ListTodo />} onClick={() => setView({ kind: "tasks" })}>
             处理任务
             {jobs.filter((job) => !job.parent_id && activeTask(job)).length
               ? ` · ${jobs.filter((job) => !job.parent_id && activeTask(job)).length}`
               : ""}
           </Button>
           <Button
+            icon={<RefreshCw />}
             onClick={() => void refresh().catch((e) => setError(String(e)))}
           >
             刷新
@@ -193,7 +195,7 @@ export function RagWorkspace() {
                 }}
               />
             </label>
-            <Button variant="primary" onClick={() => setCreate(true)}>
+            <Button icon={<Plus />} variant="primary" onClick={() => setCreate(true)}>
               新建资料库
             </Button>
           </div>
@@ -246,7 +248,7 @@ export function RagWorkspace() {
       )}
       {view.kind === "tasks" && (
         <>
-          <Button onClick={() => setView({ kind: "home" })}>
+          <Button icon={<ArrowLeft />} onClick={() => setView({ kind: "home" })}>
             返回资料库列表
           </Button>
           <TaskCenter
@@ -264,7 +266,7 @@ export function RagWorkspace() {
         !loading && (
           <>
             <p>该资料库不可用或已移除。</p>
-            <Button onClick={() => setView({ kind: "home" })}>
+            <Button icon={<ArrowLeft />} onClick={() => setView({ kind: "home" })}>
               返回资料库列表
             </Button>
           </>
@@ -284,14 +286,14 @@ export function RagWorkspace() {
       {library && view.kind === "library" && (
         <>
           <div className="rag-detail-heading">
-            <Button onClick={() => setView({ kind: "home" })}>
+            <Button icon={<ArrowLeft />} onClick={() => setView({ kind: "home" })}>
               返回资料库列表
             </Button>
             <p>
               {library.ready_count ?? 0} 份文档可检索 ·{" "}
               {library.processing_count ?? 0} 个任务处理中
             </p>
-            <Button variant="primary" onClick={() => setImporting(library)}>
+            <Button icon={<Upload />} variant="primary" onClick={() => setImporting(library)}>
               导入文件
             </Button>
           </div>

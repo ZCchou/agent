@@ -35,6 +35,11 @@
   --font-size-control: 12px;
   --line-height-body: 1.6;
   --line-height-ui: 1.4;
+  --control-height: 32px;
+  --control-height-dense: 28px;
+  --control-height-composer: 36px;
+  --control-radius: 8px;
+  --control-gap: 8px;
 
   --color-success: #22c55e;
   --color-success-soft: #ecfdf3;

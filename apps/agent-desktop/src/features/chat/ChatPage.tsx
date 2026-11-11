@@ -1,6 +1,6 @@
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
-import { ArrowDown, Bot, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
+import { ArrowDown, Bot, Database, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useConversationState } from "./useConversationState";
 import { useScopedAction } from "./useScopedAction";
@@ -1274,11 +1274,11 @@ export function ChatPage() {
       </div>
 
       <ComposerDock
-        ragControl={<button type="button" aria-pressed={ragMode === 'required'}
+        ragControl={<Button size="composer" variant={ragMode === 'required' ? 'primary' : 'secondary'} icon={<Database />} aria-pressed={ragMode === 'required'}
           disabled={!coreOnline || ragModeBusy || sending || loading}
           title={tChat('ragMode.hint')} onClick={() => void toggleRagMode()}>
           {tChat(ragMode === 'required' ? 'ragMode.required' : 'ragMode.button')}
-        </button>}
+          </Button>}
         value={input}
         disabled={!coreOnline}
         generating={sending || stopping}

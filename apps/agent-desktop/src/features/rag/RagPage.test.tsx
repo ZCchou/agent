@@ -30,7 +30,7 @@ it("renders source warnings, escaped passages and review controls with confirmat
   expect(html).toContain("Table extraction requires review");
   expect(html).toContain("&lt;script&gt;");
   expect(html).not.toContain("<script>");
-  expect(html).toMatch(/disabled="">rag.confirmDocument/);
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*>rag.confirmDocument/);
   expect(html).toContain("rag.loadMore");
   expect(html).toContain("3 · 7");
 });
@@ -51,7 +51,7 @@ it("gates index construction until duplicate confirmed revisions have a choice",
   const html = renderToStaticMarkup(<IndexVersionPicker library={library} busy={false} onBuild={() => {}} />);
   expect(html).toContain("rag.chooseRevisionRequired");
   expect(html).toContain("rag.excludeDocument");
-  expect(html).toMatch(/disabled="">rag.index/);
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*>rag.index/);
   expect(html.match(/type="radio"/g)).toHaveLength(3);
   expect(html).not.toContain('checked=""');
 });
@@ -61,7 +61,7 @@ it("shows cached library data immediately without a blocking processing indicato
   await loadRagPageData(ragRepository, "project");
   const html = renderToStaticMarkup(<RagPage />);
   expect(html).not.toContain("rag.loading");
-  expect(html).not.toMatch(/disabled="">rag.refresh/);
+  expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>rag.refresh/);
   vi.unstubAllGlobals();
 });
 
