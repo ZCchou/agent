@@ -3,11 +3,15 @@ param(
     [string]$Python = 'python',
     [string]$OutputDirectory = '',
     [string]$EnvironmentRoot = '',
+    [string]$BuildDirectory = '',
+    [string]$CudaLicensePath = '',
     [switch]$ReuseEnvironment
 )
 $ErrorActionPreference = 'Stop'
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $buildRoot = Join-Path $repository ('.artifacts/rag-runtime-build/' + $Device)
+if ($BuildDirectory) { $buildRoot = [IO.Path]::GetFullPath($BuildDirectory) }
+if (-not $CudaLicensePath) { $CudaLicensePath = Join-Path $repository '.artifacts/local-runtime-work/engines/LICENSE-NVIDIA-CUDA.html' }
 if (-not $EnvironmentRoot) {
     $EnvironmentRoot = Join-Path $buildRoot 'venv'
 }
@@ -86,7 +90,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $bundle 'rag-worker.exe'))) {
 }
 New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($destination)) | Out-Null
 Copy-Item -LiteralPath $bundle -Destination $destination -Recurse
-& $buildPython (Join-Path $PSScriptRoot 'rag_runtime_assets.py') $destination --cuda-license (Join-Path $repository '.artifacts/local-runtime-work/engines/LICENSE-NVIDIA-CUDA.html')
+& $buildPython (Join-Path $PSScriptRoot 'rag_runtime_assets.py') $destination --cuda-license $CudaLicensePath
 if ($LASTEXITCODE -ne 0) { throw 'Inference runtime asset pruning or license inventory failed' }
 $hashes = [ordered]@{}
 Get-ChildItem -LiteralPath $destination -File -Recurse | Sort-Object FullName | ForEach-Object {
