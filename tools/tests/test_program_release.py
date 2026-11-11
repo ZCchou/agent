@@ -53,3 +53,21 @@ def test_feed_requires_signed_program_package_on_independent_channel():
         '/v0.16.0-preview.1/agent-0.16.0-preview.1-windows-x86_64-program.zip')
     with pytest.raises(ValueError):
         release.feed('0.16.0-preview.1', 'signature', 'punkagent', '')
+
+
+def test_release_signer_is_noninteractive_and_bounded(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    release = module()
+    calls = []
+    path = tmp_path / 'program.zip'
+    path.write_bytes(b'fixture')
+    def execute(command, **options):
+        calls.append((command, options))
+        if 'signer' in command:
+            Path(str(path) + '.sig').write_text('signature')
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(release.subprocess, 'run', execute)
+    assert release.sign(path, tmp_path / 'private.key') == 'signature'
+    command, options = calls[0]
+    assert command[command.index('--password') + 1] == ''
+    assert options['timeout'] == 120

@@ -76,8 +76,8 @@ def feed(version, signature, channel, notes):
 
 def sign(path, private_key):
     result = subprocess.run(['node', str(ROOT / 'apps/agent-desktop/node_modules/@tauri-apps/cli/tauri.js'),
-                             'signer', 'sign', '--private-key-path', str(private_key), str(path)],
-                            capture_output=True, stdin=subprocess.DEVNULL)
+                             'signer', 'sign', '--private-key-path', str(private_key), '--password', '', str(path)],
+                            capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
     if result.returncode:
         raise RuntimeError('Signing failed. Verify the private key and signer configuration locally.')
     signature = Path(str(path) + '.sig')
@@ -85,7 +85,7 @@ def sign(path, private_key):
         raise RuntimeError('Signer did not produce a detached signature')
     checked = subprocess.run(['node', str(ROOT / 'tools/verify-updater-signature.cjs'), str(path),
                               str(signature), str(ROOT / 'apps/agent-desktop/src-tauri/tauri.conf.json')],
-                             capture_output=True)
+                             capture_output=True, timeout=120)
     if checked.returncode:
         raise RuntimeError('Release signature does not match the application public key')
     return signature.read_text(encoding='utf8').strip()
