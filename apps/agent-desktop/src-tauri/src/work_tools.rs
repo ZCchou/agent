@@ -351,6 +351,9 @@ impl WorkToolManager {
     }
 
     fn persist(&self) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_activation_in_progress".into());
+        }
         let parent = self
             .store_path
             .parent()

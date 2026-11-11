@@ -64,3 +64,5 @@ export const appUpdateRepository = new TauriAppUpdateRepository();
 
 import { TauriLocalModelRepository } from "./tauri/TauriLocalModelRepository";
 export const localModelRepository = new TauriLocalModelRepository();
+import { TauriProfileMigrationRepository } from './tauri/TauriProfileMigrationRepository';
+export const profileMigrationRepository = new TauriProfileMigrationRepository();

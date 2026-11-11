@@ -10,6 +10,26 @@ def registry(tmp_path):
     return SkillRegistry(tmp_path / 'data' / 'skills.json')
 
 
+def test_disabled_migration_conflict_preserves_enabled_skill_and_rag_requirement(tmp_path):
+    r = registry(tmp_path)
+    preferred = package(tmp_path)
+    text = (preferred / 'SKILL.md').read_text(encoding='utf8').replace('description: >', 'rag:\n  required: true\ndescription: >')
+    (preferred / 'SKILL.md').write_text(text, encoding='utf8')
+    first = r.add(str(preferred))
+    incoming = package(tmp_path, name='incoming')
+    (incoming / 'SKILL.md').write_text(text, encoding='utf8')
+    r._save([*r._entries(), {'id': 'incoming', 'name': 'lesson', 'path': str(incoming), 'enabled': False}])
+    assert r.load('lesson')['id'] == first['id']
+    assert r.inspect('lesson')['id'] == first['id']
+    assert r.requires_rag('$lesson 请依据条款回答')
+    with pytest.raises(CoreDataError, match='enabled'):
+        r.set_enabled('incoming', True)
+    assert not next(item for item in r.list() if item['id'] == 'incoming')['enabled']
+    r.set_enabled(first['id'], False)
+    r.set_enabled('incoming', True)
+    assert r.load('lesson')['id'] == 'incoming'
+
+
 def package(tmp_path, name='lesson', policy=True):
     root = tmp_path / name
     root.mkdir()

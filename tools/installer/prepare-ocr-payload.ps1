@@ -4,6 +4,7 @@ param(
     [string]$ArchiveDirectory,
     [string]$PartsManifestPath,
     [string]$PayloadManifestPath,
+    [switch]$Airworthiness,
     [Parameter(Mandatory)][string]$InstallDirectory
 )
 $ErrorActionPreference = 'Stop'
@@ -12,9 +13,14 @@ Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility')
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $owner = 'io.github.zcchou.agent.ocrpreview.payload.v1'
+$stageName = '.ocr-preview-payload'
+if ($Airworthiness) {
+    $owner = 'io.github.zcchou.agent.airworthiness.payload.v1'
+    $stageName = '.airworthiness-payload'
+}
 $install = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\')
 if ($install -eq [IO.Path]::GetPathRoot($install).TrimEnd('\')) { throw 'Unsafe installation root' }
-$stage = Join-Path $install '.ocr-preview-payload'
+$stage = Join-Path $install $stageName
 $payload = Join-Path $stage 'payload'
 $marker = Join-Path $stage 'owner.txt'
 
@@ -32,7 +38,7 @@ function Clean-OwnedStage {
     if (-not (Test-Path -LiteralPath $stage)) { return }
     if (-not (Test-Path -LiteralPath $marker) -or (Get-Content -LiteralPath $marker -Raw).Trim() -cne $owner) { throw 'Unowned extraction directory' }
     $target = [IO.Path]::GetFullPath($stage)
-    if (-not $target.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($target) -ne '.ocr-preview-payload') { throw 'Unsafe cleanup target' }
+    if (-not $target.StartsWith($install + '\', [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($target) -ne $stageName) { throw 'Unsafe cleanup target' }
     $pending = New-Object 'Collections.Generic.Stack[string]'
     $pending.Push($stage)
     while ($pending.Count) {

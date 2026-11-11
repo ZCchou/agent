@@ -105,12 +105,14 @@ def default_threads():
 
 
 class Catalog:
-    def __init__(self, repository):
+    def __init__(self, repository, *, recover=True):
         self.repository = repository
         self._context_declarations = {}
         with repository._connect() as connection:
             row = connection.execute("SELECT value FROM local_model_settings WHERE key='root'").fetchone()
             self.root = checked_path(row[0] if row else repository.database_path.parent / "local-models")
+            if not recover:
+                return
             self.root.mkdir(parents=True, exist_ok=True)
             connection.execute("UPDATE local_model_jobs SET status='interrupted',error=?,updated_at=? WHERE status IN ('queued','running')",
                                (canonical({"code": "interrupted", "message": "Application stopped before the job completed."}), now()))

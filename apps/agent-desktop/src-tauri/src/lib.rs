@@ -7,6 +7,13 @@ use std::{
 use tauri::Manager;
 mod agent_execution;
 mod app_updates;
+mod program_update;
+mod program_update_data;
+mod program_update_plan;
+mod program_update_session;
+mod update_process;
+mod profile_migration;
+mod profile_recovery;
 mod attachment_processor;
 mod attachment_store;
 mod change_set_planner;
@@ -70,19 +77,28 @@ pub fn run() {
         .manage(credentials::CredentialStore)
         .manage(Mutex::new(rag_commands::RagPathGrants::default()))
         .manage(Mutex::new(local_model_commands::LocalModelGrants::default()))
+        .manage(Mutex::new(profile_migration::MigrationService::default()))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if program_update_session::startup(app.handle()).map_err(std::io::Error::other)? {
+                app.handle().exit(0);
+                return Ok(());
+            }
             let app_data_dir = app.path().app_data_dir()?;
+            profile_migration::initialize(app.handle()).map_err(std::io::Error::other)?;
             let grants_path = app_data_dir.join("work-tool-grants.json");
-            let work_tools =
+            let work_tools = if profile_migration::blocks_core() {
+                work_tools::WorkToolManager::disabled(grants_path.clone(), "migration recovery is pending")
+            } else {
                 work_tools::WorkToolManager::load(grants_path.clone()).unwrap_or_else(|error| {
                     eprintln!("[agent] Project file authorization is disabled: {error}");
                     work_tools::WorkToolManager::disabled(
                         grants_path,
                         "project authorization migration failed",
                     )
-                });
+                })
+            };
             app.manage(Mutex::new(work_tools));
             let credential_store = app.state::<credentials::CredentialStore>();
             let recovery_credential_id = "__installation_recovery_key_v1";
@@ -97,9 +113,11 @@ pub fn run() {
                             secret
                         }
                     };
-                    agent_execution::AgentExecutionManager::new(
+                    agent_execution::AgentExecutionManager::for_startup(
                         recovery_dir.clone(),
                         &recovery_secret,
+                        program_update_session::is_health_probe(),
+                        profile_migration::blocks_core(),
                     )
                 })();
             let execution = execution_result.unwrap_or_else(|error| {
@@ -226,7 +244,7 @@ pub fn run() {
              * 如果设置文件损坏或版本不受支持，
              * 当前阶段选择明确启动失败，而不是静默覆盖用户配置。
              */
-            settings_manager.ensure_initialized()?;
+            settings_manager.initialize_for_startup(profile_migration::blocks_core())?;
 
             app.manage(settings_manager);
             app.manage(web_search::WebSearchService::default());
@@ -327,6 +345,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let _ = settings::commands::reinject_providers(&provider_app).await;
+                profile_migration::finish_after_startup(provider_app).await;
             });
 
             let cleanup_app = app.handle().clone();
@@ -347,8 +366,15 @@ pub fn run() {
 
             Ok(())
         })
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let app = webview.app_handle().clone();
+                tauri::async_runtime::spawn(async move { let _ = program_update_session::acknowledge_health(app).await; });
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_updates::app_update_status,
+            profile_migration::profile_migration_request,
             app_updates::check_app_update,
             app_updates::download_app_update,
             app_updates::install_app_update,

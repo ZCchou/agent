@@ -16,6 +16,15 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 
 const GENERAL_KEY: &str = "general";
 
+fn explicit_store<R: tauri::Runtime>(app: &AppHandle<R>, path: impl AsRef<std::path::Path>) -> Result<Arc<Store<R>>, SettingsError> {
+    let store = app.store_builder(path).disable_auto_save().build()
+        .map_err(|error| SettingsError::Storage(format!("failed to open settings store: {error}")))?;
+    // All writes are explicit. Detach the resource so plugin Exit cannot save
+    // an obsolete cache after migration or update recovery replaced the file.
+    store.close_resource();
+    Ok(store)
+}
+
 fn decode_settings_value(value: serde_json::Value) -> Result<AppSettings, SettingsError> {
     serde_json::from_value::<AppSettings>(value)
         .map_err(|error| SettingsError::Serialization(format!("invalid settings object: {error}")))
@@ -46,13 +55,7 @@ impl TauriStoreSettingsRepository {
          * SettingsRepository 会在一次逻辑更新完成以后主动 save，
          * 避免 schema_version 和 general 分别触发落盘。
          */
-        let store = app
-            .store_builder(SETTINGS_STORE_PATH)
-            .disable_auto_save()
-            .build()
-            .map_err(|error| {
-                SettingsError::Storage(format!("failed to open settings store: {error}"))
-            })?;
+        let store = explicit_store(app, SETTINGS_STORE_PATH)?;
 
         Ok(Self { store })
     }
@@ -113,6 +116,9 @@ impl SettingsRepository for TauriStoreSettingsRepository {
     }
 
     fn save(&self, settings: &AppSettings) -> Result<(), SettingsError> {
+        if crate::profile_migration::blocks_core() {
+            return Err(SettingsError::Storage("migration_activation_in_progress".into()));
+        }
         let settings_value = serde_json::to_value(settings).map_err(|error| {
             SettingsError::Serialization(format!("failed to serialize settings: {error}"))
         })?;
@@ -167,5 +173,24 @@ mod tests {
     #[test]
     fn rejects_corrupted_root_settings() {
         assert!(decode_settings_value(json!({"schema_version": 1, "general": "broken"})).is_err());
+    }
+
+    #[test]
+    fn explicit_store_cannot_overwrite_migrated_settings_during_host_exit() {
+        use tauri_plugin_store::StoreExt;
+        let app = tauri::test::mock_builder().plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("settings.json");
+        let store = super::explicit_store(app.handle(), &path).unwrap();
+        store.set("settings", json!({"source":"old target cache"}));
+        store.save().unwrap();
+        std::fs::write(&path, br#"{"settings":{"source":"migrated"}}"#).unwrap();
+        assert!(app.get_store(&path).is_none(), "Exit must have no cached settings store to save");
+        app.cleanup_before_exit();
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["settings"]["source"], "migrated");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = ('llm-runtime', 'rag-runtime', 'ocr-runtime', 'ocr-model-package')
 APPLICATION = ('agent-desktop.exe', 'agent-core.exe', 'agent_desktop_lib.dll')
 ASSET_LIMIT = 1700 * 1024 ** 2
+UNIFIED_APPLICATION = (*APPLICATION, 'agent-updater.exe', 'application.json')
+UNIFIED_ASSET_LIMIT = 1500 * 1024 ** 2
 
 
 def plan_volumes(records, limit=ASSET_LIMIT):
@@ -32,16 +34,19 @@ def plan_volumes(records, limit=ASSET_LIMIT):
     return groups
 
 
-def is_public_file(name):
+def is_public_file(name, *, unified=False):
     relative = Path(name)
-    return (name in APPLICATION or relative.parts[0] in COMPONENTS) and '__pycache__' not in relative.parts and relative.suffix != '.pyc'
+    application = UNIFIED_APPLICATION if unified else APPLICATION
+    components = (*COMPONENTS, 'office-runtime') if unified else COMPONENTS
+    return (name in application or relative.parts[0] in components) and '__pycache__' not in relative.parts and relative.suffix != '.pyc'
 
 
-def verify_application(source, manifest):
-    if manifest.get('application_id') != 'io.github.zcchou.agent.ocrpreview':
-        raise ValueError('OCR Preview application identity required')
+def verify_application(source, manifest, *, unified=False):
+    expected = 'io.github.zcchou.agent.airworthiness' if unified else 'io.github.zcchou.agent.ocrpreview'
+    if manifest.get('application_id') != expected:
+        raise ValueError('Matching application identity required')
     application = {}
-    for name in APPLICATION:
+    for name in (UNIFIED_APPLICATION if unified else APPLICATION):
         entry = manifest['files'].get(name)
         if not isinstance(entry, dict):
             raise ValueError('Missing tested application identity')
@@ -54,19 +59,20 @@ def nsis_path(path):
     return str(Path(path).resolve()).replace('$', '$$').replace('"', '$\\"')
 
 
-def write_installer(source, output, payload_manifest, parts_manifest, compiler, version='0.15.0-ocr-preview.1'):
-    if not re.fullmatch(r'0\.15\.0-ocr-preview\.[1-9][0-9]*', version):
+def write_installer(source, output, payload_manifest, parts_manifest, compiler, version='0.15.0-ocr-preview.1', *, unified=False):
+    pattern = r'0\.16\.0-preview\.[1-9][0-9]*' if unified else r'0\.15\.0-ocr-preview\.[1-9][0-9]*'
+    if not re.fullmatch(pattern, version):
         raise ValueError('Unsupported preview version')
     build = output / 'build'
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
-    application = verify_application(source, original)
+    application = verify_application(source, original, unified=unified)
     application_manifest = build / 'application-manifest.json'
     write_json(application_manifest, {'schema_version': 1, 'files': application})
     hook = build / 'hooks.nsh'
-    installer_hook(payload_manifest, hook, application_manifest=application_manifest, include_ocr=True)
+    installer_hook(payload_manifest, hook, application_manifest=application_manifest, include_ocr=True, airworthiness=unified)
     hook.write_text(hook.read_text(encoding='utf-8-sig').replace('$EXEDIR\\payload', '$INSTDIR\\.ocr-preview-payload\\payload'), encoding='utf-8-sig')
     helper = ROOT / 'tools/installer/prepare-ocr-payload.ps1'
-    files = '\n'.join(f'  ClearErrors\n  File /oname={name} "{nsis_path(source / name)}"\n  !insertmacro NSIS_HOOK_ASSERT_APP_COPY' for name in APPLICATION)
+    files = '\n'.join(f'  ClearErrors\n  File /oname={name} "{nsis_path(source / name)}"\n  !insertmacro NSIS_HOOK_ASSERT_APP_COPY' for name in application)
     setup = output / f'agent-{version}-windows-x64-setup.exe'
     prepare = f'''  InitPluginsDir
   SetOutPath "$PLUGINSDIR"
@@ -176,10 +182,18 @@ Section Uninstall
   RMDir "$INSTDIR"
 SectionEnd
 '''
+    if unified:
+        script = script.replace('agent OCR Preview', 'agent Airworthiness').replace('agentOCRPreview', 'agentAirworthiness')
+        script = script.replace('.ocr-preview-payload', '.airworthiness-payload')
+        script = script.replace('-Action Prepare', '-Airworthiness -Action Prepare').replace('-Action Cleanup', '-Airworthiness -Action Cleanup')
+        script = script.replace('VIProductVersion "0.15.0.', 'VIProductVersion "0.16.0.')
+        script = script.replace('  Delete "$INSTDIR\\agent_desktop_lib.dll"',
+            '  Delete "$INSTDIR\\agent_desktop_lib.dll"\n  Delete "$INSTDIR\\agent-updater.exe"\n  Delete "$INSTDIR\\application.json"')
+        hook.write_text(hook.read_text(encoding='utf-8-sig').replace('.ocr-preview-payload', '.airworthiness-payload'), encoding='utf-8-sig')
     nsi = build / 'setup.nsi'
     nsi.write_text(script, encoding='utf-8-sig')
     subprocess.run([str(compiler), '/V3', str(nsi)], check=True)
-    verify_application(source, original)
+    verify_application(source, original, unified=unified)
     return setup
 
 
@@ -201,17 +215,17 @@ def reuse_archives(previous, output, manifest, version):
     return archives
 
 
-def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1', reuse=None):
+def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1', reuse=None, *, unified=False):
     source, prerequisites, output = map(Path, (source, prerequisites, output))
     if output.exists():
         raise ValueError('Choose a new release output directory')
     output.mkdir(parents=True)
     (output / 'build').mkdir()
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
-    verify_application(source, original)
+    verify_application(source, original, unified=unified)
     records = []
     for name, entry in original['files'].items():
-        if not is_public_file(name) or name in APPLICATION:
+        if not is_public_file(name, unified=unified) or name in (UNIFIED_APPLICATION if unified else APPLICATION):
             continue
         validate_relative(name)
         check_file(source / name, entry)
@@ -226,13 +240,13 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
     payload_manifest = output / 'build/payload-manifest.json'
     write_json(payload_manifest, manifest)
     archives = []
-    groups = [] if reuse else plan_volumes(records)
+    groups = [] if reuse else plan_volumes(records, limit=UNIFIED_ASSET_LIMIT if unified else ASSET_LIMIT)
     for n, group in enumerate(groups, 1):
         archive = output / f'agent-{version}-offline.part{n:02d}.zip'
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as package:
             for record in group:
                 package.write(record['path'], record['name'])
-        if archive.stat().st_size >= 2 * 1024 ** 3:
+        if archive.stat().st_size >= (1536 * 1024 ** 2 if unified else 2 * 1024 ** 3):
             raise ValueError('A release asset exceeds the GitHub size limit')
         archives.append({'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': sha256(archive)})
         print(f'PACKED {archive.name} {archive.stat().st_size}', flush=True)
@@ -257,11 +271,27 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
 安装与数据目录使用独立的 OCR Preview 标识。卸载程序处理受管程序文件，用户导入的模型、文档、对话与数据库保存在应用数据目录。
 '''
     instructions = instructions.replace('0.15.0-ocr-preview.1', version)
+    if unified:
+        instructions = f'''# agent 离线安装与更新
+
+版本 {version}，Windows 11 x64 单用户预览版。
+
+1. 下载 setup.exe 和全部 offline.partNN.zip，放在同一目录，运行安装器。
+2. 安装目录独立使用 agent Airworthiness。运行后在设置中迁入 Document Preview 和 OCR Preview 数据，并选择独立模型库。
+3. 新用户需自行导入本地 GGUF 对话模型、嵌入和重排序模型。下载方式见仓库 README。OCR 模型已在离线包内提供。
+4. 在资料库导入文档，处理完成后在项目设置中启用资料库。主模型必须加载后才能问答。
+5. 程序更新采用设置中的手动检查。签名程序包仅更新主程序、Core、DLL 和更新辅助程序。运行组件变化需安装完整离线包。
+
+完整组件包含 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR、Office 解析、WebView2 和微软运行库。显卡驱动由电脑提供。
+
+安装器尚无 Authenticode 签名。程序更新必须通过独立发布密钥的签名校验。
+安装包包含机器识别组件，适航内容仍需专业人员复核。实际验收范围见发行说明。
+'''
     (output / '安装与使用说明.md').write_text(instructions, encoding='utf-8')
-    setup = write_installer(source, output, payload_manifest, parts_manifest, compiler, version=version)
-    release = {'version': version, 'application_id': 'io.github.zcchou.agent.ocrpreview',
-               'distribution': 'offline-preview-multipart-installer', 'application_build': 'debug-portable-tested',
-               'authenticode_signed': False, 'updater_enabled': False,
+    setup = write_installer(source, output, payload_manifest, parts_manifest, compiler, version=version, unified=unified)
+    release = {'version': version, 'application_id': 'io.github.zcchou.agent.airworthiness' if unified else 'io.github.zcchou.agent.ocrpreview',
+               'distribution': 'offline-preview-multipart-installer', 'application_build': 'release' if unified else 'debug-portable-tested',
+               'authenticode_signed': False, 'updater_enabled': unified,
                'application_source_commit': original['source_commit'],
                'git_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                'assets': archives + [{'name': setup.name, 'bytes': setup.stat().st_size, 'sha256': sha256(setup)}]}
@@ -279,5 +309,6 @@ if __name__ == '__main__':
     parser.add_argument('--nsis', required=True)
     parser.add_argument('--version', default='0.15.0-ocr-preview.1')
     parser.add_argument('--reuse-runtime-archives')
+    parser.add_argument('--unified', action='store_true')
     args = parser.parse_args()
-    build(args.source, args.prerequisites, args.output, args.nsis, args.version, args.reuse_runtime_archives)
+    build(args.source, args.prerequisites, args.output, args.nsis, args.version, args.reuse_runtime_archives, unified=args.unified)

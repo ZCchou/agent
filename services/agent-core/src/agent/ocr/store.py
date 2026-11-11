@@ -15,6 +15,16 @@ from agent.storage import CoreDataError
 class OcrModelStore:
     def __init__(self, root):
         self.root = Path(root).absolute()
+        configuration = self.root.parent / 'ocr-storage.json'
+        if self.root.name == 'ocr-models' and configuration.is_file():
+            try:
+                value = _json(configuration)
+                selected = Path(value['root'])
+                if value.get('schema_version') != 1 or not selected.is_absolute() or str(selected).startswith('\\\\'):
+                    raise ValueError('Invalid local OCR storage root')
+                self.root = selected.resolve()
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                raise CoreDataError('ocr_model_root_invalid', 'OCR 模型存储配置无效，请在模型设置中重新选择本地目录。') from error
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 

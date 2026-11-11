@@ -170,6 +170,13 @@ pub struct AgentExecutionManager {
 }
 
 impl AgentExecutionManager {
+    pub(crate) fn for_startup(recovery_dir: PathBuf, installation_secret: &str, health_probe: bool, migration_pending: bool) -> Result<Self, String> {
+        if health_probe || migration_pending {
+            return Ok(Self::disabled(recovery_dir, "startup recovery is suspended"));
+        }
+        Self::new(recovery_dir, installation_secret)
+    }
+
     pub fn new(recovery_dir: PathBuf, installation_secret: &str) -> Result<Self, String> {
         fs::create_dir_all(&recovery_dir).map_err(|_| {
             "recovery_unavailable: Recovery storage could not be created".to_string()
@@ -1140,6 +1147,9 @@ impl AgentExecutionManager {
     }
 
     fn persist_undo_catalog(&self) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_activation_in_progress".into());
+        }
         write_encrypted(
             &self.recovery_dir.join(UNDO_CATALOG_FILE),
             &self.key,
@@ -1302,6 +1312,9 @@ impl AgentExecutionManager {
     }
 
     pub(crate) fn ensure_available(&self) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_activation_in_progress".into());
+        }
         if self.disabled_reason.is_some() {
             return Err(
                 "tool_system_unavailable: Secure file recovery is unavailable; pure chat remains available"

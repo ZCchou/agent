@@ -353,7 +353,7 @@ def test_core_migrates_rag_and_management_protocol(tmp_path):
     async def scenario():
         repository = CoreRepository(tmp_path / "agent.db")
         with repository._connect() as connection:
-            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 29
+            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 30
         async def sink(event):
             pass
         service = ChatRunService(repository, sink)

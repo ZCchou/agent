@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "agent OCR Preview",
+  "productName": "agent",
   "version": "../package.json",
-  "identifier": "io.github.zcchou.agent.ocrpreview",
+  "identifier": "io.github.zcchou.agent.airworthiness",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "agent OCR Preview",
+        "title": "agent",
         "width": 1000,
         "height": 720,
         "minWidth": 900,
@@ -73,7 +73,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgxMUE4NjU3OTk3QjU5RUMKUldUc1dYdVpWNFlhZ1o1TTduMFhmLzRJb2tjOCtXNVhDd1JDRkp4OFloMHlxbXdCR0IvUldQNGsK"
     }
   }
 }

@@ -201,7 +201,7 @@ impl Profile {
             }
         }
         let identity = uuid::Uuid::new_v4().simple().to_string();
-        let record_name = format!("agent.offline.{identity}");
+        let record_name = format!("agent.airworthiness.offline.{identity}");
         let name = wide(&record_name);
         let state = if protected.as_os_str().is_empty() {
             None
@@ -294,7 +294,7 @@ impl Profile {
                 &std::fs::read(&marker).map_err(|_| failure("Read isolation record"))?,
             )
             .map_err(|_| "terminal_isolation_unavailable: Isolation recovery record is corrupt")?;
-            let Some(identity) = record.name.strip_prefix("agent.offline.") else {
+            let Some(identity) = record.name.strip_prefix("agent.airworthiness.offline.") else {
                 continue;
             };
             if identity.len() != 32

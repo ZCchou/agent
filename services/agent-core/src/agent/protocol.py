@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 22
-CORE_VERSION = "0.15.0"
-BUILD_ID = "schema29-rag-workflow-v1"
+PROTOCOL_VERSION = 23
+CORE_VERSION = "0.16.0-preview.1"
+BUILD_ID = "schema30-agent-unified-v1"
 _LOGGER = logging.getLogger("agent.core")
 
 

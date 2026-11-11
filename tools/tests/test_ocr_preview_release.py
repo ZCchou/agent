@@ -35,6 +35,35 @@ def test_public_selection_excludes_local_qa_and_user_data():
     assert [name for name in names if release.is_public_file(name)] == names[:5]
 
 
+def test_unified_delivery_preserves_office_and_separates_application_identity(tmp_path, monkeypatch):
+    release = module()
+    source, output = tmp_path / 'source', tmp_path / 'output'
+    source.mkdir()
+    (output / 'build').mkdir(parents=True)
+    names = (*release.APPLICATION, 'agent-updater.exe', 'application.json')
+    for name in names:
+        (source / name).write_bytes(b'fixture')
+    (source / 'delivery-manifest.json').write_text(json.dumps({
+        'application_id': 'io.github.zcchou.agent.airworthiness', 'files': {
+            name: {'bytes': 7, 'sha256': hashlib.sha256(b'fixture').hexdigest()} for name in names}}))
+    payload, parts = tmp_path / 'payload.json', tmp_path / 'parts.json'
+    payload.write_text('{}')
+    parts.write_text('{}')
+    monkeypatch.setattr(release.subprocess, 'run', lambda *args, **kwargs: None)
+    assert release.is_public_file('office-runtime/libreoffice/program/soffice.exe', unified=True)
+    assert not release.is_public_file('model.gguf', unified=True)
+    result = release.write_installer(source, output, payload, parts, tmp_path / 'compiler',
+                                     version='0.16.0-preview.1', unified=True)
+    script = (output / 'build/setup.nsi').read_text(encoding='utf-8-sig')
+    hook = (output / 'build/hooks.nsh').read_text(encoding='utf-8-sig')
+    assert result.name == 'agent-0.16.0-preview.1-windows-x64-setup.exe'
+    assert 'agent-updater.exe' in script and 'application.json' in script
+    assert 'agentAirworthiness' in script
+    assert 'agentOCRPreview' not in script
+    assert '-Airworthiness' in hook and '-Airworthiness' in script
+    assert 'io.github.zcchou.agent.airworthiness.offline-installer-v1' in hook
+
+
 def test_changed_tested_application_is_rejected(tmp_path):
     release = module()
     files = {}

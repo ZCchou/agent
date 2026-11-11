@@ -262,6 +262,9 @@ impl CoreProcessManager {
 
     /// 启动长期运行的 Python Agent Core。
     pub fn start(&mut self, app: &AppHandle) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_restart_required".into());
+        }
         self.ensure_can_start()?;
 
         // 全局 AppLogger 已经在 lib.rs 初始化完成。

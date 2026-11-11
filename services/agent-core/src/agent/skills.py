@@ -136,6 +136,9 @@ class SkillRegistry:
             entries = self._entries()
             if not any(v['id'] == skill_id for v in entries):
                 raise _fail("Skill is no longer registered.")
+            selected = next(v for v in self.list() if v['id'] == skill_id)
+            if enabled and any(v['name'] == selected['name'] and v['id'] != skill_id and v['enabled'] for v in self.list()):
+                raise _fail("A skill with this name is already enabled. Disable it before enabling this package.")
             self._save([{**v, 'enabled': enabled} if v['id'] == skill_id else v for v in entries])
 
     def remove(self, skill_id: str) -> None:
@@ -159,6 +162,7 @@ class SkillRegistry:
     def load(self, name: str, *, explicit: bool = True) -> dict:
         with _LOCK:
             matches = [v for v in self.list() if v['name'] == name]
+            matches = [v for v in matches if v['enabled']] or matches
             if len(matches) != 1:
                 raise _fail("Skill is missing or has a duplicate name; refresh Skills and check the package.")
             item = matches[0]
@@ -177,6 +181,7 @@ class SkillRegistry:
         """Management preview can inspect disabled packages without activating them."""
         with _LOCK:
             matches = [v for v in self.list() if v['name'] == name]
+            matches = [v for v in matches if v['enabled']] or matches
             if len(matches) != 1:
                 raise _fail("Skill is missing or has a duplicate name.")
             return self._parse(matches[0])
@@ -188,6 +193,7 @@ class SkillRegistry:
             raise _fail('Provide a lowercase skill name, a description and nonempty instructions.')
         with _LOCK:
             matches = [v for v in self.list() if v['name'] == name]
+            matches = [v for v in matches if v['enabled']] or matches
             if len(matches) > 1:
                 raise _fail('Duplicate skill name. Refresh Skills before editing.')
             metadata = {}

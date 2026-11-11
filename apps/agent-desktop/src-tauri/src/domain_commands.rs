@@ -1333,11 +1333,11 @@ mod routing_serialization_tests {
             "../../../../contracts/unified-invocation-v3.4.json"
         ))
         .unwrap();
-        assert_eq!(contract["ipc_version"], 22);
+        assert_eq!(contract["ipc_version"], crate::core_bridge::PROTOCOL_VERSION);
         assert_eq!(contract["settings_schema_version"], 18);
-        assert_eq!(contract["core_schema_version"], 29);
+        assert_eq!(contract["core_schema_version"], 30);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema29-rag-workflow-v1");
+        assert_eq!(contract["build_id"], "schema30-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

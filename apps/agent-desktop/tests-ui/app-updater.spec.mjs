@@ -21,6 +21,7 @@ async function setup(page, options = {}) {
         return { ...available, channel: args.channel, ...options.check };
       }
       if (command === 'download_app_update') {
+        if (options.runtimeMismatch) return { ...available, state: 'error', error_code: 'app_update_runtime_incompatible' };
         if (options.signature) return { ...available, state: 'error', error_code: 'app_update_signature_invalid' };
         window.emitUpdate({ ...available, state: 'downloading', downloaded_bytes: 50, total_bytes: 100 });
         return new Promise((resolve) => { window.finishDownload = () => resolve({ ...available, state: 'ready', downloaded_bytes: 100, total_bytes: 100 }); });
@@ -46,13 +47,14 @@ async function setup(page, options = {}) {
   await expect(page.getByRole('textbox', { name: 'Ask agent...' })).toBeEnabled();
 }
 async function settings(page) {
-  await page.getByRole('button', { name: 'System features' }).click();
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(page.getByText('离线模式已停用在线更新。')).toBeVisible();
+  const settingsButton = page.getByRole('navigation').getByRole('button', { name: 'Settings', exact: true });
+  if (!await settingsButton.isVisible()) await page.getByRole('button', { name: 'System features' }).click();
+  await settingsButton.click();
+  await expect(page.getByRole('button', { name: 'Check program updates', exact: true })).toBeVisible();
 }
-test('offline settings offer no online update actions even with a saved auto-check preference', async ({ page }) => {
+test('program updates require a manual check even with a saved auto-check preference', async ({ page }) => {
   await setup(page, { auto: true }); await settings(page);
-  for (const name of ['Check for updates', 'Download update', 'Install and restart']) {
+  for (const name of ['Download program update', 'Install and restart']) {
     await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
   }
   await expect(page.getByLabel('Update channel')).toHaveCount(0);
@@ -61,6 +63,30 @@ test('offline settings offer no online update actions even with a saved auto-che
   await page.getByRole('textbox', { name: 'Ask agent...' }).fill('Offline draft');
   await page.waitForTimeout(1500);
   expect(await page.evaluate(() => window.updateCalls.filter(x => /^(check|download|install)_app_update$/.test(x.command)))).toEqual([]);
+  await settings(page);
+  await page.getByRole('button', { name: 'Check program updates', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Download program update', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.checkCount)).toBe(1);
+});
+
+test('incompatible runtime points to the complete offline installer', async ({ page }) => {
+  await setup(page, { runtimeMismatch: true }); await settings(page);
+  await page.getByRole('button', { name: 'Check program updates', exact: true }).click();
+  await page.getByRole('button', { name: 'Download program update', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'complete offline installer' })).toBeVisible();
+});
+
+test('composer actions share a consistent height and icon geometry in a small window', async ({ page }) => {
+  await setup(page);
+  const buttons = page.locator('.chat-composer__tools .ui-button');
+  await expect(buttons.first()).toBeVisible();
+  const geometry = await buttons.evaluateAll(items => items.map(item => ({
+    height: item.getBoundingClientRect().height,
+    radius: getComputedStyle(item).borderRadius,
+    icon: item.querySelector('svg')?.getBoundingClientRect().width,
+  })));
+  expect(geometry.length).toBeGreaterThanOrEqual(3);
+  expect(geometry.every(item => item.height === 36 && item.radius === '8px' && item.icon === 16)).toBe(true);
 });
 
 test('settings navigation preserves draft text and staged images', async ({ page }) => {

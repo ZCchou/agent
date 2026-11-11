@@ -7,6 +7,7 @@ import { TitleBar } from "../components/layout/TitleBar";
 import { useApp } from "../contexts/AppContext";
 
 import { AppUpdateBanner } from "../features/updater/AppUpdateCard";
+import { ProfileMigrationBanner } from '../features/migration/ProfileMigrationCard';
 import { ChatPage } from "../features/chat/ChatPage";
 import { useAppUpdate } from "../features/updater/AppUpdateProvider";
 import { useTranslation } from "react-i18next";
@@ -84,6 +85,7 @@ export function AppShell() {
 
           <div className="workspace-content">
           <AppUpdateBanner />
+          <ProfileMigrationBanner />
           <PageContainer>
             <div className="retained-chat" hidden={currentPage !== "chat"}><ChatPage /></div>
             <Suspense fallback={<div className="state-message" role="status" aria-busy="true" />}>
