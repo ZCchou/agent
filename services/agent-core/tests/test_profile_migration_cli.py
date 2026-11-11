@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import pytest
 
 from agent.storage import CoreRepository
 
@@ -25,22 +26,24 @@ def test_health_command_checks_exact_core_contract_without_starting_models(tmp_p
     assert health['integrity'] == 'ok'
 
 
-def test_preview_worker_reports_capacity_without_copying_models_or_creating_candidate(tmp_path):
+@pytest.mark.parametrize('native_prefix', ['', '\\\\?\\'] if os.name == 'nt' else [''])
+def test_preview_worker_reports_capacity_without_copying_models_or_creating_candidate(tmp_path, native_prefix):
     source = tmp_path / 'io.github.zcchou.agent.documentpreview'
     CoreRepository(source / 'agent.db')
     target = tmp_path / 'io.github.zcchou.agent.airworthiness'
     job = target / 'profile-migrations' / 'job'
     job.mkdir(parents=True)
-    request = {'application_id': target.name, 'action': 'preview', 'target_root': str(target),
-               'model_root': str(tmp_path / 'models'), 'workspace': str(job),
-               'sources': [{'root': str(source), 'label': 'Document Preview'}]}
+    request = {'application_id': target.name, 'action': 'preview', 'target_root': native_prefix + str(target),
+               'model_root': native_prefix + str(tmp_path / 'models'), 'workspace': native_prefix + str(job),
+               'sources': [{'root': native_prefix + str(source), 'label': 'Document Preview'}]}
     path = job / 'request.json'
     path.write_text(json.dumps(request), encoding='utf8')
-    result = invoke('--profile-migration', path)
+    result = invoke('--profile-migration', native_prefix + str(path))
     assert result.returncode == 0, result.stdout + result.stderr
     state = json.loads((job / 'state.json').read_text())
     assert state['status'] == 'preview_ready'
     assert len(state['preview']['storage']) == 2
+    assert json.loads(path.read_text())['sources'][0]['root'] == state['preview']['sources'][0]['root']
     assert not (job / 'candidate.json').exists()
     assert not (tmp_path / 'models').exists()
 

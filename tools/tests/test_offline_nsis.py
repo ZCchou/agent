@@ -117,7 +117,8 @@ SectionEnd
     def test_current_tauri_mui_template_compiles_with_recovery_abort_callback(self):
         import re
         import shutil
-        rendered = ROOT / 'apps/agent-desktop/src-tauri/target/release/nsis/x64/installer.nsi'
+        target = Path(os.environ.get('CARGO_TARGET_DIR', str(ROOT / 'apps/agent-desktop/src-tauri/target')))
+        rendered = target / 'release/nsis/x64/installer.nsi'
         self.assertTrue(rendered.is_file(), 'Render the current pinned Tauri installer before this regression')
         for name in ('utils.nsh', 'FileAssociation.nsh'):
             shutil.copyfile(rendered.parent / name, self.root / name)

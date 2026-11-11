@@ -17,13 +17,24 @@ APPLICATION_ID = 'io.github.zcchou.agent.airworthiness'
 LEGACY_PROFILES = {'io.github.zcchou.agent.documentpreview', 'io.github.zcchou.agent.ocrpreview'}
 
 
+def _request_path(value):
+    # Native canonicalize returns extended Windows paths. Keep one local path
+    # representation before URI creation and ownership comparisons.
+    value = str(Path(value))
+    if value.startswith('\\\\?\\UNC\\'):
+        value = '\\\\' + value[8:]
+    elif value.startswith('\\\\?\\'):
+        value = value[4:]
+    return checked_path(Path(value).resolve())
+
+
 def emit(value):
     print(json.dumps(value, ensure_ascii=True, separators=(',', ':')), flush=True)
 
 
 def health(root):
     from agent.protocol import BUILD_ID, CORE_VERSION, PROTOCOL_VERSION
-    root = checked_path(Path(root).resolve())
+    root = _request_path(root)
     database = checked_path(root / 'agent.db', file=True)
     CoreRepository(database)
     with closing(sqlite3.connect(database)) as connection:
@@ -36,31 +47,37 @@ def health(root):
 
 
 def run_request(path):
-    path = checked_path(Path(path).resolve(), file=True)
+    path = checked_path(_request_path(path), file=True)
     if path.stat().st_size > 1024 * 1024:
         raise CoreDataError('migration_request_invalid', '迁移请求超过大小限制。')
     request = json.loads(path.read_text(encoding='utf-8-sig'))
     if not isinstance(request, dict) or request.get('application_id') != APPLICATION_ID or request.get('action') not in {'preview', 'prepare', 'activate', 'rollback', 'finalize'}:
         raise CoreDataError('migration_request_invalid', '迁移请求不属于当前应用或动作无效。')
-    target = checked_path(Path(request['target_root']).resolve())
-    workspace = checked_path(Path(request['workspace']).resolve())
+    target = _request_path(request['target_root'])
+    workspace = _request_path(request['workspace'])
+    model_root = _request_path(request['model_root'])
     if target.name != APPLICATION_ID or path.parent != workspace or not workspace.is_relative_to(target / 'profile-migrations'):
         raise CoreDataError('migration_request_invalid', '迁移控制目录与应用身份不一致。')
     sources = request.get('sources')
     if not isinstance(sources, list) or not 1 <= len(sources) <= 2:
         raise CoreDataError('migration_request_invalid', '请选择要迁入的预览版。')
     seen = set()
+    normalized_sources = []
     for source in sources:
-        root = checked_path(Path(source['root']).resolve())
+        root = _request_path(source['root'])
         if root.name not in LEGACY_PROFILES or root in seen or not isinstance(source.get('label'), str):
             raise CoreDataError('migration_request_invalid', '迁移来源须为独立的 agent 预览版资料目录。')
         seen.add(root)
+        normalized_sources.append({**source, 'root': str(root)})
+    sources = normalized_sources
+    request.update(target_root=str(target), workspace=str(workspace), model_root=str(model_root), sources=sources)
+    _write_json(path, request)
     def cancelled():
         if (workspace / 'cancel.flag').exists():
             raise InterruptedError('cancelled')
     if request['action'] == 'preview':
         from agent.profile_preflight import preview
-        estimate = preview(target, request['model_root'], workspace, sources, check_cancel=cancelled)
+        estimate = preview(target, model_root, workspace, sources, check_cancel=cancelled)
         state = {'status': 'preview_ready', 'phase': 'preview_ready', 'preview': estimate}
         _write_json(workspace / 'state.json', state)
         emit(state)
@@ -132,7 +149,7 @@ def run_request(path):
         activate_candidate(candidate, target, workspace, health_check=verify, check_cancel=cancelled)
         _write_json(workspace / 'state.json', {'status': 'awaiting_restart', 'phase': 'awaiting_restart'})
         return {'status': 'awaiting_restart'}
-    coordinator = MigrationCoordinator(target, request['model_root'], workspace, check_cancel=cancelled, progress=emit)
+    coordinator = MigrationCoordinator(target, model_root, workspace, check_cancel=cancelled, progress=emit)
     coordinator.prepare(sources)
     return {'status': 'prepared', 'workspace': str(workspace)}
 
