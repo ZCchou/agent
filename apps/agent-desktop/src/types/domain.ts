@@ -35,6 +35,7 @@ export interface AttachmentReference {
 }
 
 export interface MessageAttachment {
+  purpose?: "reference" | "template";
   id: string;
   message_id?: string;
   kind: "image" | "text";
@@ -144,6 +145,7 @@ export interface ChatMessage {
 }
 
 export interface Conversation {
+  rag_mode?: "auto" | "required";
   id: string;
   kind: ConversationKind;
   title: string;
@@ -266,6 +268,8 @@ export interface InvocationSpecSummary {
   error_code: string | null;
 }
 export interface ModelRun {
+  rag_requested_mode?: "auto" | "required";
+  rag_decision?: { required: boolean; reason: string; task_type: string; reuse_evidence: boolean };
   id: string;
   conversation_id: string;
   user_message_id: string;
@@ -353,6 +357,11 @@ export interface ContextSnapshot {
   global_instruction_hash: string | null;
   context_window: number;
   input_target: number;
+  input_hard_limit?: number | null;
+  body_input_limit?: number | null;
+  input_scope?: "assembled_context" | "compiled_request";
+  request_constraint_tokens?: number | null;
+  remaining_input_tokens?: number;
   output_reserve: number;
   token_method: string;
   estimated_tokens: number;
@@ -403,6 +412,8 @@ export interface CompactionTargetRequest {
   model_id: string;
 }
 export interface ContextCompactionState {
+  background?: boolean;
+  blocks_send?: boolean;
   id: string;
   conversation_id: string;
   run_id: string | null;
@@ -516,7 +527,7 @@ export interface ToolOperation {
   id: string;
   run_id: string;
   sequence: number;
-  tool_name: "fs.list" | "fs.search" | "fs.read" | "fs.propose_changes" | "terminal.run";
+  tool_name: "fs.list" | "fs.search" | "fs.read" | "fs.propose_changes" | "terminal.run" | "skills.load" | "skills.read_resource" | "skills.save" | "rag.search" | "rag.read" | "document.inspect_template" | "document.fill_template" | "document.export";
   arguments?: Record<string, unknown>;
   result_summary?: string | null;
   status: "requested" | "validating" | "reviewing" | "waiting_user" | "executing" | "completed" | "rejected" | "failed" | "cancelled" | "interrupted";

@@ -66,3 +66,6 @@ export function mergeAttachmentBatch(
     errorCode,
   };
 }
+export function defaultAttachmentPurpose(name: string): "template" | "reference" {
+  return /\.docx$/i.test(name) && /模板|template/i.test(name) ? "template" : "reference";
+}

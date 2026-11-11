@@ -4,6 +4,7 @@ export interface LocalModelError { code: string; message: string }
 export interface LocalModel {
   id: string; provider_profile_id: string; name: string; architecture: string;
   quantization: string; context_length: number; max_context_length: number;
+  declared_context_length?: number | null;
   size_bytes: number; digest: string; template_digest?: string; adapter_digest?: string;
   device: LocalDevice; gpu_layers: number; threads: number;
   status: "imported" | "loading" | "loaded" | "error";
@@ -21,8 +22,15 @@ export interface LocalModelJob {
 }
 export interface LocalModelList { models: LocalModel[]; root: string; storage_migration?: unknown }
 export interface LocalRuntimeStatus {
+  active_run_count?: number; preparation_count?: number; operation?: string | null;
   state: string; model_id?: string | null; backend?: string | null; session_id?: string | null;
   gpu_layers_used?: number; context_length?: number; error?: LocalModelError | string | null; fallbacks?: unknown[];
   preflight?: { physical_memory_pressure?: boolean; [key: string]: unknown };
 }
 export interface LocalRuntimeCapabilities { devices: unknown[]; runtimes: unknown[]; resources?: unknown; error?: unknown }
+
+export interface LocalModelPreparation {
+  preparation_id: string;
+  state: "waiting" | "loading" | "ready" | "failed";
+  job?: LocalModelJob;
+}

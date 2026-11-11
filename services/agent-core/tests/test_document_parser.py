@@ -56,6 +56,42 @@ def test_only_repository_originals_are_accepted(tmp_path):
     asyncio.run(exercise())
 
 
+def test_redirected_managed_paths_are_canonicalized_before_worker_dispatch(tmp_path, monkeypatch):
+    from agent.document_parser import ParserService
+    from agent.document_parser.protocol import managed_original
+    alias = tmp_path / 'roaming' / 'rag'
+    actual = tmp_path / 'package-cache' / 'rag'
+    original = managed(alias)
+    canonical = managed(actual)
+    resolve = Path.resolve
+
+    def redirected(path, *args, **kwargs):
+        if path.is_relative_to(alias):
+            return resolve(actual / path.relative_to(alias), *args, **kwargs)
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'resolve', redirected)
+    assert managed_original(alias, original) == canonical
+
+    async def exercise():
+        parser = ParserService(alias)
+        try:
+            assert parser.data_dir == actual
+            result = await parser.parse(original)
+            assert result['chunks'][0]['clause_number'] == '25.1309'
+            assert list((actual / 'parser-staging').iterdir()) == []
+        finally:
+            await parser.close()
+    asyncio.run(exercise())
+
+
+def test_document_source_failure_keeps_an_actionable_error_code():
+    from agent.execution.run_recovery import safe_code, failure_notice
+    error = CoreDataError('rag_document_unavailable', 'Source unavailable')
+    assert safe_code(error) == 'rag_document_unavailable'
+    assert 'rag_document_unavailable' in failure_notice(error.code, [])
+
+
 def test_docx_worker_keeps_notes_and_warnings(tmp_path):
     async def exercise():
         from agent.document_parser import ParserService

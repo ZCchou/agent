@@ -7,6 +7,33 @@ from agent.rag.documents import parse_document, parse_text
 from agent.storage import CoreDataError
 
 
+def test_pdf_page_header_and_internal_headings_do_not_inherit_old_clause():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('1.15 旧章节', {'kind': 'pdf', 'page': 45}),
+        ('8－1\n8.0 振动\n8.1 试验目的\n验证设备性能。\n8.2 适用范围\n适用于机载设备。\n8.2.1.3 短时高量级振动试验\n发动机叶片损失会造成异常振动。\n警告：还应评估限制条件。', {'kind': 'pdf', 'page': 46}),
+        ('8－2\n本条款的跨页续段。\n8.2.2 试验曲线选择\n根据安装位置选择。', {'kind': 'pdf', 'page': 47}),
+    ], [])
+    by_clause = {item['clause_number']: item for item in parsed['chunks'] if item['clause_number']}
+    assert '8.1' in by_clause and '8.2' in by_clause and '8.2.1.3' in by_clause
+    warning = next(item for item in parsed['chunks'] if '警告' in item['text'])
+    continuation = next(item for item in parsed['chunks'] if '跨页续段' in item['text'])
+    assert warning['clause_number'] == continuation['clause_number'] == '8.2.1.3'
+    assert warning['locator']['clause_parent_id'] == continuation['locator']['clause_parent_id']
+    assert all(item['clause_number'] != '1.15' for item in parsed['chunks'] if item['locator']['page'] >= 46)
+    assert warning['locator']['page'] == 46
+
+
+def test_pdf_decimal_table_cells_and_contents_entries_are_not_clause_headings():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('8－0\n8.2.1.3 短时试验…………8－1\n8.2.2 曲线选择…………8－2', {'kind': 'pdf', 'page': 45}),
+        ('8－8\n1.15 2.50 3.75\n8.2.2.1 试验描述\n1.15\n10.25 11.50 20.75\n试验曲线应经确认。', {'kind': 'pdf', 'page': 53}),
+    ], [])
+    assert {item['clause_number'] for item in parsed['chunks']} == {None, '8.2.2.1'}
+    assert next(item for item in parsed['chunks'] if '试验描述' in item['text'])['clause_number'] == '8.2.2.1'
+
+
 def test_separator_only_blocks_and_fragments_are_excluded():
     from agent.rag.documents import _chunks
     parsed = _chunks([(' | | --- | ', {}), ('A' * 1200 + '\n' + ' | ' * 400, {})], [])
@@ -203,7 +230,7 @@ def test_long_clause_preserves_exception_sentence_and_parent_relationship():
     assert len({chunk['locator']['block_id'] for chunk in parsed['chunks']}) == 1
     assert all(chunk['locator']['parent_length'] == len(text) for chunk in parsed['chunks'])
     assert all(chunk['locator']['context_required'] for chunk in parsed['chunks'])
-    assert all(chunk['locator']['splitting_version'] == 'source-block-v3' for chunk in parsed['chunks'])
+    assert all(chunk['locator']['splitting_version'] == 'source-block-v4' for chunk in parsed['chunks'])
     assert parsed['chunks'][0]['locator']['continues_after']
     assert parsed['chunks'][-1]['locator']['continues_before']
     assert parsed['warnings']

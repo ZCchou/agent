@@ -36,10 +36,15 @@ def plain_path(path):
 def managed_original(data_dir, original):
     try:
         original = Path(original)
-        if not original.is_absolute() or original != original.resolve(strict=True):
-            raise ValueError('Noncanonical original')
+        if not original.is_absolute():
+            raise ValueError('Original must be absolute')
+        # Check the supplied paths before resolving OS-managed AppData aliases.
+        # Resolving first would hide a user-created junction from plain_path.
+        plain_path(data_dir)
         plain_path(original)
-        relative = original.relative_to(Path(data_dir) / 'originals')
+        original = original.resolve(strict=True)
+        plain_path(original)
+        relative = original.relative_to(Path(data_dir).resolve(strict=True) / 'originals')
         match = ORIGINAL_NAME.fullmatch(original.name)
         info = original.stat()
         if len(relative.parts) != 2 or not match or relative.parts[0] != match[1][:2]:
@@ -52,7 +57,7 @@ def managed_original(data_dir, original):
     except (OSError, ValueError, CoreDataError) as error:
         if isinstance(error, CoreDataError) and error.code == 'rag_document_too_large':
             raise
-        raise CoreDataError('rag_document_unavailable', 'Select a managed repository original without links.') from error
+        raise CoreDataError('rag_document_unavailable', '文档原件不可用或路径校验失败，请重新添加附件或导入资料。') from error
 
 
 def stage_marker(stage):

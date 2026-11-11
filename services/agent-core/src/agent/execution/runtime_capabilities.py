@@ -104,15 +104,18 @@ class RuntimeCapabilityService:
 def render_snapshot(*, budgets: dict[str, Any], host: dict[str, Any], allowed_tools: tuple[str, ...],
                     signature: tuple[str, ...], max_output_tokens: int, web_used: bool,
                     evidence_status: str, response_only: bool, model_details: dict[str, Any] | None = None) -> str:
+    if not allowed_tools and not response_only:
+        host = {**host, 'tools': {}}
+        budgets = {key: value for key, value in budgets.items() if key == 'calls'}
     tools = {}
     for definition in ToolContractRegistry.definitions(allowed_tools):
         name = definition["function"]["name"]
         observed = host.get("tools", {}).get(name, {})
-        status = observed.get("status", "unknown") if name.startswith(("fs.", "terminal.")) else "available"
+        status = observed.get("status", "unknown") if name.startswith(("fs.", "terminal.")) or name == 'document.export' else "available"
         reason = observed.get("reason_code")
         quota_names = ["calls"]
-        if name in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read"}: quota_names.append("reads")
-        if name in {"fs.propose_changes", "skills.save"}: quota_names.append("mutations")
+        if name in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template"}: quota_names.append("reads")
+        if name in {"fs.propose_changes", "skills.save", "document.fill_template", "document.export"}: quota_names.append("mutations")
         if name == "web.search": quota_names.extend(("web_searches", "web_characters"))
         if name == "web.open": quota_names.extend(("web_opens", "web_characters"))
         exhausted = [key for key in quota_names if budgets[key]["remaining"] == 0]

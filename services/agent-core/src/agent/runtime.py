@@ -69,6 +69,8 @@ from agent.repositories.execution_repository import ExecutionRepository
 from agent.tool_loop import ToolLoopService
 from agent.tool_repository import ToolRepository
 from agent.tool_contracts import ToolCall, ToolContractRegistry
+from agent.document_contracts import DOCUMENT_TOOLS
+from agent.documents import DocumentWorkflow
 from agent.web_search.domain import (
     WebSearchDecision, WebSearchPolicyError, WebSearchRequestMode, WebSearchRoute,
 )
@@ -99,6 +101,7 @@ class ChatRunService:
         self.rag = RagService(repository)
         from agent.document_attachments import DocumentAttachments
         self.document_attachments = DocumentAttachments(repository, parser=self.rag.parser)
+        self.documents = DocumentWorkflow(repository)
         from agent.gpu_resources import GpuResources
         self.gpu_resources = GpuResources(self.rag.models.release_cuda)
         self.rag.models.gpu_resources = self.gpu_resources
@@ -297,17 +300,22 @@ class ChatRunService:
                 "invalid_model_selection", "Provider and model must be changed together.",
             )
         if provider_profile_id and model_id:
-            profile = self._profile(provider_profile_id)
-            if not profile.enabled:
-                raise CoreDataError("provider_disabled", "The selected provider is disabled.")
-            if model_id not in profile.allowed_model_ids:
-                raise CoreDataError("model_not_enabled", "The selected model is not enabled.")
-            if mode == "automatic" and model_id not in profile.automatic_model_ids:
-                raise CoreDataError(
-                    "coordinator_model_not_allowed_for_automatic",
-                    "The selected model is not allowed for automatic calls.",
-                )
-            self._enforce_project_policy(conversation, profile)
+            if provider_profile_id.startswith("managed:"):
+                record = self.local_models.catalog.get(provider_profile_id.removeprefix("managed:"))
+                if model_id != record["id"]:
+                    raise CoreDataError("model_not_enabled", "The selected model does not match its managed registration.")
+            else:
+                profile = self._profile(provider_profile_id)
+                if not profile.enabled:
+                    raise CoreDataError("provider_disabled", "The selected provider is disabled.")
+                if model_id not in profile.allowed_model_ids:
+                    raise CoreDataError("model_not_enabled", "The selected model is not enabled.")
+                if mode == "automatic" and model_id not in profile.automatic_model_ids:
+                    raise CoreDataError(
+                        "coordinator_model_not_allowed_for_automatic",
+                        "The selected model is not allowed for automatic calls.",
+                    )
+                self._enforce_project_policy(conversation, profile)
             if conversation["kind"] == "project_work":
                 scope = self.repository.get_project_model_scope(conversation["project_id"])
                 if scope["policy"] == "restricted" and not any(
@@ -648,8 +656,14 @@ class ChatRunService:
     async def start(self, params: dict[str, Any]) -> dict[str, Any]:
         self._sync_managed_profiles()
         idempotency_key = self._required(params, "idempotency_key")
+        if params.get('attachment_purposes') is not None and not isinstance(params['attachment_purposes'], dict):
+            raise CoreDataError('attachment_purpose_invalid', '附件用途格式无效。')
         existing = self.repository.get_model_run_by_idempotency_key(idempotency_key)
         if existing is not None:
+            if params.get('attachment_purposes') is not None and params['attachment_purposes'] != (existing.get('rag_decision') or {}).get('attachment_request_overrides', {}):
+                raise CoreDataError('idempotency_conflict', 'The request key already captured different attachment purposes.')
+            if params.get('rag_mode') is not None and params['rag_mode'] != existing.get('rag_requested_mode', 'auto'):
+                raise CoreDataError('idempotency_conflict', 'The request key already captured a different RAG mode.')
             if existing["status"] == "queued" and existing["id"] not in self.run_tasks:
                 self.run_tasks[existing["id"]] = asyncio.create_task(self._execute(existing["id"]))
             return self._start_response(existing)
@@ -716,6 +730,24 @@ class ChatRunService:
             self.repository._validate_attachments([*attachments, *referenced]),
         )
         attachments = attachment_selection.effective_attachments
+        from agent.rag.routing import decide_evidence, previous_evidence_task, resolve_attachment_roles
+        rag_mode = params.get('rag_mode') if params.get('rag_mode') is not None else (conversation or {}).get('rag_mode', 'auto')
+        previous_evidence = previous_evidence_task((conversation or {}).get('messages', []))
+        previous_run = self.repository.latest_model_run(conversation_id) if conversation_id else None
+        pending_evidence = bool(previous_run and previous_run['status'] in {'failed', 'cancelled', 'interrupted'} and (previous_run.get('rag_decision') or {}).get('required'))
+        rag_decision = decide_evidence(content, mode=rag_mode, previous_evidence=previous_evidence, pending_evidence=pending_evidence,
+                                       skill_required=self.skills.requires_rag(content))
+        rag_decision['attachment_roles'] = resolve_attachment_roles(attachments, params.get('attachment_purposes'))
+        rag_decision['attachment_request_overrides'] = params.get('attachment_purposes') or {}
+        attachments = [{**attachment, 'purpose': rag_decision['attachment_roles'][attachment['id']]} for attachment in attachments]
+        if 'template' in rag_decision['attachment_roles'].values() and re.search(r'填写|回填|填好|完成模板|回答模板', content):
+            rag_decision.update(required=True, reason='template_fill', task_type='document_export')
+        if pending_evidence and rag_decision['reason'] == 'evidence_continuation':
+            prior = self.repository.get_run_conversation(previous_run['id'])
+            rag_decision['query_context'] = next(item['content'][:2000] for item in prior['messages'] if item['id'] == previous_run['user_message_id'])
+            rag_decision['continued_run_id'] = previous_run['id']
+        if rag_decision['required'] and not rag_enabled:
+            raise CoreDataError('rag_library_required', '当前任务需要项目资料。请先启用资料库，或关闭强制 RAG 后重新提出普通问题。')
         selection_value = params.get("selection") if isinstance(params.get("selection"), dict) else {}
         legacy_fixed_request = bool(
             not selection_value and params.get("provider_profile_id") and params.get("model_id")
@@ -781,6 +813,8 @@ class ChatRunService:
             pending_decision=pending_confirmation,
         )
         web_not_authorized = (
+            not rag_decision['required']
+            and
             resolved_web_intent.reason_code == "web_search_off"
             and (
                 self.web_intent_resolver.is_explicit_current_request(content)
@@ -798,7 +832,9 @@ class ChatRunService:
             resolved_web_intent=resolved_web_intent,
         )
         if rag_local_required:
-            requirements = replace(requirements, web="off", web_evidence="optional", files="none", tools="available")
+            requirements = replace(requirements, web="off", web_evidence="optional")
+        if rag_decision['task_type'] == 'document_export':
+            requirements = replace(requirements, files='none', tools='available')
         if requirements.tools == "none":
             # Core skill authoring is available independently of imported packages.
             # "available" preserves text-only routes and never requires a tool model.
@@ -1062,14 +1098,18 @@ class ChatRunService:
         if conversation:
             self._enforce_project_policy(conversation, profile)
         if conversation_id and conversation:
+            pending = self.compaction_status(conversation['id'])
             active_task = self.compaction_tasks.get(conversation["id"])
+            if pending and pending.get('background') and active_task is not None and not active_task.done():
+                await self.pause_compaction(conversation['id'])
+                active_task = None
             if active_task is not None and not active_task.done():
                 raise CoreDataError(
                     "context_compaction_in_progress",
                     "Context must finish organizing before another message can be sent.",
                 )
             pending = self.compaction_status(conversation["id"])
-            if pending and pending["status"] in {"queued", "running", "interrupted", "failed"}:
+            if pending and pending.get('blocks_send', True) and pending["status"] in {"queued", "running", "interrupted", "failed"}:
                 if pending["status"] in {"interrupted", "failed"} \
                         and pending.get("error_code") in AUTOMATIC_RECOVERY_CODES:
                     self._launch_compaction_for_status(pending, trigger="pre_send")
@@ -1233,6 +1273,8 @@ class ChatRunService:
             attachment_rejections=attachment_rejections,
             model_selection_mode=selection_mode, routing_preset=routing_preset,
             edit_message_id=edit_message_id,
+            rag_mode=rag_mode,
+            rag_decision=rag_decision,
         )
         await self._emit(run["id"], "run.planning_started", {
             "plan_id": plan.plan_id, "phase": "resolving",
@@ -1632,6 +1674,10 @@ class ChatRunService:
     def compaction_status(self, conversation_id: str) -> dict[str, Any] | None:
         self.repository.get_conversation(conversation_id)
         status = self.context.context_repository.compaction_status(conversation_id)
+        if status and status.get('run_id'):
+            run = self.repository.get_model_run(status['run_id'])
+            if run['status'] == 'completed':
+                return {**status, 'background': True, 'blocks_send': False}
         if status is None or status["status"] in {"queued", "running", "valid", "stale"}:
             return status
         # Historical failures from the former eager implementation must not
@@ -1757,6 +1803,7 @@ class ChatRunService:
         has_vision_specialist = False
         pending_action_created: dict[str, Any] | None = None
         try:
+            self.local_models.pin_run(run_id, self.repository.get_model_run(run_id)["provider_profile_id"])
             execution_plan = self.execution_coordinator.get_for_run(run_id)
             if execution_plan is not None:
                 await self._emit(run_id, "run.plan_ready", {
@@ -1779,7 +1826,23 @@ class ChatRunService:
                  if message["id"] == run["user_message_id"]), None,
             )
             current_conversation = await self._prepare_document_attachments(run, current_conversation)
-            await self.rag_grounding.prepare(run, current_conversation)
+            if not run.get('rag_decision'):
+                from agent.rag.routing import decide_evidence, previous_evidence_task, resolve_attachment_roles
+                recent = self.repository.get_run_recent_messages(run_id)
+                rag_decision = decide_evidence(current_user['content'], mode=run.get('rag_requested_mode', 'auto'),
+                    previous_evidence=previous_evidence_task(recent),
+                    skill_required=self.skills.requires_rag(current_user['content']))
+                rag_decision['attachment_roles'] = resolve_attachment_roles(current_user.get('attachments', []))
+                self.repository.record_rag_decision(run_id, rag_decision)
+                run = self.repository.get_model_run(run_id)
+            stage_started = time.monotonic()
+            async def rag_progress(phase):
+                await self._emit(run_id, "run.state_changed", {
+                    "status": "building_context", "phase": phase,
+                    "elapsed_seconds": round(time.monotonic() - stage_started),
+                })
+            await self.rag_grounding.prepare(run, current_conversation, progress=rag_progress)
+            await rag_progress("assembling_context")
             if execution_plan is None and run.get("parent_run_id") \
                     and current_user and current_user.get("attachments"):
                 raise CoreDataError(
@@ -1903,17 +1966,24 @@ class ChatRunService:
             if conversation["kind"] == "project_work" and tool_mode != "text_only" \
                     and route_allows_tools:
                 allowed_tools.extend(("fs.list", "fs.search", "fs.read", "fs.propose_changes", "terminal.run"))
+                document_request = (run.get('rag_decision') or {}).get('task_type') == 'document_export'
+                template_available = 'template' in (run.get('rag_decision') or {}).get('attachment_roles', {}).values()
+                if document_request or template_available or re.search(r'模板|\.docx\b', (current_user or {}).get('content', ''), re.I):
+                    allowed_tools.extend(DOCUMENT_TOOLS if document_request else DOCUMENT_TOOLS[:1])
             if run.get("web_search_route") == "host_tool" and tool_mode != "text_only" \
                     and route_allows_tools:
                 allowed_tools.extend(("web.search", "web.open"))
             if route_allows_tools and tool_mode != "text_only":
                 allowed_tools.extend(SKILL_TOOLS)
             if self.offline:
-                allowed_tools = [name for name in allowed_tools if name not in {"web.search", "web.open", "terminal.run"}]
+                allowed_tools = [name for name in allowed_tools if name not in {"web.search", "web.open"}]
             if self._rag_requires_local(conversation) or run_id in self.rag_grounding.runs:
-                allowed_tools = [name for name in allowed_tools if name in {"skills.load", "skills.read_resource"}]
+                allowed_tools = [name for name in allowed_tools if name not in {"web.search", "web.open"}]
                 if run_id in self.rag_grounding.runs and route_allows_tools and tool_mode != "text_only":
                     allowed_tools.extend(("rag.search", "rag.read"))
+            brief_greeting = (run.get('rag_decision') or {}).get('reason') == 'greeting'
+            if brief_greeting:
+                allowed_tools = []
             tools_enabled = bool(allowed_tools)
 
             automatic_attempt = 0
@@ -1974,7 +2044,13 @@ class ChatRunService:
                                 fallback_step["id"], {"queued", "interrupted"}, "skipped",
                                 "web_evidence_available",
                             )
+                    base_context_tokens = estimate_tokens(assembled.messages)
                     generation_messages = list(assembled.messages)
+                    if brief_greeting:
+                        current_turn = next(message for message in reversed(generation_messages) if message['role'] == 'user')
+                        generation_messages = [message for message in generation_messages if message['role'] == 'system']
+                        generation_messages.extend([current_turn, {'role': 'system', 'content':
+                            '本轮任务为简短寒暄。自然回应当前消息，使用用户的语言与已配置的表达偏好。'}])
                     if "vision_input" in degraded_ids:
                         generation_messages = self._messages_with_specialist_artifacts(
                             generation_messages, [], strip_images=True,
@@ -1989,20 +2065,21 @@ class ChatRunService:
                         )
                     if presearch_message is not None:
                         generation_messages.append(presearch_message)
-                    generation_messages.append({
-                        "role": "system",
-                        "content": (
-                            "Use the current runtime capability observation when planning requested work and continuations. "
-                            "Describe capabilities or web usage only when relevant to the request. If web-used is false, say "
-                            "only that this run did not use web search; never claim that the model, "
-                            "agent, or conversation permanently lacks web access.\n"
-                            "Keep public progress updates brief; do not narrate internal deliberation or repeat plans. "
-                            "When finished, return a clear final answer describing the result, relevant verification "
-                            "and any remaining limitations. Earlier tool-round narration is shown separately; "
-                            "do not repeat the execution transcript in the final answer.\n"
-                            + (PROJECT_LINK_INSTRUCTION if conversation["kind"] == "project_work" else "")
-                        ),
-                    })
+                    if not brief_greeting and (tools_enabled or run_id not in self.rag_grounding.runs):
+                        generation_messages.append({
+                            "role": "system",
+                            "content": (
+                                "Use the current runtime capability observation when planning requested work and continuations. "
+                                "Describe capabilities or web usage only when relevant to the request. If web-used is false, say "
+                                "only that this run did not use web search; never claim that the model, "
+                                "agent, or conversation permanently lacks web access.\n"
+                                "Keep public progress updates brief; do not narrate internal deliberation or repeat plans. "
+                                "When finished, return a clear final answer describing the result, relevant verification "
+                                "and any remaining limitations. Earlier tool-round narration is shown separately; "
+                                "do not repeat the execution transcript in the final answer.\n"
+                                + (PROJECT_LINK_INSTRUCTION if conversation["kind"] == "project_work" else "")
+                            ),
+                        })
                     if execution_plan and execution_plan.get("degraded_capabilities"):
                         generation_messages.append({
                             "role": "system",
@@ -2032,7 +2109,13 @@ class ChatRunService:
                     break
                 except (ProviderError, CoreDataError) as error:
                     self.repository.finish_attempt(attempt_id, error.code)
-                    if isinstance(error, CoreDataError):
+                    measured_overhead = (error.details or {}).get('input_overhead_tokens') if isinstance(error, CoreDataError) else None
+                    compiler_capacity_error = error.code == 'provider_context_limit_exceeded' and type(measured_overhead) is int
+                    if compiler_capacity_error:
+                        request_tokens = (error.details or {}).get('request_tokens')
+                        if type(request_tokens) is int:
+                            measured_overhead = max(measured_overhead, request_tokens - base_context_tokens)
+                    if isinstance(error, CoreDataError) and not compiler_capacity_error:
                         raise
                     persisted_run = self.repository.get_model_run(run_id)
                     draft = persisted_run.get("draft")
@@ -2054,8 +2137,9 @@ class ChatRunService:
                         await self._emit(run_id, "run.state_changed", {"status": "building_context"})
                         run = self.repository.get_model_run(run_id)
                         assembled = await self._prepare_context(
-                            run, profile, provider, round_no=1, strict=True,
+                            run, profile, provider, round_no=1, strict=not compiler_capacity_error,
                             invocation_target=execution_step,
+                            **({'input_overhead_tokens': measured_overhead + 64} if compiler_capacity_error else {}),
                         )
                         if assembled is None:
                             return
@@ -2124,12 +2208,18 @@ class ChatRunService:
                 content += notice
                 await self._emit(run_id, "run.chunk", {"delta": notice})
             if run_id in self.rag_grounding.runs:
-                content = self.rag_grounding.finalize(run_id, content)
+                content = await self._finalize_rag_answer(
+                    run, attempt_id, provider, generation_messages, content,
+                    execution_plan, execution_step, attempt["attempt_number"],
+                    force_final=tools_enabled,
+                )
                 evidence_state = self.rag_grounding.runs[run_id]
+                content = await self._application_document_export(run, attempt_id, content)
                 result = self.repository.complete_model_run(run_id, attempt_id, content,
                     rag_guard=(evidence_state["project_id"], evidence_state["generation"]))
                 await self._emit(run_id, "run.chunk", {"delta": content})
             else:
+                content = await self._application_document_export(run, attempt_id, content)
                 result = self.repository.complete_model_run(run_id, attempt_id, content)
             resolved_intent = (execution_plan or {}).get("resolved_intent", {})
             confirmed_pending_action = resolved_intent.get("pending_action_id")
@@ -2437,6 +2527,7 @@ class ChatRunService:
                 **self._step_route_event(execution_step),
             })
         finally:
+            self.local_models._run_pins.pop(run_id, None)
             self.run_tasks.pop(run_id, None)
 
     async def _prepare_document_attachments(self, run, conversation):
@@ -2613,7 +2704,7 @@ class ChatRunService:
         if run["id"] in self.rag_grounding.runs:
             self.rag_grounding.admit(run["id"], [item.source.source_id for item in packed.items
                 if item.source.source_type == "rag_chunk" and item.included],
-                budget=min(6000, int(packed.input_target * 0.30)))
+                budget=min(6000, int((packed.body_input_limit or packed.input_hard_limit or packed.input_target) * 0.45)))
         return packed
 
     def _rag_requires_local(self, conversation: dict[str, Any]) -> bool:
@@ -3270,6 +3361,22 @@ class ChatRunService:
         })
         return intent
 
+    def _compile_model_request(self, run_id: str, spec: InvocationSpec, messages: list[dict[str, Any]]):
+        context_window = (self._profile(spec.provider_or_backend_id).model_capabilities or {}).get(spec.model_id, {}).get('context_length')
+        try:
+            prepared = self.invocation_compiler.compile_model(spec, messages, context_window=context_window)
+        except CoreDataError as error:
+            budget = (error.details or {}).get('input_budget')
+            if budget and self.context.context_repository.next_snapshot_round(run_id) > 0:
+                self.context.context_repository.save_tool_round_snapshot(
+                    run_id, self.context.context_repository.next_snapshot_round(run_id), messages, request_budget=budget)
+            raise
+        budget = getattr(prepared, 'input_budget', None)
+        if budget and self.context.context_repository.next_snapshot_round(run_id) > 0:
+            self.context.context_repository.save_tool_round_snapshot(
+                run_id, self.context.context_repository.next_snapshot_round(run_id), messages, request_budget=budget)
+        return prepared
+
     async def _invoke_planned_step(
         self, run: dict[str, Any], plan: dict[str, Any], step: dict[str, Any],
         attempt: dict[str, Any], provider: Any, messages: list[dict[str, Any]], *,
@@ -3279,71 +3386,77 @@ class ChatRunService:
         native_search_mode: str | None = None,
         artifact_ids: tuple[str, ...] = (),
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
-        self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
-        spec = self._create_model_invocation_spec(
-            run, plan, step, round_no=round_no, attempt_no=attempt["attempt_number"],
-            allowed_tools=(), max_output_tokens=max_output_tokens,
-            response_format=response_format,
-            native_search_mode=native_search_mode,
-            additional_artifact_ids=artifact_ids,
-        )
-        self.execution_repository.save_invocation_spec(spec)
-        prepared = self.invocation_compiler.compile_model(spec, messages)
-        if round_no == 1:
-            self.repository.bind_attempt_invocation_spec(attempt["id"], spec.spec_id)
-        self.execution_repository.mark_invocation_dispatched(
-            spec.spec_id, prepared.request_fingerprint,
-        )
-        await self._emit(run["id"], "run.invocation_dispatched", {
-            "plan_id": spec.plan_id, "step_id": spec.step_id, "spec_id": spec.spec_id,
-            "round_no": spec.round_no, "provider_profile_id": spec.provider_or_backend_id,
-            "model_id": spec.model_id, "route_id": spec.route_id,
-            "protocol_id": spec.protocol_id, "adapter_id": spec.adapter_id,
-        })
-        try:
-            # Event delivery yields to settings/cancel handlers. Check again
-            # immediately before entering the captured provider adapter.
+        managed_request = isinstance(provider, ManagedLocalProvider)
+        if managed_request:
+            await self._emit(run["id"], "run.state_changed", {"status": run["status"], "phase": "waitingModel"})
+        async with ModelInvocationService.provider_session(provider) as provider:
+            if managed_request:
+                await self._emit(run["id"], "run.state_changed", {"status": run["status"], "phase": "waitingOutput"})
             self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
-            result = await self.model_invocation.complete_prepared(provider, spec, prepared)
-            content, usage, provider_events = result
-            validate_provider_completion(
-                content, next((event.finish_reason for event in reversed(provider_events)
-                               if event.kind == "finish"), None), usage,
-                has_semantic_output=any(event.kind in {
-                    "tool_call", "native_search_call", "web_search_result",
-                } for event in provider_events),
+            spec = self._create_model_invocation_spec(
+                run, plan, step, round_no=round_no, attempt_no=attempt["attempt_number"],
+                allowed_tools=(), max_output_tokens=max_output_tokens,
+                response_format=response_format,
+                native_search_mode=native_search_mode,
+                additional_artifact_ids=artifact_ids,
             )
-        except BaseException as error:
-            failure_usage = getattr(error, "usage", {})
-            if failure_usage:
-                self.repository.update_attempt_usage(attempt["id"], failure_usage)
-                self.execution_repository.update_step_usage(step["id"], failure_usage)
-            terminal = (
-                "unknown_outcome" if getattr(error, "code", "") in {
-                    "connection_reset", "request_timeout", "stream_stalled",
-                } else "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+            self.execution_repository.save_invocation_spec(spec)
+            prepared = self._compile_model_request(run['id'], spec, messages)
+            if round_no == 1:
+                self.repository.bind_attempt_invocation_spec(attempt["id"], spec.spec_id)
+            self.execution_repository.mark_invocation_dispatched(
+                spec.spec_id, prepared.request_fingerprint,
             )
-            self.execution_repository.finish_invocation(
-                spec.spec_id, terminal, getattr(error, "code", "core_interrupted"),
-            )
-            await self._emit(run["id"], "run.invocation_failed", {
-                **self._invocation_outcome_data(spec),
-                "error_code": getattr(error, "code", "core_interrupted"),
-                "retry_after_seconds": getattr(error, "retry_after", None),
-                "dispatched": True,
-                "produced_output": False,
-                "usage_present": bool(failure_usage),
-                "support_evidence": (getattr(error, "details", {}) or {}).get("support_evidence"),
+            await self._emit(run["id"], "run.invocation_dispatched", {
+                "plan_id": spec.plan_id, "step_id": spec.step_id, "spec_id": spec.spec_id,
+                "round_no": spec.round_no, "provider_profile_id": spec.provider_or_backend_id,
+                "model_id": spec.model_id, "route_id": spec.route_id,
+                "protocol_id": spec.protocol_id, "adapter_id": spec.adapter_id,
             })
-            raise
-        self.execution_repository.finish_invocation(spec.spec_id, "completed")
-        await self._emit(run["id"], "run.invocation_completed", {
-            **self._invocation_outcome_data(spec),
-            "dispatched": True,
-            "produced_output": bool(content.strip()),
-            "usage_present": bool(usage),
-        })
-        return result
+            try:
+                # Event delivery yields to settings/cancel handlers. Check again
+                # immediately before entering the captured provider adapter.
+                self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
+                result = await self.model_invocation.complete_prepared(provider, spec, prepared)
+                content, usage, provider_events = result
+                validate_provider_completion(
+                    content, next((event.finish_reason for event in reversed(provider_events)
+                                   if event.kind == "finish"), None), usage,
+                    has_semantic_output=any(event.kind in {
+                        "tool_call", "native_search_call", "web_search_result",
+                    } for event in provider_events),
+                )
+            except BaseException as error:
+                failure_usage = getattr(error, "usage", {})
+                if failure_usage:
+                    self.repository.update_attempt_usage(attempt["id"], failure_usage)
+                    self.execution_repository.update_step_usage(step["id"], failure_usage)
+                terminal = (
+                    "unknown_outcome" if getattr(error, "code", "") in {
+                        "connection_reset", "request_timeout", "stream_stalled",
+                    } else "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+                )
+                self.execution_repository.finish_invocation(
+                    spec.spec_id, terminal, getattr(error, "code", "core_interrupted"),
+                )
+                await self._emit(run["id"], "run.invocation_failed", {
+                    **self._invocation_outcome_data(spec),
+                    "error_code": getattr(error, "code", "core_interrupted"),
+                    "retry_after_seconds": getattr(error, "retry_after", None),
+                    "dispatched": True,
+                    "produced_output": False,
+                    "usage_present": bool(failure_usage),
+                    "support_evidence": (getattr(error, "details", {}) or {}).get("support_evidence"),
+                })
+                raise
+            self.execution_repository.finish_invocation(spec.spec_id, "completed")
+            await self._emit(run["id"], "run.invocation_completed", {
+                **self._invocation_outcome_data(spec),
+                "dispatched": True,
+                "produced_output": bool(content.strip()),
+                "usage_present": bool(usage),
+            })
+            return result
 
     @staticmethod
     def _invocation_outcome_data(spec: InvocationSpec) -> dict[str, Any]:
@@ -3751,6 +3864,7 @@ class ChatRunService:
         self, run: dict[str, Any], profile: ProviderProfile, provider: Any,
         *, round_no: int, strict: bool = False,
         invocation_target: dict[str, Any] | None = None,
+        input_overhead_tokens: int = 0,
     ) -> Any | None:
         capabilities = (profile.model_capabilities or {}).get(run["model_id"], {})
         context_window = capabilities.get("context_length")
@@ -3758,17 +3872,23 @@ class ChatRunService:
         final_output_tokens = resolve_output_budget(
             "final_response", model_limit=max_output_tokens, context_window=context_window,
         ).reservation_tokens
-        try:
-            assembled = await self._assemble_authorized_context(
-                run, profile, invocation_target=invocation_target,
-                context_window=context_window, max_output_tokens=final_output_tokens,
-                strict=strict,
-                serialization_identity=self._serialization_identity(invocation_target),
-            )
-        except ContextEngineError as error:
+        checkpoint = self.context.context_repository.active_checkpoint(run["conversation_id"])
+        frontier = (checkpoint["through_sequence"], checkpoint.get("through_offset")
+                    if checkpoint.get("through_offset") is not None else float("inf")) if checkpoint else (0, 0)
+        while True:
+            try:
+                assembled = await self._assemble_authorized_context(
+                    run, profile, invocation_target=invocation_target,
+                    context_window=context_window, max_output_tokens=final_output_tokens,
+                    strict=strict,
+                    serialization_identity={**self._serialization_identity(invocation_target),
+                                            'input_overhead_tokens': input_overhead_tokens},
+                )
+                break
+            except ContextEngineError as error:
                 if error.code != "context_compaction_required":
                     raise
-                if run.get("automatic_compaction_used"):
+                if run.get("automatic_compaction_used") and not profile.is_local:
                     self.repository.transition_model_run(
                         run["id"], {"building_context"}, "waiting_context",
                         "context_compaction_incomplete",
@@ -3794,6 +3914,12 @@ class ChatRunService:
                             run, compaction_target, profile, invocation_target,
                         ),
                     )
+                    if profile.is_local:
+                        next_frontier = (checkpoint["through_sequence"], checkpoint.get("through_offset")
+                                         if checkpoint.get("through_offset") is not None else float("inf"))
+                        if next_frontier <= frontier:
+                            raise ContextEngineError("context_compaction_no_progress", "Context organization did not advance through history.")
+                        frontier = next_frontier
                 except asyncio.CancelledError:
                     await self._compaction_event(run["id"], "run.context_compaction_failed", {
                         "conversation_id": run["conversation_id"], "trigger": "pre_send",
@@ -3824,25 +3950,6 @@ class ChatRunService:
                     "trigger": "pre_send", "status": "valid",
                 })
                 run = self.repository.get_model_run(run["id"])
-                try:
-                    assembled = await self._assemble_authorized_context(
-                        run, profile, invocation_target=invocation_target,
-                        context_window=context_window, max_output_tokens=final_output_tokens,
-                        strict=strict,
-                        serialization_identity=self._serialization_identity(invocation_target),
-                    )
-                except ContextEngineError as next_error:
-                    if next_error.code != "context_compaction_required":
-                        raise
-                    self.repository.transition_model_run(
-                        run["id"], {"building_context"}, "waiting_context",
-                        "context_compaction_incomplete",
-                        "More history must be compacted before generation can continue.",
-                    )
-                    await self._emit(run["id"], "run.waiting_context", {
-                        "error_code": "context_compaction_incomplete",
-                    })
-                    return None
         self.context.validate_assembly(run, assembled)
         snapshot_round = max(round_no, self.context.context_repository.next_snapshot_round(run["id"]))
         self.context.persist_snapshot(run["id"], snapshot_round, assembled)
@@ -4043,8 +4150,9 @@ class ChatRunService:
             active_native_adapter = "none"
             invocation_dispatched = False
             native_activity_in_turn = False
+            saw_model_activity = False
             try:
-                async with asyncio.timeout(600), AsyncExitStack() as stream_cleanup:
+                async with asyncio.timeout(None) as invocation_timeout, AsyncExitStack() as stream_cleanup:
                     if execution_plan is None or execution_step is None:
                         raise CoreDataError(
                             "invocation_spec_invalid",
@@ -4101,13 +4209,18 @@ class ChatRunService:
                             "native_search_continuations_remaining": max(0, self.native_search_executor.max_continuation_rounds-1-native_continuation_rounds),
                         },
                     ))
-                    if provider_round > 0 or response_only or skill_context_changed:
+                    prepared = self._compile_model_request(run_id, spec, request_messages)
+                    if getattr(prepared, 'input_budget', None) is None and (provider_round > 0 or response_only or skill_context_changed):
                         self.context.context_repository.save_tool_round_snapshot(
-                            run_id, self.context.context_repository.next_snapshot_round(run_id), messages,
-                        )
-                    prepared = self.invocation_compiler.compile_model(spec, request_messages)
+                            run_id, self.context.context_repository.next_snapshot_round(run_id), messages)
                     if invocation_round == 1:
                         self.repository.bind_attempt_invocation_spec(attempt_id, spec.spec_id)
+                    if isinstance(provider, ManagedLocalProvider):
+                        await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": "waitingModel"})
+                    ready_provider = await stream_cleanup.enter_async_context(ModelInvocationService.provider_session(provider))
+                    if isinstance(provider, ManagedLocalProvider):
+                        await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": "waitingOutput"})
+                    self._validate_context_dispatch_authority(run, getattr(ready_provider, "profile", None), execution_step)
                     self.execution_repository.mark_invocation_dispatched(
                         spec.spec_id, prepared.request_fingerprint,
                     )
@@ -4122,20 +4235,31 @@ class ChatRunService:
                     self._validate_context_dispatch_authority(
                         run, getattr(provider, "profile", None), execution_step,
                     )
+                    invocation_timeout.reschedule(asyncio.get_running_loop().time() + spec.total_timeout_ms / 1000)
+                    stream_started = time.monotonic()
                     stream = self.model_invocation.stream_prepared(
-                        provider, spec, prepared,
+                        ready_provider, spec, prepared,
                     ).__aiter__()
                     await stream_cleanup.enter_async_context(closing_provider_stream(stream))
                     while True:
                         try:
-                            async with asyncio.timeout(spec.activity_timeout_ms / 1000):
+                            async with asyncio.timeout(spec.stream_wait_seconds(saw_model_activity, time.monotonic()-stream_started)):
                                 event: ProviderEvent = await anext(stream)
                         except StopAsyncIteration:
                             break
                         except TimeoutError as error:
-                            code = "request_timeout" if not (visible_content or calls) else "stream_stalled"
+                            code = "stream_stalled" if saw_model_activity else "request_timeout"
                             raise ProviderError(code, "The provider stopped producing output.") from error
+                        if event.kind not in {"provider_diagnostic", "usage"}:
+                            saw_model_activity = True
                         if event.kind == "text_delta" and event.text:
+                            if not turn_content:
+                                log_event(self.logger or logging.getLogger(__name__), logging.INFO,
+                                          "model_first_output", "Model started producing text",
+                                          run_id=run_id, spec_id=spec.spec_id,
+                                          duration_ms=round((time.monotonic()-stream_started)*1000))
+                                if buffer_output:
+                                    await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": "generatingAnswer"})
                             previous_length = len(visible_content)
                             turn_content += event.text
                             visible_content += event.text
@@ -4277,6 +4401,21 @@ class ChatRunService:
                     "usage_present": bool(usage),
                 })
             except Exception as error:
+                if isinstance(error, TimeoutError):
+                    error = ProviderError("request_timeout", "The model invocation exceeded its total deadline.")
+                if isinstance(error, ProviderError) and error.code == "response_format_unsupported" \
+                        and run_id in self.rag_grounding.runs and spec.response_format != "text":
+                    self.execution_repository.finish_invocation(spec.spec_id, "failed", error.code)
+                    if not hasattr(self, "_rag_output_formats"):
+                        self._rag_output_formats = {}
+                    self._rag_output_formats[self._rag_format_key(execution_step)] = (
+                        "json_object" if spec.response_format == "json_schema" else "text"
+                    )
+                    await self._emit(run_id, "run.state_changed", {
+                        "status": "generating", "phase": "format_fallback",
+                        "error_code": error.code,
+                    })
+                    continue
                 if visible_content and not structured and not buffer_output:
                     self.repository.checkpoint_draft(run_id, attempt_id, visible_content)
                 if not structured and not buffer_output:
@@ -4501,6 +4640,12 @@ class ChatRunService:
                         budget_attempt_ids=budget_attempt_ids,
                     )
                 else:
+                    if call.name == 'document.export':
+                        artifact = self._validate_document_source(run_id, call.arguments['artifact_id']) if call.arguments.get('artifact_id') \
+                            else self.documents.create(run_id, self._document_export_content(run_id, call.arguments['content']), call.arguments['format'])
+                        self._bind_document_evidence(run_id, artifact['id'])
+                        self.rag_grounding.validate(run_id)
+                        call = ToolCall(call.provider_call_id, call.name, {'artifact_id': artifact['id'], 'path': call.arguments['path']})
                     if call.name == "skills.load" and self.skills.requires_rag("$" + call.arguments["name"]) \
                             and run_id not in self.rag_grounding.runs:
                         raise CoreDataError("rag_library_required", "该技能需要当前项目的资料库证据。")
@@ -4508,12 +4653,15 @@ class ChatRunService:
                         run_id=run_id, attempt_id=attempt_id,
                         sequence=tool_sequence, call=call,
                         budget_attempt_ids=budget_attempt_ids,
-                        local_executor=(lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in SKILL_TOOLS else None,
+                        local_executor=(lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in SKILL_TOOLS else (lambda call=call: self._document_tool(run_id, call, max_characters=max(256, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in DOCUMENT_TOOLS[:2] and 'path' not in call.arguments else None,
                         async_executor=(lambda call=call: self.rag_grounding.execute(run_id, call.name, call.arguments,
                             max_characters=max(256, self._skill_context_allowance(run_id, messages=messages,
                                 max_output_tokens=max_output_tokens)))) if call.name in {"rag.search", "rag.read"} else None,
                     )
                 tool_output = resolution.output
+                if call.name == 'document.export' and resolution.success:
+                    self.rag_grounding.validate(run_id)
+                    self.documents.record_publication(run_id, call.arguments['artifact_id'], json.loads(tool_output))
                 if call.name in {"web.search", "web.open"} and resolution.success:
                     evidence = evaluate_web_evidence(
                         self.repository.list_web_operations(run_id)
@@ -4558,6 +4706,160 @@ class ChatRunService:
                 self.repository.transition_model_run(run_id, {"waiting_tool"}, "generating")
                 await self._emit(run_id, "run.state_changed", {"status": "generating"})
             provider_round += 1
+
+    async def _application_document_export(self, run, attempt_id, content):
+        """Explicit document requests can use Host publication with text-only models."""
+        run_id = run['id']
+        if (run.get('rag_decision') or {}).get('task_type') != 'document_export':
+            return content
+        operations = self.tool_loop.repository.list_for_run(run_id)
+        if any(item['tool_name'] == 'document.export' and item['status'] == 'completed' for item in operations):
+            return content
+        conversation = self.repository.get_run_conversation(run_id)
+        current = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
+        request = current['content']
+        format = 'markdown' if re.search(r'markdown|\.md\b', request, re.I) else 'txt' if re.search(r'\btxt\b|\.txt\b', request, re.I) else 'docx'
+        evidence_state = self.rag_grounding.runs.get(run_id)
+        claims = (evidence_state or {}).get('validated_claims', [])
+        plain_content = self.rag_grounding.document_text(run_id, claims) if claims else content
+        roles = (run.get('rag_decision') or {}).get('attachment_roles', {})
+        templates = [attachment for attachment in current.get('attachments', []) if attachment['name'].lower().endswith('.docx') and roles.get(attachment['id']) == 'template']
+        filling = bool(re.search(r'填写|回填|填好', request))
+        if format == 'docx' and filling:
+            if len(templates) == 1:
+                _, original = self.document_attachments._original(templates[0])
+                template_id = self.documents.register_template(run_id, original.read_bytes(), templates[0]['name'])['id']
+            else:
+                paths = re.findall(r'(?:模板|读取|使用|填写|回填).{0,20}?[“"《]([^”"》\r\n]{1,200}\.docx)[”"》]', request, re.I)
+                if len(set(paths)) != 1 or templates:
+                    raise CoreDataError('document_template_required', '请上传并选择一份待填写模板，或明确指定项目内的 DOCX 模板路径。正文已保留。')
+                inspected = await self._application_document_operation(run, attempt_id,
+                    ToolCall('application-template-' + run_id, 'document.inspect_template', {'path': paths[0], 'limit': 1}))
+                template_id = inspected['template_id']
+            target = self.documents.select_section(run_id, template_id, request)
+            citations = [citation for claim in claims for citation in claim['evidence']]
+            citations = list({json.dumps(citation, sort_keys=True): citation for citation in citations}.values())
+            sections = [self.rag_grounding.document_claim(run_id, claim['text'], claim['evidence']) for claim in claims]
+            body = '\n\n'.join(text for text, _ in sections) if sections else content
+            metadata = [item for _, sources in sections for item in sources]
+            artifact = self.documents.fill(run_id, template_id, [{'target_id': target, 'text': body, 'evidence': citations}],
+                lambda text, sources: (body, metadata))
+        else:
+            artifact = self.documents.create(run_id, plain_content, format)
+        self._bind_document_evidence(run_id, artifact['id'])
+        suffix = {'docx': '.docx', 'markdown': '.md', 'txt': '.txt'}[format]
+        output_path = '适航草稿-' + run_id[:8] + suffix
+        destinations = re.findall(r'(?:保存为|导出为|输出到|保存到)\s*[“"《]([^”"》\r\n]{1,240}\.(?:docx|md|txt))[”"》]', request, re.I)
+        if len(set(destinations)) > 1:
+            raise CoreDataError('document_fields_invalid', '存在多个保存路径，请指定一个项目内的输出路径。')
+        if destinations:
+            output_path = destinations[0]
+            if not output_path.lower().endswith(suffix):
+                raise CoreDataError('document_fields_invalid', '保存路径的扩展名与输出格式不一致。')
+        call = ToolCall('application-document-' + artifact['id'], 'document.export', {'artifact_id': artifact['id'], 'path': output_path})
+        publication = await self._application_document_operation(run, attempt_id, call)
+        self.rag_grounding.validate(run_id)
+        self.documents.record_publication(run_id, artifact['id'], publication)
+        return content + '\n\n[打开文件](<' + output_path + '>)\n\n[打开所在目录](project-dir:.)'
+
+    async def _application_document_operation(self, run, attempt_id, call):
+        run_id = run['id']
+        operations = self.tool_loop.repository.list_for_run(run_id)
+        self.repository.transition_model_run(run_id, {'generating'}, 'waiting_tool')
+        await self._emit(run_id, 'run.state_changed', {'status': 'waiting_tool', 'phase': 'document_export' if call.name == 'document.export' else 'reading_template'})
+        operation, resolution = await self.tool_loop.request(run_id=run_id, attempt_id=attempt_id,
+            sequence=max((item['sequence'] for item in operations), default=0)+1, call=call)
+        if not resolution.success:
+            raise CoreDataError('document_publish_failed', '正文已生成，文档操作未完成。' + resolution.output, {'cause_code': resolution.error_code})
+        message = self.repository.record_tool_event(run_id, operation['id'], call.name, operation['status'], len(resolution.output.encode('utf-8')), None)
+        self.repository.transition_model_run(run_id, {'waiting_tool'}, 'generating')
+        await self._emit(run_id, 'run.tool_completed', {'operation_id': operation['id'], 'status': operation['status'], 'success': True, 'message': message})
+        return json.loads(resolution.output)
+
+    def _bind_document_evidence(self, run_id, artifact_id):
+        state = self.rag_grounding.runs.get(run_id)
+        if state:
+            artifact = self.documents.get(run_id, artifact_id)
+            manifest = {**artifact['manifest'], 'rag_generation': state['generation']}
+            with self.repository._connect() as connection:
+                connection.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=?', (json.dumps(manifest, ensure_ascii=False), artifact_id))
+
+    def _document_tool(self, run_id, call, max_characters=16000):
+        arguments = call.arguments
+        self.rag_grounding.validate(run_id)
+        if call.name == 'document.inspect_template':
+            template_id = arguments.get('template_id')
+            if not template_id:
+                conversation = self.repository.get_run_conversation(run_id)
+                attachment = next((attachment for message in conversation['messages'] for attachment in message.get('attachments', [])
+                    if attachment['id'] == arguments['attachment_id']), None)
+                if attachment is None:
+                    raise CoreDataError('document_template_forbidden', '请先将模板附件授权给本轮消息。')
+                run = self.repository.get_model_run(run_id)
+                if (run.get('rag_decision') or {}).get('attachment_roles', {}).get(attachment['id']) != 'template':
+                    raise CoreDataError('document_template_not_selected', '该附件当前作为参考资料，请在发送前将用途改为待填写模板。')
+                _, original = self.document_attachments._original(attachment)
+                template_id = self.documents.register_template(run_id, original.read_bytes(), attachment['name'])['template_id']
+            result = self.documents.inspect(run_id, template_id, arguments.get('offset', 0), arguments.get('limit', 100), max_characters)
+        else:
+            self._validate_document_source(run_id, arguments['template_id'])
+            result = self.documents.fill(run_id, arguments['template_id'], arguments['fields'],
+                lambda text, citations: self.rag_grounding.document_claim(run_id, text, citations))
+            self._bind_document_evidence(run_id, result['id'])
+            result = {key: value for key, value in result.items() if key != 'manifest'} | {
+                'missing': result['manifest']['missing'], 'version_issues': result['manifest']['version_issues'], 'review_issues': result['manifest']['review_issues'], 'review_status': 'pending'}
+        self.rag_grounding.validate(run_id)
+        return json.dumps(result, ensure_ascii=False)
+
+    def document_artifact(self, run_id, artifact_id):
+        if self.repository.get_model_run(run_id)['status'] not in {'generating', 'waiting_tool'}:
+            raise CoreDataError('document_publish_cancelled', '当前运行已经结束，请重新生成后保存文档。')
+        self.rag_grounding.validate(run_id)
+        artifact = self.documents.get(run_id, artifact_id)
+        generation = artifact['manifest'].get('rag_generation')
+        if generation is not None:
+            self.rag.assert_generation(artifact['project_id'], generation)
+        if artifact['kind'] == 'template':
+            raise CoreDataError('document_export_invalid', '请先填写模板再导出结果。')
+        self.documents.path_for(run_id, artifact_id)
+        return {key: value for key, value in artifact.items() if key != 'manifest'}
+
+    def _validate_document_source(self, run_id, artifact_id):
+        artifact = self.documents.get(run_id, artifact_id)
+        generation = artifact['manifest'].get('rag_generation')
+        if generation is not None:
+            self.rag.assert_generation(artifact['project_id'], generation)
+        return artifact
+
+    def import_project_template(self, operation_id, storage_key, expected_hash):
+        from agent.document_parser.protocol import plain_path
+        import hashlib
+        operation = self.tool_loop.repository.get(operation_id)
+        if operation_id not in self.tool_loop.waiters or operation['status'] not in {'validating', 'executing'} or operation['tool_name'] != 'document.inspect_template' or 'path' not in operation['arguments']:
+            raise CoreDataError('document_template_forbidden', '模板原件未获当前操作授权。')
+        if not re.fullmatch(r'input-[0-9a-f-]{36}\.docx', storage_key):
+            raise CoreDataError('document_template_invalid', '模板原件标识无效。')
+        path = plain_path(self.documents.root / storage_key)
+        if path.stat().st_nlink != 1 or path.stat().st_size > 20*1024*1024:
+            raise CoreDataError('document_template_invalid', '请选择完整的单个 DOCX 原件。')
+        payload = path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != expected_hash:
+            raise CoreDataError('document_template_changed', '项目模板在读取时发生变化。')
+        run_id = operation['run_id']
+        if self.repository.get_model_run(run_id)['status'] != 'waiting_tool':
+            raise CoreDataError('document_publish_cancelled', '当前运行已经结束。')
+        self.rag_grounding.validate(run_id)
+        template = self.documents.register_template(run_id, payload, operation['arguments']['path'])
+        arguments = operation['arguments']
+        return self.documents.inspect(run_id, template['id'], arguments.get('offset', 0), arguments.get('limit', 100),
+            max(256, min(16000, self._skill_context_allowance(run_id))))
+
+    def _document_export_content(self, run_id, content):
+        if run_id not in self.rag_grounding.runs:
+            return content
+        self.rag_grounding.finalize(run_id, content)
+        claims = self.rag_grounding.runs[run_id]['validated_claims']
+        return self.rag_grounding.document_text(run_id, claims)
 
     def _skill_context_allowance(self, run_id: str, *, messages: list[dict[str, Any]] | None = None, max_output_tokens: int | None = None) -> int:
         run = self.repository.get_model_run(run_id)
@@ -4607,6 +4909,13 @@ class ChatRunService:
         additional_artifact_ids: tuple[str, ...] = (),
         response_only: bool = False,
     ) -> InvocationSpec:
+        response_schema_json = None
+        if run["id"] in self.rag_grounding.runs and tool_transport == "none":
+            key = self._rag_format_key(step)
+            default_format = "json_schema" if step.get("protocol_id") in {"openai_chat", "ollama_chat"} else "text"
+            response_format = getattr(self, "_rag_output_formats", {}).get(key, default_format)
+            if response_format == "json_schema":
+                response_schema_json = json.dumps(self.rag_grounding.answer_schema(run["id"]), sort_keys=True)
         protocol_id = str(step.get("protocol_id") or "")
         route_id = str(step.get("invocation_route_id") or "legacy.primary")
         adapter_id = canonical_adapter_id(
@@ -4647,6 +4956,11 @@ class ChatRunService:
         connect_timeout_ms, activity_timeout_ms, total_timeout_ms = invocation_limits_for(
             tuple(sorted(signature)),
         )
+        first_output_timeout_ms = None
+        if step["provider_profile_id"].startswith("managed:"):
+            first_output_timeout_ms = 300_000
+            activity_timeout_ms = 60_000
+            total_timeout_ms = 900_000
         return InvocationSpec(
             spec_id=str(uuid.uuid4()), plan_id=plan["id"], step_id=step["id"],
             round_no=round_no, attempt_no=attempt_no, kind="model",
@@ -4669,13 +4983,118 @@ class ChatRunService:
             reasoning_effort=str(plan.get("reasoning_effort") or "none"),  # type: ignore[arg-type]
             max_output_tokens=max_output_tokens,
             response_format=response_format,  # type: ignore[arg-type]
+            response_schema_json=response_schema_json,
             run_id=run["id"],
             connect_timeout_ms=connect_timeout_ms,
             activity_timeout_ms=activity_timeout_ms,
+            first_output_timeout_ms=first_output_timeout_ms,
             total_timeout_ms=total_timeout_ms,
             authority_generation=int(plan.get("authority_generation") or 0),
             managed_runtime=self._managed_runtime_identity(step["provider_profile_id"]),
         )
+
+    def _rag_format_key(self, step):
+        return (step["provider_profile_id"], step["model_id"],
+                step.get("route_config_fingerprint"), self._managed_runtime_identity(step["provider_profile_id"]))
+
+    def _validate_rag_answer(self, run_id, step, attempt_number, content):
+        try:
+            return self.rag_grounding.finalize(run_id, content)
+        except CoreDataError as error:
+            if error.code in {"rag_answer_invalid", "rag_citation_invalid", "rag_quote_invalid"}:
+                try:
+                    self.execution_repository.save_artifact(
+                        step['id'], 'rag_validation', {
+                            'attempt_number': attempt_number, 'error_code': error.code,
+                            'details': error.details, 'answer_hash': stable_hash(content),
+                            'answer_characters': len(content),
+                        }, trust='system_observation', derived_from_untrusted=True,
+                        source_refs=list(self.rag_grounding.runs[run_id]['admitted']),
+                        select_as_output=False,
+                    )
+                except (CoreDataError, sqlite3.Error):
+                    logging.getLogger(__name__).warning('RAG validation diagnostic could not be saved for run %s', run_id)
+            raise
+
+    async def _finalize_rag_answer(self, run, attempt_id, provider, messages, content,
+                                   plan, step, attempt_number, *, force_final=False):
+        run_id = run["id"]
+        with self.repository._connect() as connection:
+            published = connection.execute("SELECT id,output_path,manifest_json FROM document_artifacts WHERE run_id=? AND status='published'", (run_id,)).fetchall()
+        if published and (run.get('rag_decision') or {}).get('task_type') == 'document_export':
+            self.rag_grounding.validate(run_id)
+            lines = ['文档已保存，专业内容待人工复核。']
+            for artifact in published:
+                manifest = json.loads(artifact['manifest_json'])
+                lines.append('[打开文件](<' + artifact['output_path'] + '>)')
+                lines.extend(manifest.get('missing', []))
+                lines.extend(manifest.get('review_issues', []))
+                lines.extend(manifest.get('version_issues', []))
+            lines.append('[打开所在目录](project-dir:.)')
+            return '\n\n'.join(lines)
+        repair_error = None
+        for pass_number in range(2):
+            await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": "validating_evidence"})
+            if not force_final:
+                try:
+                    return self._validate_rag_answer(run_id, step, attempt_number, content)
+                except CoreDataError as error:
+                    if error.code not in {"rag_answer_invalid", "rag_citation_invalid", "rag_quote_invalid"}:
+                        raise
+                    if repair_error is not None:
+                        raise CoreDataError(error.code, "回答自动纠正后仍未通过证据校验，检索证据已保留，可查看证据或重新生成。", error.details) from error
+                    repair_error = error
+            # A tool transport envelope is completed before the constrained answer.
+            # This call never executes tools or replays operations.
+            self.rag_grounding.validate(run_id)
+            phase = "repairing_answer" if repair_error else "finalizing_answer"
+            await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": phase})
+            final_messages = list(messages)
+            if repair_error:
+                final_messages.append({"role": "user", "content": json.dumps({
+                    "trust": "external_untrusted", "invalid_answer": content[:8000],
+                    "validation_error": repair_error.code,
+                    "validation_details": repair_error.details,
+                    "required_subject": self.rag_grounding.runs[run_id].get('subject'),
+                    "allowed_quotes": {key: list(options) for key, options in
+                                       self.rag_grounding.runs[run_id]['quote_options'].items()},
+                }, ensure_ascii=False)})
+            final_messages.append({"role": "system", "content": (
+                "仅生成适航资料问答约定的 claims JSON。不得调用工具。"
+                "从已提供证据的 quote_options 中选择 id 和 quote_id，应用会回填对应原文。"
+                "根据 validation_details 修复错误，摘录编号必须属于对应证据，不增加无依据的判断。"
+                "回答须覆盖原问题的明确主题，前言和目录不能作为技术要求的依据。"
+            )})
+            model_capabilities = (provider.profile.model_capabilities or {}).get(run["model_id"], {})
+            context_window = model_capabilities.get("context_length") or 8192
+            remaining = context_window - estimate_tokens(json.dumps(final_messages, ensure_ascii=False)) - 256
+            if remaining <= 0:
+                raise CoreDataError("rag_context_too_small", "上下文剩余容量不足以完成回答纠正，检索证据已保留。")
+            output_tokens = resolve_output_budget(
+                "final_response", model_limit=model_capabilities.get("max_output_tokens"),
+                protocol_limit=2048, context_window=context_window, remaining_context_tokens=remaining,
+            ).initial_tokens
+            with self.repository._connect() as connection:
+                round_no = connection.execute(
+                    "SELECT COALESCE(MAX(round_no),0) FROM invocation_specs WHERE step_id=? AND attempt_no=?",
+                    (step["id"], attempt_number),
+                ).fetchone()[0]
+            content = await self._generate_with_tools(
+                run, attempt_id, provider, final_messages, False, "text_only",
+                execution_plan=plan, execution_step=step, attempt_number=attempt_number,
+                initial_invocation_round=round_no, allowed_tools=(), max_output_tokens=output_tokens,
+                buffer_output=True, response_only=True,
+            )
+            force_final = False
+            if repair_error:
+                # The next validation is terminal. There is only one repair call.
+                try:
+                    return self._validate_rag_answer(run_id, step, attempt_number, content)
+                except CoreDataError as error:
+                    if error.code in {"rag_answer_invalid", "rag_citation_invalid", "rag_quote_invalid"}:
+                        raise CoreDataError(error.code, "回答自动纠正后仍未通过证据校验，检索证据已保留，可查看证据或重新生成。", error.details) from error
+                    raise
+        return self._validate_rag_answer(run_id, step, attempt_number, content)
 
     def _managed_runtime_identity(self, provider_id: str) -> tuple[tuple[str, str], ...]:
         if provider_id.startswith("managed:"):

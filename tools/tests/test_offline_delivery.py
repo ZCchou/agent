@@ -177,10 +177,10 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         protocol = (root / 'services/agent-core/src/agent/protocol.py').read_text(encoding='utf-8')
         storage = (root / 'services/agent-core/src/agent/storage.py').read_text(encoding='utf-8')
         bridge = (root / 'apps/agent-desktop/src-tauri/src/core_bridge.rs').read_text(encoding='utf-8')
-        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*21\b')
-        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*28\b')
-        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*21\b')
-        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*28\b')
+        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*22\b')
+        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*29\b')
+        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*22\b')
+        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*29\b')
         verifier = (TOOLS / 'verify-python-sidecar.ps1').read_text(encoding='utf-8')
         self.assertIn('$actual.schema_version -ne $expectedSchema', verifier)
         self.assertIn('$actual.protocol_version -ne $expectedProtocol', verifier)
@@ -372,7 +372,7 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         import time
         with tempfile.TemporaryDirectory(prefix='agent-owned-install-') as name:
             install = Path(name)
-            mutex = 'Local\\agent-offline-install-' + hashlib.sha256(str(install).lower().encode()).hexdigest().upper()
+            mutex = 'Local\\agent-offline-install-' + hashlib.sha256(str(install.resolve()).lower().encode()).hexdigest().upper()
             ready = self.root / 'mutex-ready.tmp'
             helper = self.root / 'mutex.ps1'
             helper.write_text('param($name,$ready)\n$m=New-Object Threading.Mutex($true,$name); [IO.File]::WriteAllText($ready,"ready"); Start-Sleep 30')

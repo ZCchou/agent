@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -25,6 +26,37 @@ class Engines:
         pass
 
 
+def test_explicit_subject_retrieval_excludes_preface_and_contents(tmp_path):
+    class MisleadingScores(Engines):
+        queries = []
+
+        async def rerank(self, model_id, query, texts):
+            self.queries.append(query)
+            return [0.99 if '译者' in text else 0.01 for text in texts]
+
+    async def exercise():
+        engine = MisleadingScores()
+        core = CoreRepository(tmp_path / 'agent.db')
+        service = RagService(core, engine)
+        project = core.create_project('测试', 'work')['id']
+        try:
+            library = (await service.handle('library.create', {'name': '测试', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await ready(service, library, content='译者的话\n本书介绍适航审定与航空工业。\n\n图8-1 发动机振动试验…………8-10\n图8-2 发动机试验…………8-11\n\n8.1 发动机舱内设备的试验条件。')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            result = await service.search(project, '随机抽取一条适航审定的关于发动机的内容')
+            assert [item['text'] for item in result['evidence']] == ['8.1 发动机舱内设备的试验条件。']
+            assert engine.queries == ['发动机']
+            preface = await service.search(project, '译者的话')
+            assert any(item['text'].startswith('译者的话') for item in preface['evidence'])
+            with pytest.raises(CoreDataError) as error:
+                await service.search(project, '关于液压泵的条款')
+            assert error.value.code == 'rag_no_evidence'
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
 async def ready(service, library, title='标准', content='25.1309 失效状态安全性要求'):
     result = await service.handle('document.paste', {'library_id': library, 'title': title, 'content': content})
     version_id = result['version']['id']
@@ -34,7 +66,8 @@ async def ready(service, library, title='标准', content='25.1309 失效状态�
 
 async def wait_job(service, result):
     job_id = result['job']['id']
-    for _ in range(100):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
         jobs = (await service.handle('job.list', {}))['jobs']
         job = next(item for item in jobs if item['id'] == job_id)
         if job['status'] not in {'queued', 'running'}:
@@ -714,6 +747,9 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         await ready(service, library, content=content)
         assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
         evidence = (await service.search(project, '失效', run_id='context-run'))['evidence'][0]
+        with service.repository.connect() as connection:
+            original = connection.execute('SELECT original_hash FROM rag_versions WHERE id=?', (evidence['version_id'],)).fetchone()[0]
+        assert evidence['original_hash'] == original
         read = service.read_evidence(project, evidence['id'])
         assert read['text'] == evidence['text']
         assert read['text_hash'] == evidence['text_hash']
@@ -732,6 +768,6 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         with closing(service.repository.connect()) as connection:
             versions = connection.execute('SELECT splitter_versions FROM rag_indexes').fetchone()[0]
         import json
-        assert json.loads(versions) == ['source-block-v3']
+        assert json.loads(versions) == ['source-block-v4']
         await service.close()
     asyncio.run(exercise())

@@ -3,6 +3,7 @@ import { useRef, type ClipboardEvent, type FormEvent, type KeyboardEvent, type R
 import { useTranslation } from "react-i18next";
 import type { AttachmentPreview, MessageAttachment, RejectedAttachment } from "../../types/domain";
 import { SkillPicker } from "../abilities/SkillPicker";
+import { defaultAttachmentPurpose } from './attachmentDraft';
 
 interface Props {
   value: string;
@@ -24,11 +25,14 @@ interface Props {
   onRemoveAttachment(id: string): void;
   onRemoveRejectedAttachment(id: string): void;
   webSearchControl?: ReactNode;
+  ragControl?: ReactNode;
+  attachmentPurposes?: Record<string, "template" | "reference">;
+  onAttachmentPurpose?(id: string, purpose: "template" | "reference"): void;
 }
 
 export function ChatComposer({
   value, disabled, sendDisabled, generating = false, stopping = false, onStop, referenceCount = 0, onChange, onSend, attachments, rejectedAttachments, previews, attachmentBusy,
-  attachmentError, onAttach, onPasteImages, onRemoveAttachment, onRemoveRejectedAttachment, webSearchControl,
+  attachmentError, onAttach, onPasteImages, onRemoveAttachment, onRemoveRejectedAttachment, webSearchControl, ragControl, attachmentPurposes, onAttachmentPurpose,
 }: Props) {
   const { t } = useTranslation("chat");
   const composing = useRef(false);
@@ -75,6 +79,12 @@ export function ChatComposer({
             ? `${attachment.model_width} × ${attachment.model_height} · ${formatBytes(attachment.model_byte_size ?? attachment.byte_size)}`
             : formatBytes(attachment.byte_size)}</small>
           {attachment.media_type === "image/gif" ? <small>{t("attachments.gifFirstFrame")}</small> : null}
+          {/\.docx$/i.test(attachment.name) && onAttachmentPurpose ? <select aria-label={t('attachments.purposeLabel', { name: attachment.name })}
+            disabled={disabled || generating} value={attachmentPurposes?.[attachment.id] ?? defaultAttachmentPurpose(attachment.name)}
+            onChange={(event) => onAttachmentPurpose(attachment.id, event.target.value as 'template' | 'reference')}>
+            <option value="reference">{t('attachments.referencePurpose')}</option>
+            <option value="template">{t('attachments.templatePurpose')}</option>
+          </select> : null}
         </span>
         <button type="button" aria-label={t("attachments.remove", { name: attachment.name })}
           disabled={generating} onClick={() => onRemoveAttachment(attachment.id)}><X size={13} /></button>
@@ -100,6 +110,7 @@ export function ChatComposer({
       <Paperclip size={19} />
     </button>
     {webSearchControl}
+    {ragControl}
     <SkillPicker disabled={disabled || generating} value={value} onChange={onChange} /></div>
     <textarea value={value} maxLength={20000} rows={1} placeholder={t("composer.placeholder")} disabled={disabled}
       onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}

@@ -28,6 +28,7 @@ from agent.rag.workspace_repository import WorkspaceRepository
 
 class RagRepository(WorkspaceRepository):
     def __init__(self, core_repository, recover_jobs=True):
+        self.core = core_repository
         self.database_path = Path(core_repository.database_path)
         self.data_dir = self.database_path.parent / 'rag'
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -329,7 +330,7 @@ class RagRepository(WorkspaceRepository):
             with closing(self.connect()) as own:
                 return self.checked_evidence(project_id, evidence_id, run_id, own)
         self._project(connection, project_id)
-        row = connection.execute('''SELECT e.payload,s.run_id FROM rag_evidence e
+        row = connection.execute('''SELECT e.payload,s.run_id,v.original_hash FROM rag_evidence e
             JOIN rag_searches s ON s.id=e.search_id
             JOIN rag_versions v ON v.id=e.version_id
             JOIN rag_bindings b ON b.library_id=e.library_id AND b.project_id=e.project_id
@@ -339,7 +340,11 @@ class RagRepository(WorkspaceRepository):
             (evidence_id, project_id)).fetchone()
         if row is None or (run_id is not None and row['run_id'] != run_id):
             raise CoreDataError('rag_evidence_invalid', 'The evidence is unavailable, withdrawn, or outside the authorized project and run.')
-        return json.loads(row['payload'])
+        payload = json.loads(row['payload'])
+        if payload.get('original_hash') not in (None, row['original_hash']):
+            raise CoreDataError('rag_evidence_invalid', 'The evidence original identity changed. Retrieve the source again.')
+        payload['original_hash'] = row['original_hash']
+        return payload
 
     def preview_evidence(self, project_id, evidence_id, offset=0, length=8000):
         if not isinstance(offset, int) or offset < 0 or not isinstance(length, int) or not 1 <= length <= 8000:

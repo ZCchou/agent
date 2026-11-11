@@ -77,6 +77,45 @@ def test_document_excerpt_keeps_source_offsets_and_signals_partial_reading():
     assert end < len(text)
 
 
+def test_document_excerpt_ranks_body_and_target_heading_above_locator_metadata():
+    import json
+    from agent.document_attachments import document_excerpt, document_excerpt_locator
+    def block(number, heading, text):
+        locator = {'kind': 'docx', 'block_id': f'block-{number}', 'paragraph': number, 'heading_path': heading}
+        return '[SOURCE ' + json.dumps(locator, ensure_ascii=False) + ']\n' + text + '\n'
+    text = block(1, ['振动试验', '索引'], '参见后文。')
+    text += block(2, ['温度试验', '试验目的'], '验证高温下的功能。')
+    text += block(3, ['振动试验', '试验目的'], '验证振动条件下的功能、耐久性与结构完整性。')
+    excerpt, start, end = document_excerpt(text, '填写振动试验的试验目的', 90)
+    assert '耐久性与结构完整性' in excerpt
+    assert excerpt == text[start:end]
+    assert document_excerpt_locator(text, start)['paragraph'] == 3
+    title = block(0, ['机载设备环境鉴定试验大纲模板'], '机载设备环境鉴定试验大纲模板')
+    excerpt, _, _ = document_excerpt(title + text,
+        '请依据当前项目资料库填写机载设备环境鉴定试验大纲模板中振动试验的试验目的，说明需要验证设备的能力', 90)
+    assert '耐久性与结构完整性' in excerpt
+
+
+def test_document_locator_retains_template_standard_version_from_body():
+    from agent.document_attachments import document_excerpt_locator
+    text = '[SOURCE {"block_id":"one"}]\n依据 RTCA DO-160G。\n'
+    text += '[SOURCE {"block_id":"two","heading_path":["振动试验"]}]\n验证性能。'
+    locator = document_excerpt_locator(text, text.index('验证性能'))
+    assert locator['referenced_standards'] == ['DO-160G']
+
+
+def test_document_excerpt_expands_matching_heading_into_section_body():
+    import json
+    from agent.document_attachments import document_excerpt
+    def block(number, body):
+        locator = {'block_id': str(number), 'heading_path': ['振动试验', '试验目的']}
+        return '[SOURCE ' + json.dumps(locator, ensure_ascii=False) + ']\n' + body + '\n'
+    text = block(1, '试验目的') + block(2, '设备性能与耐久性应满足要求。') + block(3, 'x' * 2000)
+    excerpt, start, end = document_excerpt(text, '填写振动试验的试验目的', 400)
+    assert '设备性能与耐久性应满足要求。' in excerpt
+    assert excerpt == text[start:end]
+
+
 def test_normal_chat_entry_extracts_document_before_model_dispatch(tmp_path, monkeypatch):
     from agent.runtime import ChatRunService
     from agent.context_engine.service import ContextEngineService
@@ -157,7 +196,7 @@ def test_schema26_upgrade_preserves_existing_attachment_records(tmp_path):
     assert stored['sha256'] == attachment['sha256']
     assert stored['storage_key'] == attachment['storage_key']
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 28
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 29
         assert "'document.source'" in connection.execute("SELECT sql FROM sqlite_master WHERE name='attachment_artifacts'").fetchone()[0]
 
 

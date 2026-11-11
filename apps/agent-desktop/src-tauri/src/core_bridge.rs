@@ -12,10 +12,10 @@ use crate::{
     logging::{events as log_events, AppLogger, LogLevel},
 };
 
-pub(crate) const PROTOCOL_VERSION: u64 = 21;
+pub(crate) const PROTOCOL_VERSION: u64 = 22;
 const EXPECTED_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const EXPECTED_SCHEMA_VERSION: u64 = 28;
-const EXPECTED_BUILD_ID: &str = "schema28-rag-workspace-v1";
+const EXPECTED_SCHEMA_VERSION: u64 = 29;
+const EXPECTED_BUILD_ID: &str = "schema29-rag-workflow-v1";
 const CORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // Automatic start preparation may make two bounded 30-second intent calls
 // before returning a run. Control RPCs must not inherit that longer wait.
@@ -556,9 +556,9 @@ mod tests {
         let manager = std::sync::Mutex::new(crate::core_process_manager::CoreProcessManager::new());
         manager.lock().unwrap().reset_process_state();
         let owner = manager.lock().unwrap().request_owner();
-        let response = json!({"v": 21, "id": "current", "type": "ping", "result": {
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 21,
-            "schema_version": 28, "build_id": "schema28-rag-workspace-v1"
+        let response = json!({"v": 22, "id": "current", "type": "ping", "result": {
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 22,
+            "schema_version": 29, "build_id": "schema29-rag-workflow-v1"
         }});
         assert!(super::finish_core_response(
             &manager,
@@ -607,8 +607,8 @@ mod tests {
     #[test]
     fn current_ipc_ping_rejects_each_incompatible_core_identity() {
         let current = json!({
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 21,
-            "schema_version": 28, "build_id": "schema28-rag-workspace-v1"
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 22,
+            "schema_version": 29, "build_id": "schema29-rag-workflow-v1"
         });
         for (field, wrong_value) in [
             ("core_version", json!("0.13.0")),
@@ -625,7 +625,7 @@ mod tests {
             manager.lock().unwrap().set_healthy(true);
             let mut identity = current.clone();
             identity[field] = wrong_value;
-            let response = json!({"v": 21, "id": "current", "type": "ping", "result": identity});
+            let response = json!({"v": 22, "id": "current", "type": "ping", "result": identity});
             assert!(
                 super::finish_core_response(
                     &manager,
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn validates_success_envelope() {
-        let response = json!({"v": 21, "id": "req-1", "type": "ping", "result": {"pid": 42}});
+        let response = json!({"v": 22, "id": "req-1", "type": "ping", "result": {"pid": 42}});
         assert_eq!(
             validate_response(&response, "req-1", "ping").unwrap()["pid"],
             42
@@ -658,8 +658,8 @@ mod tests {
     fn rejects_protocol_type_and_id_mismatches() {
         for response in [
             json!({"v": 1, "id": "req-1", "type": "ping", "result": {}}),
-            json!({"v": 21, "id": "wrong", "type": "ping", "result": {}}),
-            json!({"v": 21, "id": "req-1", "type": "other", "result": {}}),
+            json!({"v": 22, "id": "wrong", "type": "ping", "result": {}}),
+            json!({"v": 22, "id": "req-1", "type": "other", "result": {}}),
         ] {
             assert!(validate_response(&response, "req-1", "ping").is_err());
         }
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn surfaces_structured_core_error() {
-        let response = json!({"v": 21, "id": "req-1", "type": "ping",
+        let response = json!({"v": 22, "id": "req-1", "type": "ping",
             "error": {"code": "bad_request", "message": "Nope"}});
         assert!(validate_response(&response, "req-1", "ping")
             .unwrap_err()

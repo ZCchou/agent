@@ -9,6 +9,57 @@ from agent.providers import ProviderError, ProviderEvent
 from agent.storage import CoreRepository
 from test_context_compaction_lifecycle import seed, CheckpointProvider
 
+
+def test_schema_checkpoint_uses_short_sources_and_application_trust(tmp_path):
+    from agent.providers import ProviderProfile
+    class Provider:
+        profile = ProviderProfile('local', 'Local', 'openai-compatible', 'http://127.0.0.1:9000')
+        async def stream_events(self, model, messages, *, tools, options):
+            assert options.response_format == 'json_schema'
+            schema = options.response_schema
+            assert schema['properties']['items']['items']['properties']['source_ids']['items']['enum'][0] == 's1'
+            envelope = json.loads(messages[1]['content'])
+            source = envelope['sources'][0]
+            assert source['source_id'] == 's1'
+            yield ProviderEvent('text_delta', text=json.dumps({'items': [
+                {'category': 'constraints', 'text': '保留原始要求', 'source_ids': ['s1']}]}))
+    async def scenario():
+        repo = CoreRepository(tmp_path / 'schema-checkpoint.db')
+        result = await ContextEngineService(repo).compact_once(seed(repo), Provider(), context_window=8192, max_output_tokens=1024,
+            target=CompactionTarget('local', 'local-model', 'openai_chat', 8192, 1024))
+        assert result['content']['constraints'][0]['trust'] == 'user_authored'
+        assert result['content']['constraints'][0]['source_ids'] != ['s1']
+    asyncio.run(scenario())
+
+
+def test_checkpoint_diagnostics_identify_invalid_source_without_content():
+    from agent.context_engine.compaction import parse_checkpoint
+    with pytest.raises(ContextEngineError) as caught:
+        parse_checkpoint(json.dumps({'items': [{'category': 'goal', 'text': 'PRIVATE CONTENT', 'source_ids': ['unknown']}]}),
+                         {'real-source': 'user_authored'}, source_aliases={'s1': 'real-source'})
+    assert caught.value.details['validation_reason'] == 'invalid_source'
+    assert 'PRIVATE CONTENT' not in str(caught.value.details)
+
+
+def test_local_compaction_uses_local_first_output_and_total_timeouts(tmp_path, monkeypatch):
+    from agent.providers import ProviderProfile
+    import agent.context_engine.service as module
+    delays = []
+    real_timeout = asyncio.timeout
+    def capture_timeout(delay):
+        delays.append(delay)
+        return real_timeout(delay)
+    monkeypatch.setattr(module.asyncio, 'timeout', capture_timeout)
+    async def scenario():
+        repo = CoreRepository(tmp_path / 'local-timeouts.db')
+        provider = CheckpointProvider()
+        provider.profile = ProviderProfile('local', 'Local', 'openai-compatible', 'http://127.0.0.1:9000')
+        await ContextEngineService(repo).compact_once(seed(repo), provider, context_window=32768, max_output_tokens=512)
+        assert 899 < delays[0] <= 900
+        assert 299 < delays[1] <= 300
+        assert 60 in delays
+    asyncio.run(scenario())
+
 @pytest.mark.parametrize('window', [2048, 4096, 8192, 32768])
 @pytest.mark.parametrize('limit', [512, 4096, 8192, None])
 def test_complete_request_fits_window_and_model(window, limit):

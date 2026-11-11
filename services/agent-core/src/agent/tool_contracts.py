@@ -173,7 +173,7 @@ TOOL_DEFINITIONS: Final[list[dict[str, Any]]] = [
 
 TOOL_DEFINITIONS.append({"type": "function", "function": {
     "name": "terminal.run",
-    "description": "Run a finite PowerShell command on Windows with the current user's privileges. cwd is project-relative; shell code is not sandboxed. No interactive stdin, detached jobs or daemons. Run checks separately, inspect exit_code and output, and never claim unexecuted verification.",
+    "description": "Run a finite PowerShell command in a capability-free Windows AppContainer with no network access. cwd is project-relative and may use a temporary project drive. Access is limited by OS grants. No interactive stdin, detached jobs or daemons. Inspect exit_code and output before reporting results.",
     "parameters": {"type": "object", "properties": {
         "command": {"type": "string", "minLength": 1, "maxLength": 32768},
         "cwd": {"type": "string", "minLength": 1, "maxLength": 1024, "default": "."},
@@ -219,9 +219,11 @@ for _name, _description, _properties, _required in (
         "description": _description, "parameters": {"type": "object", "properties": _properties,
         "required": _required, "additionalProperties": False}}})
 
+from agent.document_contracts import DOCUMENT_DEFINITIONS, DOCUMENT_TOOLS, validate_document_call
+TOOL_DEFINITIONS.extend(DOCUMENT_DEFINITIONS)
 TOOL_NAMES: Final[set[str]] = {item["function"]["name"] for item in TOOL_DEFINITIONS}
 
-TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v3"
+TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v4"
 
 
 class ToolContractRegistry:
@@ -337,6 +339,8 @@ def validate_tool_call(call: ToolCall) -> ToolCall:
             offset, length = call.arguments.get("offset", 0), call.arguments.get("length", 16000)
             if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 64000:
                 raise CoreDataError("invalid_tool_call", "Skill resource range is invalid.")
+    elif call.name in DOCUMENT_TOOLS:
+        validate_document_call(call.name, call.arguments)
     elif call.name == "terminal.run":
         _known_keys(call.arguments, {"command", "cwd", "timeout_ms", "max_output_bytes"})
         command = call.arguments.get("command")

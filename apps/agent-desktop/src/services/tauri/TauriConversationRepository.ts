@@ -8,6 +8,9 @@ import type {
 import type { Conversation, ConversationFilter } from "../../types/domain";
 
 export class TauriConversationRepository implements ConversationRepository {
+  updateRag(conversationId: string, mode: "auto" | "required"): Promise<Conversation> {
+    return invoke('update_conversation_rag', { conversationId, mode });
+  }
   list(filter: ConversationFilter = {}): Promise<Conversation[]> {
     return invoke("list_conversations", {
       kind: filter.kind ?? null,

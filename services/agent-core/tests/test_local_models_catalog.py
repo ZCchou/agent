@@ -32,6 +32,21 @@ async def finish(service, response):
     raise AssertionError("job did not finish")
 
 
+@pytest.mark.parametrize('declared', [True, False])
+def test_existing_catalog_exposes_only_model_declared_context_limit(tmp_path, declared):
+    async def exercise():
+        service = service_at(tmp_path)
+        path = gguf_file(tmp_path / 'context.gguf', metadata_remove=() if declared else ('qwen3.context_length',))
+        await finish(service, await service.handle('model.import', {'path': str(path)}))
+        await service.close()
+        reopened = service_at(tmp_path)
+        model = (await reopened.handle('model.list', {}))['models'][0]
+        assert model['declared_context_length'] == (32768 if declared else None)
+        assert model['context_length'] == 8192
+        await reopened.close()
+    asyncio.run(exercise())
+
+
 def test_import_owned_copy_deduplicates_and_reopens_cold(tmp_path):
     async def exercise():
         service = service_at(tmp_path)
@@ -43,7 +58,7 @@ def test_import_owned_copy_deduplicates_and_reopens_cold(tmp_path):
         assert len(models) == 1
         model = models[0]
         assert model["provider_profile_id"] == "managed:" + model["id"]
-        assert model["context_length"] == 8192 and model["device"] == "cpu"
+        assert model["context_length"] == 8192 and model["device"] == "auto"
         assert model["status"] == "imported" and model["digest"] and model["template_digest"]
         assert service.provider_profiles() == {}
         with pytest.raises(CoreDataError) as error:
@@ -51,10 +66,12 @@ def test_import_owned_copy_deduplicates_and_reopens_cold(tmp_path):
         assert error.value.code == "model_not_loaded"
         assert (await finish(service, await service.handle("model.import", {"path": str(source)})))["status"] == "completed"
         assert len((await service.handle("model.list", {}))["models"]) == 1
+        await service.handle("model.configure", {"model_id": model["id"], "device": "cpu"})
         source.unlink()
         await service.close()
         reopened = service_at(tmp_path)
         assert (await reopened.handle("model.list", {}))["models"][0]["digest"] == model["digest"]
+        assert (await reopened.handle("model.list", {}))["models"][0]["device"] == "cpu"
         await reopened.close()
     asyncio.run(exercise())
 

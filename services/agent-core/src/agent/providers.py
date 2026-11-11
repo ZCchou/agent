@@ -79,6 +79,7 @@ class GenerationOptions:
     purpose: str = "chat"
     max_output_tokens: int | None = None
     response_format: str | None = None
+    response_schema: dict[str, Any] | None = None
     allowed_tools: tuple[str, ...] | None = None
     invocation_adapter_id: str | None = None
     capability_signature: tuple[str, ...] = ("text",)
@@ -532,6 +533,8 @@ class OllamaProvider(ModelProvider):
                 payload["options"] = {"num_predict": options.max_output_tokens}
             if options and options.response_format == "json_object":
                 payload["format"] = "json"
+            elif options and options.response_format == "json_schema" and options.response_schema:
+                payload["format"] = options.response_schema
             if tools:
                 payload["tools"] = _external_tool_definitions(options.allowed_tools if options else None)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=not self.profile.local_strict) as client:
@@ -831,6 +834,10 @@ class OpenAICompatibleProvider(ModelProvider):
                 payload["max_tokens"] = options.max_output_tokens
             if options and options.response_format == "json_object":
                 payload["response_format"] = {"type": "json_object"}
+            elif options and options.response_format == "json_schema" and options.response_schema:
+                payload["response_format"] = {"type": "json_schema", "json_schema": {
+                    "name": "conversation_checkpoint" if options.purpose == 'context_compaction' else "rag_answer", "strict": True, "schema": options.response_schema,
+                }}
             if options and options.invocation_adapter_id == "deepseek.openai_chat" \
                     and options.reasoning_effort is not None:
                 payload["thinking"] = {

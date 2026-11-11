@@ -25,6 +25,28 @@ async def _next_managed_event(stream):
         raise
 
 
+async def guarded_managed_events(stream):
+    async with closing_provider_stream(stream):
+        while True:
+            try:
+                event = await _next_managed_event(stream)
+            except StopAsyncIteration:
+                break
+            yield event
+
+
+class _LeasedLocalProvider(ModelProvider):
+    """Keep the captured profile while using an already-reserved model slot."""
+    def __init__(self, profile, inner):
+        super().__init__(profile)
+        self.inner = inner
+
+    def stream_events(self, model_id, messages, *, tools, options=None):
+        return guarded_managed_events(
+            self.inner.stream_events(model_id, messages, tools=tools, options=options).__aiter__(),
+        )
+
+
 class ManagedLocalProvider(ModelProvider):
     def __init__(self, profile: ProviderProfile, inner: ModelProvider, models):
         super().__init__(profile)
@@ -37,6 +59,11 @@ class ManagedLocalProvider(ModelProvider):
             if (current.base_url, current.api_key) != (self.profile.base_url, self.profile.api_key):
                 raise ProviderError("managed_session_changed", "本地模型会话已变化，请重新提交当前请求。")
             yield self.inner
+
+    @asynccontextmanager
+    async def request_session(self):
+        async with self._session() as inner:
+            yield _LeasedLocalProvider(self.profile, inner)
 
     async def list_models(self):
         async with self._session() as provider:
@@ -60,12 +87,9 @@ class ManagedLocalProvider(ModelProvider):
 
     async def stream_events(self, model_id, messages, *, tools, options=None):
         async with self._session() as provider:
-            async with closing_provider_stream(
+            events = guarded_managed_events(
                 provider.stream_events(model_id, messages, tools=tools, options=options).__aiter__(),
-            ) as stream:
-                while True:
-                    try:
-                        event = await _next_managed_event(stream)
-                    except StopAsyncIteration:
-                        break
+            )
+            async with closing_provider_stream(events) as stream:
+                async for event in stream:
                     yield event

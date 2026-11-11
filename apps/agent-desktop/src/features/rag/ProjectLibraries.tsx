@@ -128,9 +128,11 @@ export function BindProjectDialog({
 export function ProjectLibraries({
   projectId,
   compact = false,
+  ragMode = 'auto',
 }: {
   projectId: string;
   compact?: boolean;
+  ragMode?: 'auto' | 'required';
 }) {
   const { setCurrentPage } = useApp();
   const [all, setAll] = useState<RagLibrary[]>([]);
@@ -220,7 +222,7 @@ export function ProjectLibraries({
           ? "更新需要处理 · 使用上一就绪资料"
           : updating
           ? `资料正在更新 · ${bindings.length} 个资料库`
-          : `资料已启用 · ${bindings.length} 个资料库`;
+          : `${bindings.length} 个资料库 · ${ragMode === 'required' ? '强制 RAG' : '自动分流'}`;
   const dialog = open && (
     <WorkspaceDialog
       title="本项目使用的资料库"
@@ -228,7 +230,7 @@ export function ProjectLibraries({
         if (!busy) setOpen(false);
       }}
     >
-      <p>可同时启用多个资料库。就绪资料更新后自动用于后续问答。</p>
+      <p>可同时绑定多个资料库，并自动采用后续就绪索引。检索由当前对话策略决定。</p>
       {error && <p role="alert">{error}</p>}
       {all.length ? (
         all.map((library) => (

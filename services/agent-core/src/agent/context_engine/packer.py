@@ -27,6 +27,11 @@ def _message_cost(message: dict[str, Any]) -> int:
     return int(message.get("_estimated_tokens") or estimate_tokens(message.get("content", "")))
 
 
+def _wire_cost(message: dict[str, Any]) -> int:
+    rendered = {"role": message["role"], "content": message.get("_model_content", message["content"])}
+    return max(_message_cost(message), estimate_tokens(rendered)) + 1
+
+
 def pack_context(
     *, system_message: str, pinned_knowledge: list[dict[str, Any]],
     checkpoint: dict[str, Any] | None, history_turns: list[Any],
@@ -37,6 +42,8 @@ def pack_context(
     global_instruction: dict[str, Any] | None = None,
     include_global_instruction: bool = True,
     rag_evidence: list[dict[str, Any]] | None = None,
+    allow_history_omission: bool = False,
+    protected_history_ids: set[str] | frozenset[str] | None = None,
 ) -> PackedContext:
     stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_message}]
     dynamic_messages: list[dict[str, Any]] = []
@@ -109,18 +116,26 @@ def pack_context(
             "pinned_context_too_large", "Pinned context leaves no room for the current request.",
         )
 
-    used = stable_cost + current_cost
+    used = max(stable_cost + current_cost, estimate_tokens(stable_messages + [{
+        "role": "user", "content": current_message.get("_model_content", current_message["content"]),
+    }])) + 1
+    protected_history_ids = protected_history_ids or set()
+    protected_cost = sum(sum(_wire_cost(message) for message in turn.messages)
+                         for turn in history_turns
+                         if any(message['id'] in protected_history_ids for message in turn.messages))
+    if used + protected_cost > hard_limit:
+        raise ContextEngineError('context_compaction_required', 'Required history must be compacted before this request can run.')
     if rag_evidence:
-        from agent.rag.grounding import ANSWER_INSTRUCTION
+        from agent.rag.grounding import ANSWER_INSTRUCTION, evidence_for_model
         stable_messages[0]["content"] += "\n" + ANSWER_INSTRUCTION
         instruction_cost = estimate_tokens(ANSWER_INSTRUCTION)
         stable_cost += instruction_cost
         used += instruction_cost
-        evidence_limit = min(6000, int(input_target * 0.30), max(0, hard_limit - used))
+        evidence_limit = min(6000, int(hard_limit * 0.45), max(0, hard_limit - used - protected_cost - 128))
         evidence_used = 0
         for source in rag_evidence:
-            rendered = json.dumps({"trust": "external_untrusted", "evidence": source}, ensure_ascii=False)
-            cost = estimate_tokens(rendered)
+            rendered = json.dumps({"trust": "external_untrusted", "evidence": evidence_for_model(source)}, ensure_ascii=False)
+            cost = estimate_tokens({"role": "user", "content": rendered}) + 1
             included = evidence_used + cost <= evidence_limit
             items.append(ContextItem(
                 SourceRef("rag_chunk", source["id"], TrustKind.EXTERNAL_UNTRUSTED,
@@ -135,16 +150,19 @@ def pack_context(
                 used += cost
     selected_turns: list[Any] = []
     excluded_turns: list[Any] = []
-    for turn in reversed(history_turns):
+    ordered_turns = sorted(reversed(history_turns),
+                           key=lambda turn: not any(message['id'] in protected_history_ids for message in turn.messages))
+    for turn in ordered_turns:
         if any(message["id"] == current_message["id"] for message in turn.messages):
             continue
-        cost = sum(_message_cost(message) for message in turn.messages)
-        if used + cost <= input_target:
+        cost = sum(_wire_cost(message) for message in turn.messages)
+        if used + cost <= hard_limit:
             selected_turns.append(turn)
             used += cost
         else:
             excluded_turns.append(turn)
-    selected_turns.reverse()
+    selected_ids = {message['id'] for turn in selected_turns for message in turn.messages}
+    selected_turns = [turn for turn in history_turns if any(message['id'] in selected_ids for message in turn.messages)]
     for turn in selected_turns:
         for message in turn.messages:
             dynamic_messages.append({"role": message["role"], "content": message.get("_model_content", message["content"])})
@@ -172,7 +190,8 @@ def pack_context(
                 False, exclusion_reason="token_budget",
             ))
 
-    if excluded_turns:
+    excluded_ids = {message['id'] for turn in excluded_turns for message in turn.messages}
+    if excluded_turns and (not allow_history_omission or excluded_ids & protected_history_ids):
         raise ContextEngineError(
             "context_compaction_required",
             "Older history must be compacted before this request can run.",
@@ -184,8 +203,8 @@ def pack_context(
             f'<user-confirmed-data source="project-knowledge:{knowledge["id"]}">\n'
             f'{knowledge["title"]}: {knowledge["content"]}\n</user-confirmed-data>'
         )
-        cost = estimate_tokens(rendered)
-        included = used + cost <= input_target
+        cost = estimate_tokens({"role": "user", "content": rendered}) + 1
+        included = used + cost <= hard_limit
         items.append(ContextItem(
             SourceRef("project_knowledge", knowledge["id"], TrustKind.USER_CONFIRMED_PROJECT_DATA,
                       source_hash=hashlib.sha256(knowledge["content"].encode("utf-8")).hexdigest(),
@@ -206,8 +225,8 @@ def pack_context(
             + json.dumps(task_state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             + "\n</system-observation>"
         )
-        cost = estimate_tokens(rendered_state)
-        included = used + cost <= input_target
+        cost = estimate_tokens({"role": "system", "content": rendered_state}) + 1
+        included = used + cost <= hard_limit
         items.append(ContextItem(
             SourceRef("task_state", None, TrustKind.SYSTEM_OBSERVATION),
             ContextSection.TASK_STATE, Representation.METADATA, cost, included,
@@ -244,11 +263,16 @@ def pack_context(
                 "source_message_id": attachment.get("source_message_id") or attachment.get("message_id"),
                 "artifact_id": artifact.get("artifact_id"),
                 "artifact_hash": artifact.get("sha256") or attachment.get("sha256"),
+                "document_locator": attachment.get("document_locator"),
                 "receiving_route": attachment_item.get("receiving_route"),
                 "effective_attachment_ids": [value["attachment"]["id"] for value in current_message.get("_attachment_items", [])]},
         ))
 
     messages = stable_messages + dynamic_messages
+    serialized_tokens = estimate_tokens(messages)
+    if serialized_tokens > hard_limit:
+        raise ContextEngineError('current_input_too_large', 'The serialized context exceeds the available input budget.')
+    used = max(used, serialized_tokens)
     hash_scope = serialization_identity or {}
     stable_hash = _hash({"serialization": hash_scope, "messages": stable_messages})
     dynamic_hash = _hash({"serialization": hash_scope, "messages": dynamic_messages})
@@ -267,4 +291,6 @@ def pack_context(
         global_instruction_revision=int((global_instruction or {}).get("revision") or 0),
         global_instruction_hash=(global_instruction or {}).get("content_hash"),
         compression_applied=compression_applied,
+        input_hard_limit=hard_limit,
+        history_omission_allowed=allow_history_omission,
     )

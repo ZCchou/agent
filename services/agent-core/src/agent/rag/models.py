@@ -503,7 +503,28 @@ class ModelStore:
             force = self._loaded_models.get(device) != (worker, identity) or worker.process is None or worker.process.returncode is not None
             try:
                 path = await asyncio.to_thread(self._verified_path, record, root, force)
-                result = await worker.request(action, {"path": str(path), "profile": record["profile"], "backend": record["backend"], "device": device, "digest": record["digest"], **params})
+                request_params = {"path": str(path), "profile": record["profile"], "backend": record["backend"],
+                                  "device": device, "digest": record["digest"], **params}
+                if action == 'probe':
+                    result = await worker.request(action, request_params)
+                else:
+                    texts = params['texts']
+                    batch_size = 2 if record['backend'] == 'onnx' else max(1, len(texts))
+                    result = []
+                    offset = 0
+                    while offset < len(texts):
+                        batch = texts[offset:offset + batch_size]
+                        try:
+                            batch_result = await worker.request(action, {**request_params, 'texts': batch})
+                        except CoreDataError as exc:
+                            if exc.code != 'rag_resource_exhausted' or batch_size == 1:
+                                raise
+                            batch_size = 1
+                            continue
+                        if not isinstance(batch_result, list) or len(batch_result) != len(batch):
+                            raise CoreDataError('rag_model_error', 'Inference returned an invalid batch size')
+                        result.extend(batch_result)
+                        offset += len(batch)
                 self._loaded_models[device] = (worker, identity)
                 return result
             except asyncio.CancelledError:

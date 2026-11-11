@@ -410,7 +410,7 @@ def test_v14_schema_creates_new_conversations_in_automatic_mode(tmp_path) -> Non
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )}
     assert mode == "automatic"
-    assert version == 28
+    assert version == 29
     assert {"execution_plans", "execution_steps", "execution_artifacts"}.issubset(tables)
 
 

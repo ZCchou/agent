@@ -5,6 +5,45 @@ from typing import Any
 
 
 REASONS = {
+    'rag_library_required': '当前任务需要项目资料，请在项目中启用资料库',
+    'attachment_purpose_invalid': '附件用途与本轮选择不一致，请重新选择用途',
+    'document_template_required': '请上传待填写的 DOCX 模板或明确指定项目内模板路径',
+    'document_template_not_selected': '请将模板附件的用途改为待填写模板',
+    'document_template_forbidden': '模板未获本轮读取授权，请重新选择模板',
+    'document_template_invalid': '模板格式或原件无效，请选择完整的 DOCX 文件',
+    'document_template_changed': '模板在处理中发生变化，请重新读取',
+    'document_target_ambiguous': '无法确定唯一填写位置，请补充章节和问题名称',
+    'document_fields_invalid': '模板填写位置或内容未通过检查',
+    'document_context_too_small': '上下文剩余容量不足以读取模板位置',
+    'document_project_required': '文档输出需要关联项目并授权保存目录',
+    'document_export_invalid': '文档导出内容或格式无效',
+    'document_size_exceeded': '文档超过输出大小限制',
+    'document_disk_full': '文档存储空间不足，请释放空间后重试',
+    'document_operation_failed': '文档处理失败，请检查模板原件和本地存储状态',
+    'document_artifact_forbidden': '文档产物不属于当前运行',
+    'document_artifact_invalid': '文档产物标识无效',
+    'document_artifact_changed': '文档产物内容发生变化，请重新生成',
+    'document_publish_cancelled': '本次文档操作已停止',
+    'document_publish_failed': '正文已保留，文档操作尚未完成，请查看工具结果并检查项目目录授权',
+    'document_publish_unverified': '文件保存结果尚未通过校验',
+    'terminal_isolation_unavailable': '离线终端隔离不可用，请查看诊断或使用内置文件与文档工具',
+    "rag_document_unavailable": "文档原件不可用或路径校验失败，请重新添加附件或导入资料",
+    "attachment_changed": "附件原件不可用或完整性校验失败，请重新添加附件",
+    "rag_resource_exhausted": "辅助检索模型内存不足，请释放内存或调整辅助模型设备后重试",
+    "rag_model_error": "辅助检索模型运行失败，请检查模型状态",
+    "rag_answer_invalid": "回答结构不符合要求，检索证据已保留",
+    "rag_citation_invalid": "回答引用了本轮不可用的证据",
+    "rag_quote_invalid": "引用摘录与资料原文不一致",
+    "rag_evidence_missing": "当前资料中未找到可用证据",
+    "rag_context_integrity_invalid": "资料上下文完整性校验失败",
+    "rag_context_too_small": "当前上下文容量不足以容纳检索证据",
+    "rag_generation_changed": "资料范围已经变化，需要重新检索",
+    "rag_evidence_invalid": "资料证据已失效，需要重新检索",
+    "rag_local_model_required": "适航资料问答需要使用本地模型",
+    "rag_no_index": "资料库尚无可用索引，请先完成资料处理",
+    "rag_no_evidence": "当前资料中未找到可用证据",
+    "model_not_loaded": "本地模型尚未就绪，请重试加载",
+    "runtime_load_timeout": "本地模型加载超时，请检查设备及模型配置",
     "model_vision_unsupported": "模型服务明确表示当前模型不支持图片输入",
     "image_format_unsupported": "模型服务不接受本次图片格式",
     "image_payload_too_large": "本次图片数据超过模型服务的大小限制",
@@ -62,11 +101,13 @@ def safe_code(error: BaseException) -> str:
 
 def recovery_allowed(error: BaseException, *, partial: str, operations: list[dict[str, Any]]) -> bool:
     code = getattr(error, "code", "internal_error")
+    if code.startswith('document_') or code in {'terminal_isolation_unavailable', 'rag_library_required', 'attachment_purpose_invalid'}:
+        return False
     if code in {
         "execution_plan_stale", "invocation_route_stale", "invocation_spec_stale",
         "invocation_spec_invalid", "invocation_protocol_mismatch", "context_generation_stale",
         "authentication_failed", "quota_exhausted", "rate_limited", "model_not_found",
-        "provider_context_limit_exceeded", "resource_exhausted",
+        "provider_context_limit_exceeded", "resource_exhausted", "rag_resource_exhausted",
     }:
         return False
     if code in {"connection_reset", "request_timeout", "stream_stalled", "network_unavailable", "provider_unavailable"}:

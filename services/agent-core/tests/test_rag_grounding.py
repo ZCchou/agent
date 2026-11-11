@@ -202,6 +202,91 @@ def test_rag_requires_admitted_exact_quotes_and_renders_source_link():
         g.finalize("run-1", forged)
 
 
+def test_quote_selection_renders_application_owned_original():
+    g = grounding()
+    prepare(g)
+    source = g.evidence('run-1')[0]
+    option = source['quote_options'][0]
+    assert option['text'] == '申请人应提供试验报告。除另有规定外，应保存记录。'
+    g.admit('run-1', ['evidence-1'])
+    answer = {'claims': [{'text': '应提供报告并保存记录', 'evidence': [
+        {'id': 'evidence-1', 'quote_id': option['quote_id']}]}]}
+    assert '> 申请人应提供试验报告。除另有规定外，应保存记录。' in g.finalize('run-1', json.dumps(answer))
+    answer['claims'][0]['evidence'][0]['quote'] = '无需提供报告'
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('run-1', json.dumps(answer))
+    assert error.value.code == 'rag_quote_invalid'
+
+
+def test_quote_selection_rejects_forgery_and_excluded_sources():
+    g = grounding()
+    prepare(g)
+    g.admit('run-1', ['evidence-1'])
+    citation = {'id': 'evidence-1', 'quote_id': 'forged'}
+    answer = {'claims': [{'text': '判断', 'evidence': [citation]}]}
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('run-1', json.dumps(answer))
+    assert error.value.code == 'rag_quote_invalid'
+    assert error.value.details['quote_issue'] == 'unknown_quote_id'
+    assert error.value.details['allowed_quote_ids']
+    citation['id'] = 'excluded'
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('run-1', json.dumps(answer))
+    assert error.value.code == 'rag_citation_invalid'
+
+
+def test_quote_options_keep_crlf_and_long_source_content_exact():
+    from agent.rag.grounding import quote_options
+    text = '条件不得省略。\r\n' + '试验条件' * 250 + '\r\n例外需要批准。'
+    options = quote_options(text)
+    assert ''.join(item['text'] for item in options) == text
+    assert all(0 < len(item['text']) <= 400 for item in options)
+    assert len({item['quote_id'] for item in options}) == len(options)
+
+
+def test_context_sends_source_once_with_selectable_quote_ids():
+    from agent.context_engine.domain import RetrievalConfidence
+    from agent.context_engine.packer import pack_context
+    g = grounding()
+    prepare(g)
+    packed = pack_context(system_message='safe', pinned_knowledge=[], checkpoint=None,
+        history_turns=[], retrieved=[], retrieval_confidence=RetrievalConfidence.NONE,
+        task_state={}, current_message={'id': 'u', 'content': '问题'}, context_generation=0,
+        context_window=4000, input_target=2000, hard_limit=3000, output_reserve=1000,
+        rag_evidence=g.evidence('run-1'))
+    record = next(json.loads(m['content'])['evidence'] for m in packed.messages
+                  if 'quote_options' in m.get('content', '') and m['role'] == 'user')
+    assert 'text' not in record
+    assert record['quote_options'][0]['text'] == '申请人应提供试验报告。除另有规定外，应保存记录。'
+
+
+def test_exact_quote_from_preface_cannot_answer_explicit_technical_subject():
+    class PrefaceService(EvidenceService):
+        async def search(self, *args, **kwargs):
+            return {'evidence': [{**evidence(), 'text': '译者的话\n本书介绍适航审定。'}], 'generation': 4}
+    from agent.rag.grounding import RagGrounding
+    g = RagGrounding(PrefaceService())
+    asyncio.run(g.prepare({'id': 'r', 'user_message_id': 'u'}, {
+        'project_id': 'project-1', 'messages': [{'id': 'u', 'content': '关于发动机的内容'}]}))
+    g.admit('r', ['evidence-1'])
+    option = g.evidence('r')[0]['quote_options'][0]
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('r', json.dumps({'claims': [{'text': '发动机相关内容', 'evidence': [
+            {'id': 'evidence-1', 'quote_id': option['quote_id']}]}]}))
+    assert error.value.code == 'rag_answer_invalid'
+    assert error.value.details['format_issue'] == 'non_substantive_source'
+
+
+def test_model_context_omits_internal_storage_identifiers():
+    from agent.rag.grounding import evidence_for_model, evidence_with_quotes
+    source = {**evidence(), 'run_id': 'internal-run', 'search_id': 'internal-search', 'index_id': 'internal-index'}
+    context = evidence_for_model(evidence_with_quotes(source))
+    assert not {'run_id', 'search_id', 'index_id', 'text_hash', 'version_id', 'library_id'} & context.keys()
+    assert context['id'] == 'evidence-1'
+    assert context['revision'] == 'R1'
+    assert context['locator'] == '第1页'
+
+
 def test_rag_rejects_unknown_ids_unstructured_and_stale_generation():
     g = grounding()
     prepare(g)
@@ -268,7 +353,7 @@ def test_core_migrates_rag_and_management_protocol(tmp_path):
     async def scenario():
         repository = CoreRepository(tmp_path / "agent.db")
         with repository._connect() as connection:
-            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 28
+            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 29
         async def sink(event):
             pass
         service = ChatRunService(repository, sink)
@@ -402,5 +487,13 @@ def test_parent_read_context_is_admitted_only_after_hash_validation(valid_hash):
     with pytest.raises(CoreDataError) as error:
         g.finalize('run-1', answer)
     assert error.value.code == 'rag_quote_invalid'
-    asyncio.run(g.execute('run-1', 'rag.read', {'evidence_id': 'evidence-1'}, 12000))
+    read_result = json.loads(asyncio.run(g.execute('run-1', 'rag.read', {'evidence_id': 'evidence-1'}, 12000)))
     assert parent_quote in g.finalize('run-1', answer)
+    option = next(item for item in read_result['quote_options'] if parent_quote in item['text'])
+    selected = json.dumps({'claims': [{'text': '需要保留例外条件', 'evidence': [
+        {'id': 'evidence-1', 'quote_id': option['quote_id']}]}]})
+    assert parent_quote in g.finalize('run-1', selected)
+    g.admit('run-1', ['evidence-1'])
+    with pytest.raises(CoreDataError) as error:
+        g.finalize('run-1', selected)
+    assert error.value.code == 'rag_quote_invalid'

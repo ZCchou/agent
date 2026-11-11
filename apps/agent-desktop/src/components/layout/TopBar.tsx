@@ -164,7 +164,7 @@ export function TopBar() {
       </div>
 
       <div className="top-bar__actions">
-        {currentPage === "chat" && (activeConversation?.project_id || (draft.kind === "project_work" && draft.projectId)) ? <ProjectLibraries key={activeConversation?.project_id || draft.projectId} projectId={(activeConversation?.project_id || draft.projectId)!} compact /> : null}
+        {currentPage === "chat" && (activeConversation?.project_id || (draft.kind === "project_work" && draft.projectId)) ? <ProjectLibraries key={activeConversation?.project_id || draft.projectId} projectId={(activeConversation?.project_id || draft.projectId)!} compact ragMode={activeConversation ? activeConversation.rag_mode ?? 'auto' : draft.ragMode ?? 'auto'} /> : null}
         {action.error || loadError || scopeLoadError ? <span className="top-bar__error" role="alert">{action.error ?? t("buttonAudit.actionFailed")}
           {loadError || scopeLoadError ? <button disabled={action.busy} onClick={() => setLoadRevision(value => value + 1)}>{t("actions.retry")}</button> : null}
         </span> : null}

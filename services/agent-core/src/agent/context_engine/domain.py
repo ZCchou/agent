@@ -6,10 +6,11 @@ from typing import Any, Protocol
 
 
 class ContextEngineError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,10 @@ class PackedContext:
     global_instruction_revision: int = 0
     global_instruction_hash: str | None = None
     compression_applied: bool = False
+    input_hard_limit: int | None = None
+    body_input_limit: int | None = None
+    request_overhead_tokens: int = 0
+    history_omission_allowed: bool = False
 
 
 class ContextStore(Protocol):

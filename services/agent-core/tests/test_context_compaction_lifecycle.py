@@ -21,6 +21,32 @@ def seed(repository):
     )
 
 
+def test_background_compaction_failure_does_not_block_new_request(tmp_path):
+    async def scenario():
+        repo = CoreRepository(tmp_path / 'background-failure.db')
+        async def sink(event):
+            pass
+        service = ChatRunService(repo, sink)
+        previous = seed(repo)
+        with repo._connect() as connection:
+            connection.execute("UPDATE model_runs SET status='completed' WHERE id=?", (previous['id'],))
+        store = service.context.context_repository
+        store.begin_compaction(conversation_id=previous['conversation_id'], run_id=previous['id'],
+                               context_generation=store.context_generation(previous['conversation_id']),
+                               source_hash='fixture', idempotency_key='fixture')
+        store.pause_compaction(previous['conversation_id'], code='context_compaction_unreliable')
+        try:
+            status = service.compaction_status(previous['conversation_id'])
+            assert status and status['background'] and not status['blocks_send']
+            started = await service.start({'conversation_id': previous['conversation_id'], 'content': 'A new question',
+                'idempotency_key': 'new-question', 'provider_profile_id': 'builtin-demo', 'model_id': 'demo'})
+            await service.run_tasks[started['run']['id']]
+            assert repo.get_model_run(started['run']['id'])['status'] == 'completed'
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
 class CheckpointProvider:
     def __init__(self, errors=()):
         self.errors = list(errors)
@@ -42,6 +68,53 @@ class CheckpointProvider:
         yield ProviderEvent("text_delta", text=json.dumps(payload))
         if getattr(self, "usage", None):
             yield ProviderEvent("usage", usage=self.usage)
+
+
+@pytest.mark.parametrize('local,stalled,expected_calls', [(True, False, 3), (False, False, 1), (True, True, 2)])
+def test_local_compaction_continues_while_history_advances(tmp_path, monkeypatch, local, stalled, expected_calls):
+    from dataclasses import replace
+    async def scenario():
+        repo = CoreRepository(tmp_path / 'local-continuation.db')
+        events = []
+        async def sink(event):
+            events.append(event)
+        service = ChatRunService(repo, sink)
+        run = seed(repo)
+        run = repo.transition_model_run(run['id'], {'queued'}, 'building_context')
+        profile = replace(service.profiles['builtin-demo'], kind='openai-compatible',
+                          base_url='http://127.0.0.1:9000' if local else 'https://example.com')
+        calls = []
+        assembled = object()
+        async def assemble(*args, **kwargs):
+            if len(calls) < 3:
+                raise ContextEngineError('context_compaction_required', 'required')
+            return assembled
+        async def compact(*args, **kwargs):
+            calls.append(True)
+            with repo._connect() as connection:
+                connection.execute('UPDATE model_runs SET automatic_compaction_used=1 WHERE id=?', (run['id'],))
+            return {'id': str(len(calls)), 'through_sequence': 1 if stalled else len(calls), 'through_offset': None}
+        monkeypatch.setattr(service, '_assemble_authorized_context', assemble)
+        monkeypatch.setattr(service.context, 'compact_once', compact)
+        monkeypatch.setattr(service.context, 'validate_assembly', lambda *args: None)
+        monkeypatch.setattr(service.context, 'persist_snapshot', lambda *args: None)
+        before = repo.get_conversation(run['conversation_id'])['messages']
+        try:
+            result = await service._prepare_context(run, profile, object(), round_no=0)
+            assert len(calls) == expected_calls
+            assert repo.get_conversation(run['conversation_id'])['messages'] == before
+            current = repo.get_model_run(run['id'])
+            if local and not stalled:
+                assert result is assembled
+                assert current['status'] == 'building_context'
+                assert not any(e['event_type'] == 'run.waiting_context' for e in events)
+            else:
+                assert result is None
+                assert current['status'] == 'waiting_context'
+                assert current['error_code'] == ('context_compaction_no_progress' if stalled else 'context_compaction_incomplete')
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("previous", [None, "valid", "stale"])

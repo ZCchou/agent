@@ -21,11 +21,55 @@ def is_document(attachment):
     return any(item.get('kind') == 'document.source' for item in attachment.get('artifacts', []))
 
 
+def _document_blocks(text):
+    markers = list(re.finditer(r'^\[SOURCE (\{[^\n]+\})\]\n', text, re.MULTILINE))
+    for index, marker in enumerate(markers):
+        try:
+            locator = json.loads(marker.group(1))
+        except ValueError:
+            continue
+        if not isinstance(locator, dict) or not isinstance(locator.get('block_id'), str):
+            continue
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+        yield marker.end(), end, locator
+
+
+def document_excerpt_locator(text, start):
+    blocks = list(_document_blocks(text))
+    locator = next((dict(value) for begin, end, value in blocks if begin <= start < end), {})
+    if locator:
+        standards = sorted({match.group().upper().replace(' ', '').replace('－', '-')
+                            for begin, end, _ in blocks
+                            for match in re.finditer(r'\bDO[ －-]?160[ ]?[A-Z]\b', text[begin:end], re.IGNORECASE)})
+        if standards:
+            locator['referenced_standards'] = standards
+    return locator
+
+
 def document_excerpt(text, query, limit):
     """Select a contiguous, explicitly positioned excerpt. Full text stays stored."""
     if len(text) <= limit:
         return text, 0, len(text)
-    terms = set(re.findall(r'[a-z0-9]{2,}|[\u4e00-\u9fff]{2}', query.casefold()))
+    # Use overlapping Chinese pairs without mixing captured tuples into scoring.
+    terms = set(re.findall(r'[a-z0-9]{2,}', query.casefold())) | set(re.findall(r'(?=([\u4e00-\u9fff]{2}))', query))
+    blocks = list(_document_blocks(text))
+    if blocks:
+        def score(block):
+            start, end, locator = block
+            path = locator.get('heading_path', [])
+            heading = ' '.join(path)
+            exact_headings = sum(len(value.strip()) > 1 and value.casefold() in query.casefold() for value in path)
+            lexical = sum(term in text[start:end].casefold() for term in terms) + 4 * sum(term in heading.casefold() for term in terms)
+            return exact_headings, lexical
+        selected = max(range(len(blocks)), key=lambda index: score(blocks[index]))
+        start, end, locator = blocks[selected]
+        heading = locator.get('heading_path')
+        if heading:
+            for following in blocks[selected + 1:]:
+                if following[2].get('heading_path') != heading or following[0] >= start + limit:
+                    break
+                end = following[1]
+        return text[start:min(end, start + limit)], start, min(end, start + limit)
     lines = list(re.finditer(r'[^\n]+', text))
     best = max(lines, key=lambda line: sum(term in line.group().casefold() for term in terms), default=None)
     start = max(0, best.start() - limit // 4) if best else 0

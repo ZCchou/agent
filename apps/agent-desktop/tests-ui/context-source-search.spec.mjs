@@ -22,16 +22,18 @@ test("attachment context shows source range, route, reason, and safe text previe
     get_conversation_model_run: { run },
     get_run_context: { snapshot: {
       id: "snapshot-1", run_id: "run-1", round_no: 1, policy_version: "v1", context_generation: 1,
-      global_instruction_revision: 0, global_instruction_hash: null, context_window: 10000,
-      input_target: 8000, output_reserve: 2000, token_method: "estimate", estimated_tokens: 120,
+      global_instruction_revision: 0, global_instruction_hash: null, context_window: 8192,
+      input_target: 3932, input_hard_limit: 4915, body_input_limit: 4145, input_scope: 'compiled_request', request_constraint_tokens: 300,
+      output_reserve: 2048, token_method: "estimate", estimated_tokens: 4500,
       stable_prefix_hash: "abc0123456789", dynamic_suffix_hash: "def", retrieval_confidence: "high",
-      compression_applied: 0, omitted_items: 0, compaction: null, run_usage: null,
+      compression_applied: 0, omitted_items: 0, compaction: null, run_usage: { input_tokens: 5170, output_tokens: 236, cached_input_tokens: null, estimated_cost: null },
       items: [{ id: "context-attachment", source_type: "attachment", source_id: "clone-1",
         section: "current", representation: "original", trust: "user_authored", estimated_tokens: 8,
         included: 1, inclusion_reason: "current_attachment", exclusion_reason: null,
         source_start: 2, source_end: 7, source_hash: "abc", metadata: {
           name: "研究笔记.txt", kind: "text", source_attachment_id: "original-1",
           current_attachment_id: "clone-1", receiving_route: "legacy.primary", effective_attachment_ids: ["clone-1"],
+          document_locator: { heading_path: ["试验程序", "振动试验", "试验目的"], paragraph: 612 },
         } }],
     } },
     get_context_source: { source: { item_id: "context-attachment", source_type: "attachment",
@@ -42,6 +44,15 @@ test("attachment context shows source range, route, reason, and safe text previe
   await page.getByRole("button", { name: "Context details" }).click();
   const panel = page.locator(".context-panel");
   await expect(panel).toContainText("研究笔记.txt");
+  await expect(panel).toContainText("Complete request estimate 4500 / 4915 tokens");
+  await expect(panel).toContainText("Near input limit");
+  await expect(panel).toContainText('Model-reported input 5170 · output 236 tokens');
+  await panel.getByText('Budget details', { exact: true }).click();
+  await expect(panel).toContainText("Input limit 4915 tokens");
+  await expect(panel).toContainText("Body allowance 4145 tokens");
+  await expect(panel).toContainText("Remaining input capacity 415 tokens");
+  await expect(panel).toContainText("0 historical messages omitted this turn");
+  await expect(panel).toContainText("试验程序 → 振动试验 → 试验目的");
   await expect(panel).toContainText("2–7");
   await expect(panel).toContainText("Direct model request");
   await expect(panel).toContainText("Selected range included");

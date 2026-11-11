@@ -9,6 +9,14 @@ vi.mock("react", async importOriginal => {
 });
 afterEach(() => vi.mocked(useState).mockReset());
 const model = { id: "a".repeat(64), device: "cpu", context_length: 8192, max_context_length: 32768, threads: 4, gpu_layers: -1, source: "local", license: "MIT" } as LocalModel;
+it("offers a maximum shortcut only for an explicitly declared model limit", () => {
+  const known = renderToStaticMarkup(<LocalModelConfigurationForm model={{ ...model, declared_context_length: 32768 }} busy={false} onSave={() => {}} />);
+  expect(known).toContain('使用模型声明的最大上下文');
+  expect(known).toContain('模型声明上限 32768');
+  const missing = renderToStaticMarkup(<LocalModelConfigurationForm model={model} busy={false} onSave={() => {}} />);
+  expect(missing).toContain('模型文件未声明最大上下文');
+  expect(missing).toMatch(/<button[^>]*disabled[^>]*>使用模型声明的最大上下文/);
+});
 it("bounds configuration by model metadata and exposes explicit GPU choices", () => {
   const html = renderToStaticMarkup(<LocalModelConfigurationForm model={model} busy={false} onSave={() => {}} />);
   expect(html).toContain('max="32768"'); expect(html).toContain('value="8192"'); expect(html).toContain('value="cuda"'); expect(html).toContain('min="-1"');
@@ -43,4 +51,11 @@ it.each([
   if (typeof error !== "string") expect(html.split("device_unavailable")).toHaveLength(3);
   expect(html).toContain("保存配置");
   expect(html).toContain("加载模型");
+});
+
+
+it("offers an explicit save-and-reload path for a loaded model", () => {
+  const html = renderToStaticMarkup(<LocalModelConfigurationForm model={{ ...model, status: "loaded" }} busy={false} onSave={() => {}} />);
+  expect(html).toContain("保存配置并重新加载");
+  expect(html).toContain("优先 GPU");
 });

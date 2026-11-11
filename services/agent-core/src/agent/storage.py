@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -413,6 +413,21 @@ class CoreRepository:
                 except Exception:
                     connection.rollback()
                     raise
+                version = 28
+            if version == 28:
+                from agent.migrations.v29_rag_workflow import migrate as migrate_rag_workflow
+                connection.execute('PRAGMA foreign_keys = OFF')
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_rag_workflow(connection)
+                    connection.execute('UPDATE schema_info SET version = 29')
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.execute('PRAGMA foreign_keys = ON')
             self._create_indexes(connection)
             self._reconcile_terminal_web_operations(connection)
             self._validate_database(connection)
@@ -1124,7 +1139,7 @@ class CoreRepository:
                            c.copied_through_message_id, c.copied_at, c.created_at, c.updated_at,
                            c.deleted_at, c.provider_profile_id, c.model_id, c.web_search_mode,
                            c.model_selection_mode, c.routing_preset,
-                           c.coordinator_provider_profile_id, c.coordinator_model_id,
+                           c.coordinator_provider_profile_id, c.coordinator_model_id, c.rag_mode,
                            p.category AS project_category, p.model_access_policy, p.model_scope_policy,
                            p.web_access_policy
                     FROM conversations c LEFT JOIN projects p ON p.id = c.project_id
@@ -1154,7 +1169,7 @@ class CoreRepository:
         """Bounded advisor excerpts, scoped to the six messages before this request."""
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                """SELECT m.role, substr(m.content, 1, 2000) AS content
+                """SELECT m.id, m.role, substr(m.content, 1, 2000) AS content
                    FROM model_runs r JOIN messages current ON current.id = r.user_message_id
                    JOIN messages m ON m.conversation_id = r.conversation_id
                    WHERE r.id = ? AND current.conversation_id = r.conversation_id
@@ -1175,7 +1190,7 @@ class CoreRepository:
                       c.copied_through_message_id, c.copied_at, c.created_at, c.updated_at,
                       c.deleted_at, c.provider_profile_id, c.model_id, c.context_generation,
                        c.web_search_mode, c.model_selection_mode, c.routing_preset,
-                       c.coordinator_provider_profile_id, c.coordinator_model_id,
+                       c.coordinator_provider_profile_id, c.coordinator_model_id, c.rag_mode,
                       p.category AS project_category, p.model_access_policy, p.model_scope_policy,
                       p.web_access_policy
                FROM conversations c LEFT JOIN projects p ON p.id = c.project_id
@@ -1200,7 +1215,7 @@ class CoreRepository:
             ).fetchall()
             attachment_rows = connection.execute(
                 f"""SELECT id, message_id, kind, name, media_type, byte_size, sha256,
-                          storage_key, width, height, source_attachment_id, created_at
+                          storage_key, width, height, source_attachment_id, created_at, purpose
                    FROM message_attachments WHERE message_id IN
                        (SELECT id FROM messages WHERE {scope})
                    ORDER BY created_at, rowid""",
@@ -1284,7 +1299,7 @@ class CoreRepository:
             row = connection.execute(
                 """SELECT a.id, a.message_id, a.kind, a.name, a.media_type, a.byte_size,
                           a.sha256, a.storage_key, a.width, a.height, a.source_attachment_id,
-                          a.created_at, m.conversation_id
+                          a.created_at, a.purpose, m.conversation_id
                    FROM message_attachments a JOIN messages m ON m.id = a.message_id
                    JOIN conversations c ON c.id = m.conversation_id
                    LEFT JOIN projects p ON p.id = c.project_id
@@ -1619,6 +1634,7 @@ class CoreRepository:
                     None if derived else now, now, now,
                 ),
             )
+            connection.execute('UPDATE conversations SET rag_mode=? WHERE id=?', (source.get('rag_mode', 'auto'), work_id))
             for sequence_no, message in enumerate(messages, start=1):
                 copied_message_id = _uuid()
                 connection.execute(
@@ -1638,12 +1654,12 @@ class CoreRepository:
                     connection.execute(
                         """INSERT INTO message_attachments(
                                id, message_id, kind, name, media_type, byte_size, sha256,
-                               storage_key, width, height, source_attachment_id, created_at
-                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               storage_key, width, height, source_attachment_id, created_at, purpose
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (copied_attachment_id, copied_message_id, attachment["kind"], attachment["name"],
                          attachment["media_type"], attachment["byte_size"], attachment["sha256"],
                          attachment["storage_key"], attachment["width"], attachment["height"],
-                         attachment["id"], attachment["created_at"]),
+                         attachment["id"], attachment["created_at"], attachment['purpose']),
                     )
                     artifacts = connection.execute(
                         "SELECT * FROM attachment_artifacts WHERE attachment_id = ? ORDER BY created_at, rowid",
@@ -1980,8 +1996,12 @@ class CoreRepository:
         attachment_rejections: list[dict[str, Any]] | None = None,
         model_selection_mode: str = "fixed", routing_preset: str = "balanced",
         edit_message_id: str | None = None,
+        rag_mode: str | None = None,
+        rag_decision: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist the user action before any slow context or model operation."""
+        if rag_decision is not None and not isinstance(rag_decision, dict):
+            raise CoreDataError('invalid_rag_decision', 'RAG routing metadata is invalid.')
         if edit_message_id is not None and (not isinstance(edit_message_id, str) or not conversation_id):
             raise CoreDataError("invalid_message_edit", "An edit requires a user message and conversation.")
         attachments = self._validate_attachments(attachments or [])
@@ -2008,14 +2028,22 @@ class CoreRepository:
             raise CoreDataError("invalid_web_search_mode", "Web search request mode is not supported.")
         if web_search_route not in {"none", "native", "host_tool", "host_presearch", "specialist"}:
             raise CoreDataError("invalid_web_search_route", "Web search route is not supported.")
+        if rag_mode is not None and rag_mode not in {'auto', 'required'}:
+            raise CoreDataError('invalid_rag_mode', 'Choose auto or required RAG mode.')
 
         now = _utc_now()
         with self._connect() as connection:
             existing = connection.execute(
-                "SELECT id FROM model_runs WHERE idempotency_key = ?", (idempotency_key,)
+                "SELECT id,rag_requested_mode FROM model_runs WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
             if existing is not None:
+                if rag_mode is not None and existing['rag_requested_mode'] != rag_mode:
+                    raise CoreDataError('idempotency_conflict', 'The request key already captured a different RAG mode.')
                 return self.get_model_run(existing["id"])
+
+            mode_row = connection.execute('SELECT rag_mode FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+            effective_rag_mode = rag_mode or (mode_row['rag_mode'] if mode_row else 'auto')
+            new_conversation = conversation_id is None
 
             if conversation_id is None:
                 if kind not in CONVERSATION_KINDS:
@@ -2103,11 +2131,18 @@ class CoreRepository:
                     (provider_profile_id, model_id, provider_profile_id, model_id, now, conversation_id),
                 )
 
+            if new_conversation:
+                connection.execute('UPDATE conversations SET rag_mode=? WHERE id=?', (effective_rag_mode, conversation_id))
             user = self._insert_message_with_connection(connection, conversation_id, "user", content)
+            captured_decision = dict(rag_decision or {})
+            saved_roles = {}
             for attachment in attachments:
-                self._insert_or_clone_message_attachment(
+                saved_id = self._insert_or_clone_message_attachment(
                     connection, user["id"], attachment, now,
                 )
+                saved_roles[saved_id] = attachment.get('purpose', 'reference')
+            if rag_decision is not None:
+                captured_decision['attachment_roles'] = saved_roles
             for rejection in attachment_rejections:
                 self._insert_or_clone_attachment_rejection(
                     connection, user["id"], rejection, now,
@@ -2126,6 +2161,8 @@ class CoreRepository:
                  selection_reason_code, routing_policy_version, web_search_request_mode,
                  web_search_route, web_search_reason_code, web_search_policy_version),
             )
+            connection.execute('UPDATE model_runs SET rag_requested_mode=?,rag_decision_json=? WHERE id=?',
+                (effective_rag_mode, json.dumps(captured_decision, ensure_ascii=False), run_id))
         return self.get_model_run(run_id)
 
     def get_model_run(self, run_id: str) -> dict[str, Any]:
@@ -2150,6 +2187,7 @@ class CoreRepository:
                    WHERE r.id = ?""", (run_id,)
             ).fetchone()
             result = dict(row)
+            result['rag_decision'] = json.loads(result.get('rag_decision_json') or '{}')
             result["attempt"] = dict(attempt) if attempt else None
             result["draft"] = dict(draft) if draft else None
             result["assistant_message"] = dict(message) if message else None
@@ -2175,7 +2213,7 @@ class CoreRepository:
         )
         copied_columns = (
             "kind", "title", "category", "chat_group_id", "project_id", "purpose_override",
-            "provider_profile_id", "model_id", "model_selection_mode", "routing_preset",
+            "provider_profile_id", "model_id", "model_selection_mode", "routing_preset", "rag_mode",
             "coordinator_provider_profile_id", "coordinator_model_id", "web_search_mode",
         )
         connection.execute(
@@ -2212,6 +2250,8 @@ class CoreRepository:
             sha256 = value.get("sha256")
             storage_key = value.get("storage_key")
             attachment_id = value.get("id")
+            if not isinstance(value.get('purpose', 'reference'), str) or value.get('purpose', 'reference') not in {'template', 'reference'}:
+                raise CoreDataError('attachment_purpose_invalid', '附件用途无效。')
             if kind not in {"image", "text"} or not all(
                 isinstance(item, str) and item for item in
                 (name, media_type, sha256, storage_key, attachment_id)
@@ -2372,12 +2412,12 @@ class CoreRepository:
         connection.execute(
             """INSERT INTO message_attachments(
                    id, message_id, kind, name, media_type, byte_size, sha256,
-                   storage_key, width, height, source_attachment_id, created_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   storage_key, width, height, source_attachment_id, created_at, purpose
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (attachment_id, message_id, attachment["kind"], attachment["name"],
              attachment["media_type"], attachment["byte_size"], attachment["sha256"],
              attachment["storage_key"], attachment.get("width"), attachment.get("height"),
-             source_attachment_id, created_at),
+             source_attachment_id, created_at, attachment.get('purpose', 'reference')),
         )
         for artifact in artifacts:
             artifact_id = _uuid() if existing is not None else artifact["artifact_id"]
@@ -2618,6 +2658,8 @@ class CoreRepository:
                  "user_retry_without_web" if disable_web_search else parent["web_search_reason_code"],
                  parent["web_search_policy_version"]),
             )
+            connection.execute('UPDATE model_runs SET rag_requested_mode=?,rag_decision_json=? WHERE id=?',
+                (parent['rag_requested_mode'], parent['rag_decision_json'], run_id))
         return self.get_model_run(run_id)
 
     def begin_run_attempt(self, run_id: str, execution_step_id: str | None = None) -> dict[str, Any]:
@@ -2911,6 +2953,20 @@ class CoreRepository:
                 (mode, _utc_now(), conversation_id),
             )
         return self.get_conversation(conversation_id)
+
+    def update_conversation_rag(self, conversation_id: str, mode: str) -> dict[str, Any]:
+        if mode not in {'auto', 'required'}:
+            raise CoreDataError('invalid_rag_mode', 'Choose auto or required RAG mode.')
+        self.get_conversation(conversation_id)
+        with self._connect() as connection:
+            connection.execute('UPDATE conversations SET rag_mode=?,updated_at=? WHERE id=?',
+                               (mode, _utc_now(), conversation_id))
+        return self.get_conversation(conversation_id)
+
+    def record_rag_decision(self, run_id: str, decision: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute('UPDATE model_runs SET rag_decision_json=? WHERE id=?',
+                               (json.dumps(decision, ensure_ascii=False, sort_keys=True), run_id))
 
     def create_web_operation(
         self, run_id: str, sequence: int, idempotency_key: str, route: str,

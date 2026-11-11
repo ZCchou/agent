@@ -17,8 +17,8 @@ COMPILER = Path('C:/Users/Administrator/AppData/Local/tauri/NSIS/makensis.exe')
 @unittest.skipUnless(os.environ.get('AGENT_TEST_REAL_NSIS') == '1', 'Opt-in native NSIS lifecycle tests')
 class NsisLifecycleTests(unittest.TestCase):
     def setUp(self):
-        parent = ROOT / '.artifacts/local-runtime-work/task5-nsis-lifecycle-tests'
-        parent.mkdir(exist_ok=True)
+        parent = Path(os.environ.get('AGENT_TEST_ARTIFACT_DIR', str(ROOT / '.artifacts/local-runtime-work/task5-nsis-lifecycle-tests')))
+        parent.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix='owned-', dir=parent)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)

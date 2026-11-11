@@ -180,7 +180,8 @@ def inspect_gguf(path: Path | str, *, cancel=lambda: None) -> dict:
         template = metadata.get("tokenizer.chat_template")
         if not isinstance(template, str) or not template.strip():
             raise CoreDataError("unsupported_template", "The GGUF must contain its actual chat template.")
-        context = metadata.get(f"{architecture}.context_length", 8192)
+        declared_context = metadata.get(f"{architecture}.context_length")
+        context = declared_context if declared_context is not None else 8192
         if type(context) is not int or not 1 <= context <= 2**24:
             raise ValueError("Invalid model context length.")
         quantization = metadata.get("general.file_type")
@@ -198,7 +199,7 @@ def inspect_gguf(path: Path | str, *, cancel=lambda: None) -> dict:
                 kv_bytes = 2 * layers * kv_heads * (key_length + value_length)
         return {"name": metadata.get("general.name") or path.stem, "architecture": architecture,
                 "format": "gguf", "role": "generation", "quantization": _QUANTIZATIONS[quantization],
-                "context_length": context, "chat_template": template,
+                "context_length": context, "declared_context_length": declared_context, "chat_template": template,
                 "template_digest": hashlib.sha256(template.encode("utf-8")).hexdigest(),
                 "size_bytes": size, "tensor_count": len(names), "files": [str(item) for item in files],
                 "kv_bytes_per_token": kv_bytes}

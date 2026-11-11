@@ -6,14 +6,17 @@ from contextlib import closing
 import inspect
 import json
 import math
+import logging
+import time
 from pathlib import Path
 import sqlite3
 import tempfile
 
+from agent.infrastructure.logging import log_event
 from agent.document_parser import ParserService
 from agent.rag.documents import MAX_FILE_BYTES, MAX_TEXT_CHARS, SUPPORTED_SUFFIXES, SPLITTING_VERSION, has_readable_text
 from agent.rag.repository import RagRepository, identifier, required_text
-from agent.rag.retrieval import candidates, load_vector_extension, vector_blob
+from agent.rag.retrieval import candidates, load_vector_extension, vector_blob, explicit_subject, matches_subject, reference_material
 from agent.storage import CoreDataError, _utc_now
 
 DOCUMENT_PARSE_TIMEOUT = 125
@@ -357,7 +360,7 @@ class RagService:
         return {'evidence': evidence, 'generation': state['generation'], 'index_ids': state['index_ids'],
                 'external_untrusted': True, 'search_id': search_id, 'aliases': aliases}
 
-    async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8):
+    async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None):
         if self._closed:
             raise CoreDataError('rag_closed', 'The RAG service is closed.')
         query = required_text(query, 'Search query', 2000)
@@ -386,7 +389,7 @@ class RagService:
                     raise CoreDataError('rag_version_forbidden', 'A selected version is outside the authorized active indexes.')
         if not indexes:
             raise CoreDataError('rag_no_index', 'Build an authorized library index before searching.')
-        chosen, index_by_chunk = await self._retrieve_indexes(indexes, query, version_ids, limit)
+        chosen, index_by_chunk = await self._retrieve_indexes(indexes, query, version_ids, limit, progress=progress)
         evidence = []
         search_id = identifier()
         if self._closed:
@@ -406,7 +409,7 @@ class RagService:
                 record = {'id': 'rag-' + identifier(), 'library_id': index['library_id'], 'version_id': row['version_id'],
                           'title': row['title'], 'revision': row['revision'], 'source': row['source'], 'document_number': row['document_number'],
                           'clause_number': row['clause_number'], 'locator': json.loads(row['locator']), 'text': row['text'],
-                          'text_hash': row['text_hash'], 'score': row['score'], 'external_untrusted': True,
+                          'text_hash': row['text_hash'], 'original_hash': row['original_hash'], 'score': row['score'], 'external_untrusted': True,
                           'run_id': run_id, 'search_id': search_id, 'index_id': index['id']}
                 if record['locator'].get('splitting_version') != SPLITTING_VERSION:
                     record['warnings'] = [LEGACY_SPLITTING_WARNING]
@@ -432,27 +435,38 @@ class RagService:
         if inspect.isawaitable(result):
             await result
 
-    async def _retrieve_indexes(self, indexes, query, version_ids=None, limit=8):
+    async def _retrieve_indexes(self, indexes, query, version_ids=None, limit=8, progress=None):
+        subject = explicit_subject(query)
+        retrieval_query = subject or query
         retrieved = []
         index_by_chunk = {}
         for index in indexes:
             self._model(index['embedding_model_id'], 'embedding', index['embedding_digest'])
             self._model(index['reranker_model_id'], 'reranker', index['reranker_digest'])
-            query_vectors = await self.models.embed(index['embedding_model_id'], [query], query=True)
+            if progress:
+                await progress("embedding")
+            stage_started = time.perf_counter()
+            query_vectors = await self.models.embed(index['embedding_model_id'], [retrieval_query], query=True)
+            log_event(logging.getLogger(__name__), logging.INFO, "rag_stage_completed", "RAG stage completed",
+                      stage="embedding", duration_ms=round((time.perf_counter()-stage_started)*1000), count=1)
             if len(query_vectors) != 1:
                 raise CoreDataError('rag_invalid_embedding', 'The query embedding batch is invalid.')
+            if progress:
+                await progress("retrieving")
             blob = vector_blob(query_vectors[0], index['dimension'])
             with closing(self.repository.connect()) as connection:
-                ids, scores = candidates(connection, index['id'], blob, query, version_ids)
+                ids, scores = candidates(connection, index['id'], blob, retrieval_query, version_ids)
                 if not ids:
                     continue
                 placeholders = ','.join('?' for _ in ids)
-                rows = connection.execute('''SELECT c.*,v.title,v.revision,v.document_number,v.source FROM rag_chunks c
+                rows = connection.execute('''SELECT c.*,v.title,v.revision,v.document_number,v.source,v.original_hash FROM rag_chunks c
                     JOIN rag_versions v ON v.id=c.version_id WHERE c.id IN (''' + placeholders + ')', ids).fetchall()
                 by_id = {row['id']: dict(row) for row in rows}
                 ordered = [by_id[chunk_id] for chunk_id in ids]
             for row in ordered:
-                if not has_readable_text(row['text']):
+                if not has_readable_text(row['text']) or reference_material(row['text'], query):
+                    continue
+                if subject and not matches_subject(row['text'], subject):
                     continue
                 row['fusion_score'] = scores[row['id']]
                 retrieved.append(row)
@@ -465,7 +479,12 @@ class RagService:
             reranker_groups.setdefault(model_id, []).append(row)
         ranked = []
         for model_id, rows in reranker_groups.items():
-            reranked = await self.models.rerank(model_id, query, [row['text'] for row in rows])
+            if progress:
+                await progress("reranking")
+            stage_started = time.perf_counter()
+            reranked = await self.models.rerank(model_id, retrieval_query, [row['text'] for row in rows])
+            log_event(logging.getLogger(__name__), logging.INFO, "rag_stage_completed", "RAG stage completed",
+                      stage="reranking", duration_ms=round((time.perf_counter()-stage_started)*1000), count=len(rows))
             if len(reranked) != len(rows):
                 raise CoreDataError('rag_invalid_rerank', 'The reranker returned an invalid batch.')
             for row, score in zip(rows, reranked):

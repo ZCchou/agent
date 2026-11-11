@@ -319,3 +319,49 @@ def test_context_limit_uses_existing_strict_retry_before_text_only_closing(tmp_p
         assert len(requests) == 1 and requests[0][1].get("tools")
         assert not any(event["event_type"] == "run.response_recovering" for event in events)
     asyncio.run(scenario())
+
+
+def test_compiler_capacity_failure_reassembles_with_measured_overhead(tmp_path, monkeypatch):
+    from agent.context_engine.policy import estimate_tokens
+    from agent.storage import CoreDataError
+    requests = install_http(monkeypatch, [({'content': 'Completed after input rebudgeting.'}, 'stop')])
+    async def scenario():
+        async def sink(event):
+            pass
+        repository, _, work, service = await fixture(tmp_path, sink)
+        original_compile = service.invocation_compiler.compile_model
+        original_prepare = service._prepare_context
+        overheads = []
+        first = True
+        def compile_model(spec, messages, **kwargs):
+            nonlocal first
+            if first and spec.endpoint_role == 'final_response':
+                first = False
+                raise CoreDataError('provider_context_limit_exceeded', 'Measured envelope overflow',
+                                    {'input_overhead_tokens': 700, 'request_tokens': estimate_tokens(messages) + 700})
+            return original_compile(spec, messages, **kwargs)
+        async def prepare(*args, **kwargs):
+            overheads.append(kwargs.get('input_overhead_tokens', 0))
+            return await original_prepare(*args, **kwargs)
+        monkeypatch.setattr(service.invocation_compiler, 'compile_model', compile_model)
+        monkeypatch.setattr(service, '_prepare_context', prepare)
+        run_id = await start(service, work)
+        assert repository.get_model_run(run_id)['status'] == 'completed'
+        assert overheads[0] == 0 and overheads[1] > 764
+        assert len(requests) == 1
+    asyncio.run(scenario())
+
+
+def test_tool_round_snapshot_uses_same_chinese_token_estimator(tmp_path, monkeypatch):
+    from agent.context_engine.policy import estimate_tokens
+    install_http(monkeypatch, [({'content': 'Completed.'}, 'stop')])
+    async def scenario():
+        async def sink(event):
+            pass
+        _, _, work, service = await fixture(tmp_path, sink)
+        run_id = await start(service, work)
+        messages = [{'role': 'user', 'content': '振动试验' * 100}]
+        context = service.context.context_repository
+        context.save_tool_round_snapshot(run_id, context.next_snapshot_round(run_id), messages)
+        assert context.preview(run_id)['estimated_tokens'] == estimate_tokens(messages)
+    asyncio.run(scenario())

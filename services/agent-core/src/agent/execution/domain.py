@@ -342,16 +342,18 @@ class InvocationSpec:
     artifact_ids: tuple[str, ...] = ()
     rejection_receipt_ids: tuple[str, ...] = ()
     tool_result_ids: tuple[str, ...] = ()
-    tool_contract_version: str = "tool-contract-v3"
+    tool_contract_version: str = "tool-contract-v4"
     allowed_tool_names: tuple[str, ...] = ()
     tool_transport: ToolTransport = "none"
     tool_schema_hash: str = ""
     native_search_mode: Literal["off", "auto", "required"] = "off"
     reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
     max_output_tokens: int = 4096
-    response_format: Literal["text", "json_object"] = "text"
+    response_format: Literal["text", "json_object", "json_schema"] = "text"
+    response_schema_json: str | None = None
     connect_timeout_ms: int = 10_000
     activity_timeout_ms: int = 30_000
+    first_output_timeout_ms: int | None = None
     total_timeout_ms: int = 120_000
     serialization_version: str = "unified-invocation-v3.4"
     run_id: str | None = None
@@ -404,15 +406,22 @@ class InvocationSpec:
                 "reasoning_effort": self.reasoning_effort,
                 "max_output_tokens": self.max_output_tokens,
                 "response_format": self.response_format,
+                **({"response_schema": json.loads(self.response_schema_json)} if self.response_schema_json else {}),
             },
             "limits": {
                 "connect_timeout_ms": self.connect_timeout_ms,
                 "activity_timeout_ms": self.activity_timeout_ms,
                 "total_timeout_ms": self.total_timeout_ms,
+                **({"first_output_timeout_ms": self.first_output_timeout_ms} if self.first_output_timeout_ms is not None else {}),
             },
             "serialization_version": self.serialization_version,
             "authority_generation": self.authority_generation,
         }
+
+    def stream_wait_seconds(self, has_output: bool, elapsed_seconds: float) -> float:
+        if has_output or self.first_output_timeout_ms is None:
+            return self.activity_timeout_ms / 1000
+        return max(0, self.first_output_timeout_ms / 1000 - elapsed_seconds)
 
     def to_dict(self) -> dict[str, Any]:
         return {

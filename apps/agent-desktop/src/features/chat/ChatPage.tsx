@@ -8,11 +8,13 @@ import { useTranslation } from "react-i18next";
 import { Button } from "../../components/ui/Button";
 import { useApp } from "../../contexts/AppContext";
 import { useResourceActions } from "../resources/ResourceActionsProvider";
+import { ProjectLibraries } from "../rag/ProjectLibraries";
+import { defaultAttachmentPurpose } from './attachmentDraft';
 import { useChatInspectorStore } from "../../contexts/ChatInspectorContext";
 import {
   agentExecutionRepository, attachmentRepository, changeSetRepository, conversationRepository, modelCatalogRepository,
   contextRepository, modelRunRepository, projectDirectoryRepository, projectFilePreviewRepository, projectRepository, providerRepository, settingsRepository, workToolRepository,
-  webSearchRepository,
+  webSearchRepository, localModelRepository,
 } from "../../services/runtime";
 import {
   PROJECT_CATEGORIES,
@@ -31,6 +33,7 @@ import {
   type ExecutionPlan,
   type CapabilityAdvisory,
 } from "../../types/domain";
+import { prepareLocalModel, withPreparedLocalModel } from "./prepareLocalModel";
 import { resolveSelectedModel, selectableModels } from "../../services/modelSelection";
 import { ComposerDock } from "./ComposerDock";
 import { ChatInspector } from "./ChatInspector";
@@ -66,7 +69,7 @@ export function ChatPage() {
   const { t: tCommon } = useTranslation("common");
   const {
     currentPage, setCurrentPage, activeConversationId, activeConversation, projects, draft, coreOnline,
-    openConversation, openProject, conversationCreated, refreshWorkspace,
+    openConversation, openProject, conversationCreated, refreshWorkspace, setDraftRagMode,
   } = useApp();
   const inspectorStore = useChatInspectorStore();
   const updateInspector = inspectorStore.update;
@@ -80,6 +83,24 @@ export function ChatPage() {
   const conversationTitle = activeConversation?.id === conversation?.id ? activeConversation?.title : conversation?.title;
   const [messages, setMessages] = useConversationState<ChatMessage[]>(inspectorKey, []);
   const [input, setInput] = useConversationState(inspectorKey, "");
+  const [ragModeBusy, setRagModeBusy] = useConversationState(inspectorKey, false);
+  const [attachmentPurposes, setAttachmentPurposes] = useConversationState<Record<string, 'template' | 'reference'>>(inspectorKey, {});
+  const ragMode = conversation?.rag_mode ?? activeConversation?.rag_mode ?? draft.ragMode ?? 'auto';
+
+  async function toggleRagMode() {
+    if (ragModeBusy) return;
+    const mode = ragMode === 'required' ? 'auto' : 'required';
+    if (!conversation) { setDraftRagMode(mode); return; }
+    const scope = inspectorKey;
+    setRagModeBusy(true);
+    try {
+      const updated = await conversationRepository.updateRag(conversation.id, mode);
+      if (sendScopeRef.current === scope) setConversation(updated);
+      await refreshWorkspace();
+    } catch (value) {
+      if (sendScopeRef.current === scope) { setError(true); setErrorDetail(String(value)); }
+    } finally { if (sendScopeRef.current === scope) setRagModeBusy(false); }
+  }
   const references = useAttachmentReferences(inspectorKey, input, messages);
   const [loading, setLoading] = useConversationState(inspectorKey, false);
   const [sending, setSending] = useConversationState(inspectorKey, false);
@@ -89,6 +110,7 @@ export function ChatPage() {
   const sendScopeRef = useRef(inspectorKey);
   const adoptedScopeRef = useRef<string | null>(null);
   sendScopeRef.current = inspectorKey;
+  const preparingRetryRef = useRef<{ cancelled: boolean } | null>(null);
   const submissionRef = useRef<{
     optimisticId: string; scope: string; acceptedScope?: string; accepted: boolean; stopRequested: boolean;
   } | null>(null);
@@ -104,7 +126,7 @@ export function ChatPage() {
   const [webOperations, setWebOperations] = useConversationState<WebOperation[]>(inspectorKey, []);
   const [activeRun, setActiveRun] = useConversationState<ModelRun | null>(inspectorKey, null);
   const [compaction, setCompaction] = useConversationState<ContextCompactionState | null>(inspectorKey, null);
-  const compactionBlocksSend = Boolean(compaction && ["queued", "running", "interrupted", "failed"].includes(compaction.status));
+  const compactionBlocksSend = Boolean(compaction && compaction.blocks_send !== false && ["queued", "running", "interrupted", "failed"].includes(compaction.status));
   const compactionResumeRef = useRef(false);
   const {
     content: streamingContent,
@@ -139,6 +161,8 @@ export function ChatPage() {
   const [budgetBusy, setBudgetBusy] = useConversationState(inspectorKey, false);
   const [routingRevision, setRoutingRevision] = useState(0);
   const [routingOptions, setRoutingOptions] = useConversationState<RoutingModelOption[]>(inspectorKey, []);
+  const routingOptionsRef = useRef(routingOptions);
+  routingOptionsRef.current = routingOptions;
   const [runActivityLabel, setRunActivityLabel] = useConversationState<string | null>(inspectorKey, null);
   const pendingSendRef = useRef<{ signature: string; idempotencyKey: string } | null>(null);
   const editActionsRef = useRef({ begin: prepareMessageEdit, save: sendEditedMessage });
@@ -209,7 +233,8 @@ export function ChatPage() {
       const project = projectId ? projects.find((item) => item.id === projectId) : undefined;
       setRoutingOptions(selectableModels(settings, project, scope, true).map((item) => ({
         value: item.value, providerId: item.provider.id, modelId: item.model.id,
-        label: item.provider.name, unavailable: item.model.status === "unavailable",
+        label: item.provider.name + (item.provider.id.startsWith("managed:") && item.model.status === "unavailable" ? tChat("routing.status.loadOnSend") : ""),
+        unavailable: item.model.status === "unavailable" && !item.provider.id.startsWith("managed:"),
       })));
     }).catch(() => { if (!cancelled) setRoutingOptions([]); });
     return () => { cancelled = true; };
@@ -287,8 +312,12 @@ export function ChatPage() {
       }
       if (event.run_id !== runIdRef.current) return;
       if (event.event_type === "run.chunk") {
+        setRunActivityLabel(tChat("routing.status.generatingAnswer"));
         appendStreamingContent(String(event.data.delta ?? ""));
       } else if (event.event_type === "run.state_changed") {
+        const phase = event.data.phase;
+        if (typeof phase === "string") setRunActivityLabel(tChat(`routing.status.${phase}`, { defaultValue: tChat("routing.status.planning") }));
+        else if (event.data.status === "generating") setRunActivityLabel(tChat("routing.status.waitingOutput"));
         const status = event.data.status;
         if (isModelRunStatus(status)) {
           setActiveRun((current) => current ? { ...current, status } : current);
@@ -309,7 +338,10 @@ export function ChatPage() {
         else if (step === "web_research") setRunActivityLabel(tChat("routing.status.web", { model }));
         else if (step === "reasoning_analysis") setRunActivityLabel(tChat("routing.status.reasoning", { model }));
       } else if (event.event_type === "run.synthesis_started") {
-        setRunActivityLabel(tChat("routing.status.synthesis", { model: String(event.data.model_id ?? "") }));
+        const modelId = String(event.data.model_id ?? "");
+        const model = routingOptionsRef.current.find((option) => option.modelId === modelId
+          && option.providerId === event.data.provider_profile_id)?.label ?? modelId;
+        setRunActivityLabel(tChat("routing.status.synthesis", { model }));
       } else if (event.event_type === "run.invocation_retrying") {
         setRunActivityLabel(tChat("routing.status.retrying", {
           retry: Number(event.data.retry_number ?? 1),
@@ -475,6 +507,7 @@ export function ChatPage() {
     const normalized = content.trim();
     const selectedReferences = editedMessage ? [] : references.selected.map((item) => item.reference);
     const stagedAttachments = editedMessage ? [] : attachmentController.attachments;
+    const purposes = Object.fromEntries(stagedAttachments.map((item) => [item.id, attachmentPurposes[item.id] ?? defaultAttachmentPurpose(item.name)]));
     const stagedRejections = editedMessage ? [] : attachmentController.rejectedAttachments;
     if ((!normalized && stagedAttachments.length === 0 && !editedMessage?.attachments?.length
       && stagedRejections.length === 0 && selectedReferences.length === 0)
@@ -510,9 +543,13 @@ export function ChatPage() {
     setFailedEditMessage(null);
     setRunActivityLabel(tChat("routing.status.planning"));
     clearStreamingContent();
+    let releaseModel: (() => Promise<void>) | undefined;
     try {
       let settings = await settingsRepository.getAppSettings();
       const projectId = sendConversation ? sendConversation.project_id : (draft.kind === "project_work" ? draft.projectId : null);
+      if (ragMode === 'required' && !projectId) {
+        throw new Error(tChat('ragMode.projectRequired'));
+      }
       const project = projectId ? projects.find((item) => item.id === projectId) : undefined;
       const scope = projectId ? await projectRepository.getModelScope(projectId) : null;
       let candidates = selectableModels(settings, project, scope, true);
@@ -528,6 +565,15 @@ export function ChatPage() {
           ? sendConversation?.coordinator_model_id ?? settings.models.default_model_id
           : sendConversation?.model_id ?? settings.models.default_model_id,
       );
+      if (selected?.provider.id.startsWith("managed:")) {
+        releaseModel = await prepareLocalModel(localModelRepository, selected.model.id,
+          () => !isCurrent() || submission.stopRequested,
+          (state, elapsed) => { if (isCurrent()) setRunActivityLabel(tChat(`routing.status.${state === "waiting" ? "waitingModel" : "loadingModel"}`, { model: selected?.provider.name, elapsed })); });
+        if (!isCurrent() || submission.stopRequested) return;
+        settings = await settingsRepository.getAppSettings();
+        candidates = selectableModels(settings, project, scope, true);
+        selected = resolveSelectedModel(candidates, selected.provider.id, selected.model.id);
+      }
       if (!selected || selected.model.status === "unavailable") {
         setRoutingRevision((value) => value + 1);
         throw new Error(tChat(selected ? "errors.localModelNotLoaded" : "errors.selectCompatibleModel"));
@@ -551,9 +597,11 @@ export function ChatPage() {
         model: selected.model.id,
         mode: automaticMode ? "automatic" : "fixed",
         attachments: stagedAttachments.map((item) => item.id),
+        attachmentPurposes: purposes,
         attachmentReferences: selectedReferences,
         rejectedAttachments: stagedRejections.map((item) => item.receipt_id),
         web: webSearch.requestMode,
+        ragMode,
       });
       if (pendingSendRef.current?.signature !== sendSignature) {
         pendingSendRef.current = { signature: sendSignature, idempotencyKey: crypto.randomUUID() };
@@ -564,6 +612,7 @@ export function ChatPage() {
         chatGroupId: !conversation && draft.kind === "standard_chat" ? draft.chatGroupId ?? undefined : undefined,
         projectId: !conversation && draft.kind === "project_work" ? draft.projectId ?? undefined : undefined,
         content: normalized,
+        ragMode,
         editMessageId: editedMessage?.id,
         idempotencyKey: pendingSendRef.current.idempotencyKey,
         providerProfileId: selected.provider.id,
@@ -584,6 +633,7 @@ export function ChatPage() {
           source: conversation ? "conversation_override" : "global_default",
         },
         attachmentStagingIds: stagedAttachments.map((item) => item.id),
+        attachmentPurposes: purposes,
         attachmentReferences: selectedReferences,
         attachmentRejectionStagingIds: stagedRejections.map((item) => item.receipt_id),
         webSearchRequestMode: webSearch.requestMode,
@@ -655,6 +705,7 @@ export function ChatPage() {
       return true;
     } catch (value) {
       if (!isCurrent()) return;
+      if (submission.stopRequested && !submission.accepted) { setError(false); return; }
       if (!submission.accepted) restoreRejected();
       const detail = value instanceof Error ? value.message : String(value ?? "");
       if (detail.includes("external_search_setup_required")
@@ -672,11 +723,13 @@ export function ChatPage() {
         return;
       }
       setError(true);
-      setErrorDetail(value instanceof Error ? value.message : null);
+      setErrorDetail(detail || null);
       setFailedContent(normalized);
       setFailedEditMessage(editedMessage ?? null);
       if (!submission.accepted) setSending(false);
     } finally {
+      await releaseModel?.().catch(() => undefined);
+      if (submission.stopRequested && !submission.accepted && isCurrent()) { restoreRejected(); setSending(false); setRunActivityLabel(null); stoppingRef.current = false; setStopping(false); }
       if (submissionRef.current === submission) submissionRef.current = null;
     }
   }
@@ -777,20 +830,49 @@ export function ChatPage() {
   async function stopGeneration() {
     if (stoppingRef.current) return;
     const submission = submissionRef.current;
-    if (!activeRun && !submission) return;
+    if (!activeRun && !submission && !preparingRetryRef.current) return;
     stoppingRef.current = true;
     setStopping(true);
     if (submission) submission.stopRequested = true;
+    if (preparingRetryRef.current) { preparingRetryRef.current.cancelled = true; return; }
     if (runIdRef.current) return cancelGeneration(runIdRef.current);
+  }
+
+  async function retryWithModel(runId: string, strategy: "default" | "expanded_retry" = "default", web?: "off", operation?: () => Promise<ModelRun>) {
+    const scope = sendScopeRef.current;
+    const ticket = { cancelled: false };
+    preparingRetryRef.current = ticket;
+    let previous: ModelRun | null = null;
+    try {
+      const run = activeRun?.id === runId ? activeRun : await modelRunRepository.get(runId);
+      previous = run;
+      return await withPreparedLocalModel(localModelRepository, run.provider_profile_id, run.model_id,
+        () => ticket.cancelled || sendScopeRef.current !== scope,
+        (state, elapsed) => setRunActivityLabel(tChat(`routing.status.${state === "waiting" ? "waitingModel" : "loadingModel"}`, { model: run.model_id, elapsed })),
+        operation ?? (() => modelRunRepository.retry(runId, strategy, web)));
+    } catch (value) {
+      if (ticket.cancelled && previous) return previous;
+      throw value;
+    } finally {
+      if (preparingRetryRef.current === ticket) preparingRetryRef.current = null;
+      if (ticket.cancelled) {
+        setSending(false); setError(false); setRunActivityLabel(null);
+        stoppingRef.current = false; setStopping(false);
+      }
+    }
   }
 
   async function retryRun() {
     if (!activeRun) return;
     terminalRefreshRevision.current += 1;
-    runActionRef.current += 1;
+    const action = ++runActionRef.current;
+    const scope = sendScopeRef.current;
     setError(false); setSending(true); clearStreamingContent(); runIdRef.current = activeRun.id;
-    try { setActiveRun(await modelRunRepository.retry(activeRun.id)); }
-    catch (value) {
+    try {
+      const run = await retryWithModel(activeRun.id);
+      if (runActionRef.current === action && sendScopeRef.current === scope) setActiveRun(run);
+    } catch (value) {
+      if (runActionRef.current !== action || sendScopeRef.current !== scope) return;
       setError(true); setErrorDetail(value instanceof Error ? value.message : null); setSending(false);
     }
   }
@@ -801,20 +883,26 @@ export function ChatPage() {
     const action = ++runActionRef.current;
     setError(false); setSending(true); clearStreamingContent();
     try {
-      const run = await modelRunRepository.retry(activeRun.id, "default", "off");
+      const run = await retryWithModel(activeRun.id, "default", "off");
       if (runActionRef.current !== action || sendScopeRef.current !== inspectorKey) return;
       runIdRef.current = run.id; setLastRunId(run.id); setActiveRun(run);
     } catch (value) {
+      if (runActionRef.current !== action || sendScopeRef.current !== inspectorKey) return;
       setError(true); setErrorDetail(value instanceof Error ? value.message : null); setSending(false);
     }
   }
 
   async function continueContext() {
     if (!activeRun || activeRun.status !== "waiting_context") return;
-    runActionRef.current += 1;
-    setError(false); setSending(true); runIdRef.current = activeRun.id;
-    try { setActiveRun(await modelRunRepository.continueContext(activeRun.id)); }
-    catch (value) {
+    const action = ++runActionRef.current;
+    const scope = sendScopeRef.current;
+    const runId = activeRun.id;
+    setError(false); setSending(true); runIdRef.current = runId;
+    try {
+      const run = await retryWithModel(runId, "default", undefined, () => modelRunRepository.continueContext(runId));
+      if (runActionRef.current === action && sendScopeRef.current === scope) setActiveRun(run);
+    } catch (value) {
+      if (runActionRef.current !== action || sendScopeRef.current !== scope) return;
       setError(true); setErrorDetail(value instanceof Error ? value.message : null); setSending(false);
     }
   }
@@ -872,7 +960,7 @@ export function ChatPage() {
     const action = ++runActionRef.current;
     setError(false); setSending(true); clearStreamingContent();
     try {
-      const run = await modelRunRepository.retry(lastRunId, "expanded_retry");
+      const run = await retryWithModel(lastRunId, "expanded_retry");
       if (runActionRef.current !== action || sendScopeRef.current !== inspectorKey) return;
       runIdRef.current = run.id; setLastRunId(run.id); setActiveRun(run);
       setPendingBudgetPlan(null);
@@ -885,6 +973,7 @@ export function ChatPage() {
       }
       inspectorStore.close(inspectorKey);
     } catch (value) {
+      if (runActionRef.current !== action || sendScopeRef.current !== inspectorKey) return;
       setError(true); setErrorDetail(value instanceof Error ? value.message : null); setSending(false);
     }
   }
@@ -926,6 +1015,10 @@ export function ChatPage() {
   const openProjectFile = useCallback(async (target: ProjectFileTarget) => {
     if (!conversationId || conversationKind !== "project_work") return;
     try {
+      if (/\.docx$/i.test(target.path) && projectFilePreviewRepository.openDocument) {
+        await projectFilePreviewRepository.openDocument(conversationId, target.path);
+        return;
+      }
       const preview = await projectFilePreviewRepository.preview(conversationId, target.path);
       updateInspector(inspectorKey, () => ({
         open: true,
@@ -1109,6 +1202,7 @@ export function ChatPage() {
             {activeRun.draft?.content ? <WorkProcessDisclosure content={activeRun.draft.content} state="draft"
               onProjectFile={effectiveKind === "project_work" ? openProjectFile : undefined}
               onProjectDirectory={effectiveKind === "project_work" ? openProjectDirectory : undefined} /> : null}
+            {activeRun.error_code?.startsWith("rag_") ? <Button variant="ghost" onClick={() => void showContext()}>{tChat("routing.status.viewEvidence")}</Button> : null}
             {activeRun.error_code === "invocation_route_stale" ? null
               : activeRun.web_search_route === "native" && [
               "image_format_unsupported", "multimodal_route_unsupported", "multimodal_protocol_unsupported",
@@ -1124,6 +1218,9 @@ export function ChatPage() {
         {!sending && activeRun?.status === "waiting_context" ? (
           <div className="chat-message chat-message--assistant chat-message--context-waiting">
             <strong>{tChat("context.waitingTitle")}</strong>
+            {activeRun.error_code ? <p>{tChat(`context.compactionErrors.${activeRun.error_code}`, {
+              defaultValue: tChat("context.compactionPaused"),
+            })}</p> : null}
             <p>{tChat("context.waitingDescription")}</p>
             <div><Button variant="ghost" type="button" onClick={() => void stopGeneration()}>{tCommon("actions.cancel")}</Button>
               <Button type="button" onClick={() => void continueContext()}>{tChat("context.continue")}</Button></div>
@@ -1157,7 +1254,11 @@ export function ChatPage() {
           </div>
         ) : null}
         {error ? (
-          <div className="chat-error">{errorDetail ?? tChat(activeRun?.status === "failed" ? "status.responseInterrupted" : "status.error")}
+          <div className="chat-error">{errorDetail ? errorDetail.replace(/^(?:Error:\s*)?rag_[a-z_]+[:：]?\s*/, '') : tChat(activeRun?.status === "failed" ? "status.responseInterrupted" : "status.error")}
+            {errorDetail?.includes('rag_') ? activeProject
+              ? <ProjectLibraries projectId={activeProject.id} compact ragMode={ragMode} />
+              : <Button variant="ghost" onClick={() => setCurrentPage('projects')}>{tChat('ragMode.chooseProject')}</Button>
+              : null}
             {failedContent ? (
               <Button variant="ghost" icon={<RotateCcw size={14} />} onClick={() => void send(failedContent, failedEditMessage ?? undefined)}>{tCommon("actions.retry")}</Button>
             ) : null}
@@ -1173,6 +1274,11 @@ export function ChatPage() {
       </div>
 
       <ComposerDock
+        ragControl={<button type="button" aria-pressed={ragMode === 'required'}
+          disabled={!coreOnline || ragModeBusy || sending || loading}
+          title={tChat('ragMode.hint')} onClick={() => void toggleRagMode()}>
+          {tChat(ragMode === 'required' ? 'ragMode.required' : 'ragMode.button')}
+        </button>}
         value={input}
         disabled={!coreOnline}
         generating={sending || stopping}
@@ -1198,6 +1304,7 @@ export function ChatPage() {
         onGrantChange={setGrant}
         onConversationChange={(updated) => { setConversation(updated); void refreshWorkspace(); }}
         attachments={attachmentController.attachments}
+        attachmentPurposes={attachmentPurposes} onAttachmentPurpose={(id, purpose) => setAttachmentPurposes((current) => ({ ...current, [id]: purpose }))}
         rejectedAttachments={attachmentController.rejectedAttachments}
         attachmentPreviews={attachmentController.previews}
         attachmentBusy={attachmentController.busy}

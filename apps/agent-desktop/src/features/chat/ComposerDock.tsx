@@ -45,6 +45,9 @@ interface Props {
   onOpenProjectSettings?(): void;
   inlineNotice?: ReactNode;
   routingControl?: ReactNode;
+  ragControl?: ReactNode;
+  attachmentPurposes?: Record<string, "template" | "reference">;
+  onAttachmentPurpose?(id: string, purpose: "template" | "reference"): void;
 }
 
 export function ComposerDock(props: Props) {
@@ -52,6 +55,8 @@ export function ComposerDock(props: Props) {
   return <div className="chat-composer-area">
     {props.referenceTray}
     <ChatComposer value={props.value} onChange={props.onChange} onSend={props.onSend} disabled={props.disabled}
+      ragControl={props.ragControl}
+      attachmentPurposes={props.attachmentPurposes} onAttachmentPurpose={props.onAttachmentPurpose}
       sendDisabled={props.sendDisabled}
       generating={props.generating} stopping={props.stopping} onStop={props.onStop}
       referenceCount={props.referenceCount}
@@ -65,7 +70,7 @@ export function ComposerDock(props: Props) {
     {props.compaction && ["queued", "running", "interrupted", "failed"].includes(props.compaction.status) ? (
       <div className={`context-compaction-status context-compaction-status--${props.compaction.status}`} role="status">
         <span>{props.compaction.status === "running" || props.compaction.status === "queued"
-          ? t("context.compacting")
+          ? t(props.compaction.background ? "context.compactingBackground" : "context.compacting")
           : t(`context.compactionErrors.${props.compaction.error_code ?? "context_compaction_failed"}`, {
             defaultValue: t("context.compactionPaused"),
           })}</span>

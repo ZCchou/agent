@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,17 @@ class HistoryTurn:
     messages: tuple[dict[str, Any], ...]
     complete: bool
     legacy: bool = False
+
+
+def history_requirements(current: dict[str, Any], turns: list[HistoryTurn], *, evidence_task: bool) -> tuple[bool, set[str]]:
+    text = current['content']
+    dependent = re.search(r'刚才|上次|上述|上面|以上|之前|先前|沿用|继续|同上|前面|那个|这个|\b(previous|above|continue|same|earlier|again)\b', text, re.IGNORECASE)
+    explicit_task = evidence_task and len(text.strip()) >= 8
+    # Without an explicit new-task boundary, earlier user facts and presentation
+    # requirements remain dependencies even when they contain no constraint verb.
+    protected = {message['id'] for turn in turns for message in turn.messages
+                 if message['id'] != current['id'] and message['role'] == 'user'}
+    return bool(explicit_task and not dependent), protected
 
 
 def reconstruct_turns(messages: list[dict[str, Any]], runs: list[dict[str, Any]]) -> list[HistoryTurn]:

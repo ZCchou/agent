@@ -64,6 +64,10 @@ class WorkerClient:
             except asyncio.CancelledError:
                 await self._stop()
                 raise
+            except CoreDataError as exc:
+                if exc.code == 'rag_resource_exhausted':
+                    await self._stop()
+                raise
             except (OSError, ValueError, EOFError, ConnectionError) as exc:
                 await self._stop()
                 raise CoreDataError("rag_model_error", f"Inference worker failed: {exc}") from exc
@@ -83,7 +87,16 @@ class WorkerClient:
         if response.get("id") != request_id:
             raise ValueError("Worker response id mismatch")
         if response.get("error"):
-            raise CoreDataError("rag_model_error", str(response["error"]))
+            message = str(response['error'])
+            if any(marker in message.casefold() for marker in (
+                'failed to allocate memory', 'out of memory', 'bad allocation', 'bad_alloc',
+                'cudaerrormemoryallocation', 'not enough memory',
+            )):
+                raise CoreDataError('rag_resource_exhausted', '辅助检索模型内存不足。请释放内存或调整辅助模型设备后重试。', {
+                    'device': params.get('device'), 'batch_size': len(params.get('texts', [])),
+                    'action': action,
+                })
+            raise CoreDataError("rag_model_error", message)
         return response["result"]
 
     async def _stop(self):

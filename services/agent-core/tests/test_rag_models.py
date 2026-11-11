@@ -10,6 +10,54 @@ from agent.rag.models import ModelStore
 from agent.storage import CoreDataError
 
 
+@pytest.mark.parametrize('fail_pairs', [False, True])
+@pytest.mark.parametrize('action', ['embed', 'rerank'])
+def test_onnx_small_batches_and_memory_retry_preserve_results(tmp_path, monkeypatch, fail_pairs, action):
+    import sys
+    script = tmp_path / 'batch_worker.py'
+    log = tmp_path / 'batches.jsonl'
+    script.write_text(f'''import sys
+import json
+from pathlib import Path
+
+for line in sys.stdin:
+    request = json.loads(line)
+    texts = request['params'].get('texts', [])
+    with Path({str(log)!r}).open('a') as stream:
+        stream.write(json.dumps(texts) + '\\n')
+    if {fail_pairs!r} and len(texts) > 1:
+        response = {{'id': request['id'], 'error': 'Failed to allocate memory for requested buffer'}}
+    else:
+        values = [[float(text)] + [0.0] * 1023 for text in texts] if request['action'] == 'embed' else [float(text) / 10 for text in texts]
+        response = {{'id': request['id'], 'result': values}}
+    print(json.dumps(response), flush=True)
+''', encoding='utf-8')
+    store = ModelStore(tmp_path / 'data')
+    source = model_directory(tmp_path / 'source')
+    profile = 'bge-m3'
+    if action == 'rerank':
+        profile = 'bge-reranker-v2-m3'
+        (source / 'config.json').write_text(json.dumps({'model_type': 'xlm-roberta',
+            'architectures': ['XLMRobertaForSequenceClassification'], 'hidden_size': 1024, 'num_labels': 1}))
+    record = asyncio.run(store.import_model(source, profile))
+    store._state['models'][0]['backend'] = 'onnx'
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+    async def exercise():
+        try:
+            texts = ['0', '1', '2', '3', '4']
+            if action == 'embed':
+                vectors = await store.embed(record['id'], texts)
+                assert [vector[0] for vector in vectors] == [0, 1, 2, 3, 4]
+            else:
+                assert await store.rerank(record['id'], 'query', texts) == [0, 0.1, 0.2, 0.3, 0.4]
+        finally:
+            await store.close()
+    asyncio.run(exercise())
+    batches = [json.loads(line) for line in log.read_text().splitlines()]
+    assert max(map(len, batches)) <= 2
+    assert batches == ([['0', '1'], ['0'], ['1'], ['2'], ['3'], ['4']] if fail_pairs else [['0', '1'], ['2', '3'], ['4']])
+
+
 def model_directory(root, profile="bge-m3"):
     root.mkdir()
     config = {"model_type": "xlm-roberta", "architectures": ["XLMRobertaModel"], "hidden_size": 1024}

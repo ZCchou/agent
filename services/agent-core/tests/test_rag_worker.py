@@ -58,6 +58,24 @@ def test_worker_client_exchanges_json_lines_and_closes(tmp_path):
     asyncio.run(exercise())
 
 
+def test_worker_memory_failure_has_resource_code_and_stops_process(tmp_path):
+    script = tmp_path / 'memory.py'
+    script.write_text("import sys,json\nfor line in sys.stdin:\n r=json.loads(line);print(json.dumps({'id':r['id'],'error':'RuntimeException: BFCArena::AllocateRawInternal Failed to allocate memory for requested buffer of size 281129472'}),flush=True)\n")
+    async def exercise():
+        client = WorkerClient([sys.executable, str(script)])
+        try:
+            with pytest.raises(CoreDataError) as error:
+                await client.request('embed', {'device': 'cuda', 'texts': ['a', 'b']})
+            assert error.value.code == 'rag_resource_exhausted'
+            from agent.execution.run_recovery import safe_code, failure_notice
+            assert safe_code(error.value) == 'rag_resource_exhausted'
+            assert 'internal_error' not in failure_notice(safe_code(error.value), [], terminal=True)
+            assert client.process is None
+        finally:
+            await client.close()
+    asyncio.run(exercise())
+
+
 def test_worker_environment_isolates_native_and_python_search_paths(tmp_path, monkeypatch):
     script = tmp_path / "environment.py"
     script.write_text("import sys,json,os\nfor line in sys.stdin:\n r=json.loads(line);print(json.dumps({'id':r['id'],'result':{k:os.environ.get(k) for k in ['PATH','PYTHONPATH','PYTHONHOME','CUDA_PATH']}}),flush=True)\n")

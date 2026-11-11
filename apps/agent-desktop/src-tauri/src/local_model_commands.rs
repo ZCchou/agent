@@ -95,7 +95,7 @@ fn validate_params(action: &str, params: &Value) -> Result<(), String> {
         "model.inspect" | "model.import" | "storage.root" => {
             (&["path", "grant_id"], &["path", "grant_id"])
         }
-        "model.configure" => (
+        "model.configure" | "model.configure_load" => (
             &[
                 "model_id",
                 "device",
@@ -109,6 +109,8 @@ fn validate_params(action: &str, params: &Value) -> Result<(), String> {
             &["model_id"],
         ),
         "model.remove" | "runtime.load" => (&["model_id"], &["model_id"]),
+        "runtime.prepare" => (&["model_id", "preparation_id"], &["model_id"]),
+        "runtime.release" => (&["preparation_id"], &["preparation_id"]),
         "job.cancel" => (&["job_id"], &["job_id"]),
         _ => return Err("Unsupported local model operation.".into()),
     };

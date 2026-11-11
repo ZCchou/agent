@@ -152,11 +152,66 @@ def test_rejected_attachment_is_rendered_as_safe_unavailable_metadata() -> None:
 
 
 def test_history_cannot_be_silently_omitted_without_checkpoint() -> None:
-    history = [HistoryTurn((message("u1", "user", "x" * 900),
-                            message("a1", "assistant", "y" * 900)), True)]
+    history = [HistoryTurn((message("u1", "user", "x" * 3000),
+                            message("a1", "assistant", "y" * 3000)), True)]
     with pytest.raises(ContextEngineError, match="compacted") as captured:
         packed(history=history, input_target=100, hard_limit=1_500)
     assert captured.value.code == "context_compaction_required"
+
+
+def test_maintenance_target_is_eighty_percent_of_available_input():
+    window, target, reserve, hard = resolve_budget(context_window=8192, max_output_tokens=2048)
+    assert (window, target, reserve, hard) == (8192, 3932, 2048, 4915)
+
+
+def test_complete_history_above_maintenance_target_fits_hard_limit():
+    history = [HistoryTurn((message('u', 'user', 'constraint ' * 30),
+                            message('a', 'assistant', 'x' * 1800)), True)]
+    result = packed(history=history, input_target=100, hard_limit=1500)
+    assert all(item.included for item in result.items)
+    assert result.estimated_tokens > 100
+    assert result.estimated_tokens <= 1500
+
+
+def test_independent_document_task_records_optional_history_omission():
+    old = HistoryTurn((message('u', 'user', 'old question'), message('a', 'assistant', 'x' * 6000)), True)
+    result = pack_context(system_message='policy', pinned_knowledge=[], checkpoint=None,
+        history_turns=[old], retrieved=[], retrieval_confidence=RetrievalConfidence.NONE,
+        task_state={}, current_message=message('current', 'user', 'Fill the vibration purpose'),
+        context_generation=1, context_window=2000, input_target=1000, hard_limit=1500,
+        output_reserve=500, allow_history_omission=True, protected_history_ids=set())
+    excluded = [item for item in result.items if not item.included]
+    assert {item.source.source_id for item in excluded} == {'u', 'a'}
+    assert all(item.exclusion_reason == 'token_budget' for item in excluded)
+
+
+def test_independent_evidence_task_protects_user_constraints_and_followups():
+    from agent.context_engine.history import history_requirements
+    turns = [HistoryTurn((message('constraint', 'user', '设备安装在机翼，采用 S 类。'),
+                          message('answer', 'assistant', 'confirmed')), True)]
+    allowed, protected = history_requirements(message('current', 'user', '请依据项目资料填写振动试验目的'), turns, evidence_task=True)
+    assert allowed and protected == {'constraint'}
+    allowed, _ = history_requirements(message('current', 'user', '沿用刚才确认的类别，继续填写'), turns, evidence_task=True)
+    assert not allowed
+
+
+def test_evidence_task_preserves_earlier_language_and_device_requirements():
+    from agent.context_engine.history import history_requirements
+    turns = [HistoryTurn((message('language', 'user', '请仅输出中文'),), False),
+             HistoryTurn((message('device', 'user', '设备为机载传感器，质量2kg，测量范围±50g'),), False)]
+    _, protected = history_requirements(message('now', 'user', '请依据项目资料填写振动试验目的'), turns, evidence_task=True)
+    assert protected == {'language', 'device'}
+
+
+def test_serialized_history_overhead_can_be_omitted_for_independent_request():
+    result = pack_context(system_message='system', pinned_knowledge=[], checkpoint=None,
+        history_turns=[HistoryTurn((message('old', 'assistant', 'x' * 200),), False)],
+        retrieved=[], retrieval_confidence=RetrievalConfidence.NONE, task_state={},
+        current_message=message('now', 'user', 'question'), context_generation=1,
+        context_window=1000, input_target=80, hard_limit=100, output_reserve=100,
+        allow_history_omission=True)
+    assert result.estimated_tokens <= 100
+    assert not next(item for item in result.items if item.source.source_id == 'old').included
 
 
 def test_current_and_pinned_overflow_have_distinct_errors() -> None:

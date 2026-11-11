@@ -75,6 +75,9 @@ export function ContextDetails({ runId, snapshot, loading, error, retrying, onEx
     || ["low", "none"].includes(snapshot.retrieval_confidence);
   const previewedItem = snapshot.items.find((item) => item.id === sourceItemId);
   const previewImageUrl = source ? imageDataUrl(source) : null;
+  const inputLimit = snapshot.input_hard_limit;
+  const capacity = inputLimit == null ? "unknown" : snapshot.estimated_tokens > inputLimit ? "over"
+    : snapshot.estimated_tokens >= inputLimit * 0.8 ? "near" : "ready";
 
   async function openSource(itemId: string) {
     const request = ++sourceRequest.current;
@@ -106,8 +109,22 @@ export function ContextDetails({ runId, snapshot, loading, error, retrying, onEx
 
   return <section className="context-panel">
     <div className="context-panel__summary">
-      <strong>{t("context.used", { used: snapshot.estimated_tokens, budget: snapshot.input_target })}</strong>
-      <span>{t("context.window", { window: snapshot.context_window, reserve: snapshot.output_reserve })}</span>
+      <strong>{t(`context.capacity.${capacity}`)}</strong>
+      <span>{t(inputLimit == null ? "context.estimatedInput" : snapshot.input_scope === "compiled_request"
+        ? "context.completeInput" : "context.used", { used: snapshot.estimated_tokens, budget: inputLimit })}</span>
+      <details><summary>{t("context.budgetDetails")}</summary>
+        <p>{t("context.window", { window: snapshot.context_window, reserve: snapshot.output_reserve })}</p>
+        {inputLimit != null ? <p>{t("context.hardLimit", { limit: inputLimit })}</p> : null}
+        <p>{t("context.maintenanceTarget", { target: snapshot.input_target })}</p>
+        {snapshot.body_input_limit != null ? <p>{t("context.bodyLimit", { limit: snapshot.body_input_limit })}</p> : null}
+        {snapshot.request_constraint_tokens != null ? <p>{t("context.requestConstraints", { count: snapshot.request_constraint_tokens })}</p> : null}
+        {inputLimit != null ? <p>{t(snapshot.estimated_tokens > inputLimit ? "context.inputOverflow" : "context.inputRemaining",
+          { count: Math.abs(inputLimit - snapshot.estimated_tokens) })}</p> : null}
+      </details>
+      <span>{t("context.historyOmitted", { count: snapshot.items.filter((item) => item.source_type === "message" && !item.included).length })}</span>
+      {snapshot.run_usage?.input_tokens != null ? <span>{t('context.actualUsage', {
+        input: snapshot.run_usage.input_tokens, output: snapshot.run_usage.output_tokens ?? t('context.unknownUsage'),
+      })}</span> : null}
       <span>{t("context.policy", { policy: snapshot.policy_version, generation: snapshot.context_generation })}</span>
       {snapshot.global_instruction_revision > 0 ? <span>{t("context.globalInstructions", {
         revision: snapshot.global_instruction_revision,
@@ -139,6 +156,9 @@ export function ContextDetails({ runId, snapshot, loading, error, retrying, onEx
         {attachmentName ? <strong className="context-panel__attachment-name">{attachmentName}</strong> : null}
         <small>{t(`context.trust.${item.trust}`, { defaultValue: item.trust })}</small>
         {item.source_type === "attachment" ? <>
+          {item.metadata?.document_locator && typeof item.metadata.document_locator === "object"
+            && Array.isArray((item.metadata.document_locator as Record<string, unknown>).heading_path)
+            ? <small>{((item.metadata.document_locator as Record<string, unknown>).heading_path as string[]).join(" → ")}</small> : null}
           {range ? <small>{t("context.attachmentRange", range)}</small> : null}
           <small>{t(`context.attachmentRoute.${routeKey}`)}</small>
           <small>{t(attachmentReason(item, Boolean(range)))}</small>

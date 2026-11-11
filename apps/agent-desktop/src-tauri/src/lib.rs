@@ -387,6 +387,7 @@ pub fn run() {
             domain_commands::get_conversation,
             domain_commands::create_conversation,
             domain_commands::update_conversation,
+            domain_commands::update_conversation_rag,
             domain_commands::derive_work,
             domain_commands::reorder_conversations,
             domain_commands::move_chat,
@@ -411,6 +412,7 @@ pub fn run() {
             domain_commands::get_attachment_normalization_status,
             domain_commands::preview_project_file,
             domain_commands::open_project_directory,
+            domain_commands::open_project_document,
             domain_commands::open_project_root_directory,
             commands::model_runs::get_model_run,
             commands::model_runs::get_conversation_model_run,
@@ -576,4 +578,6 @@ pub fn run() {
 }
 
 mod terminal_executor;
+#[cfg(windows)]
+mod offline_terminal;
 mod terminal_service;

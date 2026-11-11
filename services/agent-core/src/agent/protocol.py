@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 21
+PROTOCOL_VERSION = 22
 CORE_VERSION = "0.15.0"
-BUILD_ID = "schema28-rag-workspace-v1"
+BUILD_ID = "schema29-rag-workflow-v1"
 _LOGGER = logging.getLogger("agent.core")
 
 
@@ -109,7 +109,7 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
             "chat_group.reorder", "project.list", "project.create", "project.update", "project.reorder",
             "project.delete_impact",
             "conversation.list", "conversation.get", "conversation.create",
-            "conversation.update", "conversation.derive_work", "conversation.reorder",
+            "conversation.update", "conversation.rag.update", "conversation.derive_work", "conversation.reorder",
             "conversation.move_chat", "conversation.move_work", "conversation.copy_work",
             "conversation.delete", "project.delete",
             "trash.list", "trash.restore", "trash.delete_permanently", "trash.empty", "trash.purge_expired",
@@ -206,6 +206,9 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
                 _required_string(params, "title"),
                 _optional_string(params, "category"),
             )}
+        elif message_type == "conversation.rag.update":
+            result = {"conversation": repository.update_conversation_rag(
+                _required_string(params, 'conversation_id'), _required_string(params, 'mode'))}
         elif message_type == "conversation.derive_work":
             result = {"conversation": repository.derive_work(
                 _required_string(params, "source_conversation_id"),
@@ -385,12 +388,14 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
 ASYNC_MESSAGE_TYPES = {
     "rag.request",
     "local_model.request",
+    "document.artifact.get",
+    "document.template.import",
     "app.update.prepare", "app.update.abort",
     "runtime.capabilities.configure", "runtime.capabilities.resolve",
     "provider.configure", "provider.clear", "provider.status", "provider.list_models",
     "provider.native_search.probe", "routing.configure",
     "model.run.start", "model.run.cancel", "model.run.retry", "model.run.context.continue",
-    "model.run.plan.get", "model.run.budget.resolve", "conversation.routing.update",
+    "model.run.plan.get", "model.run.budget.resolve", "conversation.routing.update", "conversation.rag.update",
     "context.compaction.status", "context.compaction.resume", "context.compaction.pause",
     "model.run.tool.status", "model.run.tool.resolve", "model.run.tool.reject",
     "model.run.tool.review", "model.tool_capability.probe", "tool.operation.list",
@@ -436,6 +441,10 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
             result = await service.rag.handle(_required_string(params, "action"), params.get("params", {}))
         elif message_type == "local_model.request":
             result = await service.handle_local_model(_required_string(params, "action"), params.get("params", {}))
+        elif message_type == 'document.artifact.get':
+            result = service.document_artifact(_required_string(params, 'run_id'), _required_string(params, 'artifact_id'))
+        elif message_type == 'document.template.import':
+            result = service.import_project_template(_required_string(params, 'operation_id'), _required_string(params, 'storage_key'), _required_string(params, 'sha256'))
         elif getattr(service, "offline", False) and message_type in {"web.operation.prepare", "provider.native_search.probe"}:
             raise CoreDataError("offline_network_forbidden", "离线模式禁用公网检索。")
         elif message_type in {"app.update.prepare", "app.update.abort"}:
@@ -491,6 +500,9 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
                 params.get("provider_profile_id") if isinstance(params.get("provider_profile_id"), str) else None,
                 params.get("model_id") if isinstance(params.get("model_id"), str) else None,
             )}
+        elif message_type == 'conversation.rag.update':
+            result = {'conversation': service.repository.update_conversation_rag(
+                _required_string(params, 'conversation_id'), _required_string(params, 'mode'))}
         elif message_type == "model.run.cancel":
             result = {"run": await service.cancel(_required_string(params, "run_id"))}
         elif message_type == "model.run.retry":

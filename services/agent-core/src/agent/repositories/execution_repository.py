@@ -197,10 +197,12 @@ class ExecutionRepository:
                         "reasoning_effort": spec.reasoning_effort,
                         "max_output_tokens": spec.max_output_tokens,
                         "response_format": spec.response_format,
+                        **({"response_schema": json.loads(spec.response_schema_json)} if spec.response_schema_json else {}),
                     }, sort_keys=True),
                     json.dumps({
                         "connect_timeout_ms": spec.connect_timeout_ms,
                         "activity_timeout_ms": spec.activity_timeout_ms,
+                        **({"first_output_timeout_ms": spec.first_output_timeout_ms} if spec.first_output_timeout_ms is not None else {}),
                         "total_timeout_ms": spec.total_timeout_ms,
                     }, sort_keys=True),
                     spec.serialization_version, spec.authority_generation, spec.status,
@@ -409,6 +411,7 @@ class ExecutionRepository:
         self, step_id: str, artifact_type: str, content: dict[str, Any], *,
         trust: str = "model_inference", derived_from_untrusted: bool = False,
         source_refs: list[str] | None = None,
+        select_as_output: bool = True,
     ) -> dict[str, Any]:
         encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         byte_size = len(encoded.encode("utf-8"))
@@ -438,9 +441,10 @@ class ExecutionRepository:
                  1 if derived_from_untrusted else 0, json.dumps(source_refs or []),
                  hashlib.sha256(encoded.encode("utf-8")).hexdigest(), byte_size, _utc_now()),
             )
-            connection.execute(
-                "UPDATE execution_steps SET artifact_id = ? WHERE id = ?", (artifact_id, step_id),
-            )
+            if select_as_output:
+                connection.execute(
+                    "UPDATE execution_steps SET artifact_id = ? WHERE id = ?", (artifact_id, step_id),
+                )
             return dict(connection.execute(
                 "SELECT * FROM execution_artifacts WHERE id = ?", (artifact_id,),
             ).fetchone())

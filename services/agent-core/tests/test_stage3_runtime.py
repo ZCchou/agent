@@ -403,7 +403,8 @@ def test_project_work_natural_language_tool_round_resumes_generation(tmp_path: P
         assert event_types[-1] == "run.completed"
         snapshot = service.context.context_repository.preview(run["id"])
         assert snapshot is not None
-        assert snapshot["round_no"] == 1
+        assert snapshot["round_no"] == 2
+        assert snapshot['input_scope'] == 'compiled_request'
         assert any(item["source_type"] == "tool_round" for item in snapshot["items"])
 
     asyncio.run(scenario())

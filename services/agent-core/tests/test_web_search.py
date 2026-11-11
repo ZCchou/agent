@@ -31,7 +31,7 @@ def test_schema_v10_adds_web_policy_without_losing_records(tmp_path) -> None:
     path = tmp_path / "v9.db"
     CoreRepository(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 28
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 29
         project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
         conversation_columns = {row[1] for row in connection.execute("PRAGMA table_info(conversations)")}
         assert "web_access_policy" in project_columns
@@ -96,7 +96,7 @@ def test_real_v9_to_v10_migration_preserves_projects_conversations_messages_and_
             for table in ("projects", "conversations", "messages", "model_runs")
         }
         assert after == before
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 28
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 29
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -499,7 +499,7 @@ def test_v16_to_v17_backfills_evidence_without_changing_records(tmp_path) -> Non
     restored = migrated.get_web_operation(operation["id"])
     restored_zero_source = migrated.get_web_operation(zero_source_operation["id"])
     assert before == after
-    assert version == 28
+    assert version == 29
     assert restored["evidence_status"] == "traceable_sources"
     assert restored["verified_source_count"] == 1
     assert restored_zero_source["evidence_status"] == "legacy_unknown"

@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
@@ -201,7 +202,7 @@ fn admit_event(
                 .pointer("/data/operation/tool_name")
                 .and_then(Value::as_str)
                 .is_some_and(|name| {
-                    matches!(name, "fs.search" | "fs.read" | "fs.list" | "terminal.run")
+                    matches!(name, "fs.search" | "fs.read" | "fs.list" | "terminal.run" | "document.inspect_template")
                 }) =>
         {
             event
@@ -346,7 +347,7 @@ async fn handle(
         .map_err(|_| "invalid_core_response: Model run scope is invalid".to_string())?;
     if matches!(
         tool_name.as_str(),
-        "fs.search" | "fs.read" | "fs.list" | "terminal.run"
+        "fs.search" | "fs.read" | "fs.list" | "terminal.run" | "document.inspect_template" | "document.export"
     ) && matches!(
         run.run.status.as_str(),
         "completed" | "failed" | "cancelled"
@@ -386,6 +387,38 @@ async fn handle(
         (root, permission)
     };
 
+    if tool_name == "document.inspect_template" {
+        let task = search_task.ok_or("cancelled: Template read was not registered")?;
+        update_core_status(app, &operation_id, "executing").await?;
+        task.cancellation.check()?;
+        let source_scope = {
+            let tools = app.state::<Mutex<WorkToolManager>>();
+            let tools = tools.lock().map_err(|_| "tool_host_unavailable: Work permissions unavailable")?;
+            let current = tools.work_permission(&run.run.conversation_id, &project_id)?;
+            if current.root_generation != permission.root_generation || tools.authorized_root(&project_id)? != root {
+                return Err("scope_changed: Template authority changed before reading".into());
+            }
+            tools.authorized_access(&project_id, &run.run.conversation_id)?
+        };
+        let path = required(arguments, "path")?;
+        if !path.to_lowercase().ends_with(".docx") { return Err("document_template_invalid: Select a DOCX template".into()); }
+        let policy = crate::file_access::FileAccessPolicy;
+        let source = policy.open_read(&source_scope, &policy.validate_relative(path)?)?;
+        let before = source.hash(20 * 1024 * 1024)?;
+        let payload = source.read_bytes(20 * 1024 * 1024)?;
+        let hash = format!("{:x}", Sha256::digest(&payload));
+        if hash != before || source.hash(20 * 1024 * 1024)? != before { return Err("document_template_changed: Template changed while reading".into()); }
+        let store = app.path().app_data_dir().map_err(|_| "document_storage_unavailable: Application storage unavailable")?.join("document-artifacts")
+            .canonicalize().map_err(|_| "document_storage_unavailable: Document storage identity unavailable")?;
+        let private = crate::file_access::AuthorizedRoot::for_host_path(&store, std::path::Path::new(""));
+        let key = format!("input-{}.docx", uuid::Uuid::new_v4());
+        let relative = policy.validate_relative(&key)?;
+        policy.write_checked(&private, &relative, &payload, true, None, None, &uuid::Uuid::new_v4().to_string())?;
+        let result = request_core(app, &manager, "document.template.import", json!({"operation_id":operation_id,"storage_key":key,"sha256":hash})).await;
+        let _ = policy.delete_checked(&private, &relative, Some(&hash), None);
+        let output = result?.to_string();
+        return resolve_search(app, &operation_id, &project_id, &run.run.conversation_id, &root, permission.root_generation, task, output).await;
+    }
     if tool_name == "terminal.run" {
         return handle_terminal(
             app,
@@ -464,7 +497,22 @@ async fn handle(
         )
         .await;
     }
-    if tool_name != "fs.propose_changes" {
+    let document_arguments;
+    let arguments = if tool_name == "document.export" {
+        let artifact_id = required(arguments, "artifact_id")?;
+        let artifact = request_core(app, &manager, "document.artifact.get", json!({"run_id":run_id,"artifact_id":artifact_id})).await?;
+        let path = required(arguments, "path")?;
+        let storage_key = required(&artifact, "storage_key")?;
+        if std::path::Path::new(path).extension() != std::path::Path::new(storage_key).extension() {
+            return Err("document_export_invalid: Output extension must match the generated document".into());
+        }
+        app.state::<Mutex<AgentExecutionManager>>().lock()
+            .map_err(|_| "tool_host_unavailable: File executor unavailable")?
+            .register_document(artifact_id, storage_key, required(&artifact, "sha256")?)?;
+        document_arguments = json!({"title":format!("保存文档 {path}"),"mutations":[{"kind":"create_text","path":path,"artifact_key":artifact_id}]});
+        &document_arguments
+    } else { arguments };
+    if !matches!(tool_name.as_str(), "fs.propose_changes" | "document.export") {
         return Err("unsupported_tool: The requested tool is not supported".to_string());
     }
     let disposition = {
@@ -494,10 +542,11 @@ async fn handle(
     };
     match disposition {
         ChangeDisposition::Executed(result) => {
+            let output = document_publication_output(result.change_set.as_ref()).unwrap_or_else(|| result.output.clone());
             if let Some(change_set) = result.change_set {
                 let _ = app.emit("agent-change-set", &change_set);
             }
-            resolve_core_tool(app, &operation_id, true, result.output, None).await
+            resolve_core_tool(app, &operation_id, true, output, None).await
         }
         ChangeDisposition::NeedsHuman(view) => wait_for_user(app, &operation_id, &view).await,
         ChangeDisposition::NeedsAiReview(view) => {
@@ -557,6 +606,13 @@ async fn handle(
             }
         }
     }
+}
+
+fn document_publication_output(view: Option<&crate::agent_execution::ChangeSetView>) -> Option<String> {
+    let view = view.filter(|view| view.status == "completed")?;
+    let mutation = view.mutations.iter().find(|mutation| mutation.artifact_key.is_some())?;
+    Some(json!({"status":"published","artifact_id":mutation.artifact_key,"path":mutation.path,
+        "sha256":mutation.expected_after_hash}).to_string())
 }
 
 struct FileToolAuthority<'a> {
@@ -919,7 +975,7 @@ pub async fn resolve_pending(
     approve: bool,
     approval: Option<&crate::change_set_planner::PlanApproval>,
 ) -> Result<(), String> {
-    let (operation_id, project_id, conversation_id) = {
+    let (operation_id, project_id, conversation_id, document_source) = {
         let execution = app.state::<Mutex<AgentExecutionManager>>();
         let execution = execution
             .lock()
@@ -931,9 +987,15 @@ pub async fn resolve_pending(
             view.operation_id.clone(),
             view.project_id.clone(),
             view.conversation_id.clone(),
+            view.mutations.iter().find_map(|mutation| mutation.artifact_key.as_ref()).map(|key| (view.run_id.clone(), key.clone())),
         )
     };
     let manager = app.state::<Mutex<CoreProcessManager>>();
+    if approve {
+        if let Some((run_id, artifact_id)) = document_source {
+            request_core(app, &manager, "document.artifact.get", json!({"run_id":run_id,"artifact_id":artifact_id})).await?;
+        }
+    }
     let conversation_value = request_core(
         app,
         &manager,
@@ -1006,7 +1068,8 @@ pub async fn resolve_pending(
         let _ = app.emit("agent-change-set", change_set);
     }
     if approve {
-        resolve_core_tool(app, &operation_id, true, result.output, None).await
+        let output = document_publication_output(result.change_set.as_ref()).unwrap_or(result.output);
+        resolve_core_tool(app, &operation_id, true, output, None).await
     } else {
         reject_core_tool(app, &operation_id, result.output).await
     }

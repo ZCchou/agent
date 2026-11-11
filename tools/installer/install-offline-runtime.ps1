@@ -159,7 +159,7 @@ function Verify-Tree([string]$Root, $Manifest, [string[]]$OnlyComponents = @()) 
 function Assert-Idle([string]$Root) {
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
     foreach ($process in Get-Process -ErrorAction Stop) {
-        if ($process.Path -and $process.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($process.Path -and ([IO.Path]::GetFullPath($process.Path)).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Close the application and its managed workers before upgrading. Busy PID $($process.Id)"
         }
     }
