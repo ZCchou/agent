@@ -21,6 +21,20 @@ def previous_evidence_task(messages):
     return bool(answer and 'rag-evidence:' in answer.get('content', ''))
 
 
+def continuation_task(run, messages, plan):
+    from agent.context_engine.attachment_references import validate_saved_selection
+    current = next(item for item in messages if item['id'] == run['user_message_id'])
+    decision = run.get('rag_decision') or {}
+    selection = validate_saved_selection(plan, plan['resolved_intent']) if plan else []
+    if current.get('attachments') and not selection:
+        raise CoreDataError('attachment_reference_selection_changed', '原任务缺少可核验的附件选择，请重新选择模板附件后继续。')
+    return {'request': decision.get('query_context') or current['content'],
+            'task_type': decision.get('task_type', 'evidence_answer'),
+            'roles': decision.get('attachment_roles', {}),
+            'references': [{'attachment_id': item['current_attachment_id'],
+                **{key: item[key] for key in ('source_start', 'source_end') if key in item}} for item in selection]}
+
+
 def resolve_attachment_roles(attachments, requested=None):
     requested = {} if requested is None else requested
     selected = {item['id'] for item in attachments}
@@ -69,7 +83,8 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
     requirement = intent.get('rag_requirement', 'uncertain')
     result['source'] = 'advisor'
     result['semantic_requirement'] = requirement
-    protected = decision['reason'] in {'user_required', 'skill_required', 'template_fill'}
+    protected = (decision['reason'] in {'user_required', 'skill_required', 'template_fill'}
+                 or decision.get('reuse_evidence') or decision.get('continued_run_id'))
     if not protected:
         if requirement == 'uncertain':
             result['needs_confirmation'] = True
@@ -83,15 +98,22 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
     return result
 
 
-def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes):
+def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes, pending_task=None):
     """Bound classifier data independently from attachment bodies and generation history."""
     def clip(text, limit):
         return str(text).encode('utf8')[:limit].decode('utf8', errors='ignore')
 
     value = {'request': '', 'request_truncated': False, 'attachments': [],
              'work_kind': conversation_kind, 'recent_conversation': []}
+    if pending_task:
+        value['pending_task'] = {'task_type': pending_task.get('task_type'), 'required': bool(pending_task.get('required')),
+                                 'request': clip(pending_task.get('request', ''), min(256, budget_bytes // 4))}
     def render():
         return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+
+    if pending_task:
+        while len(render().encode('utf8')) > budget_bytes - 32 and value['pending_task']['request']:
+            value['pending_task']['request'] = value['pending_task']['request'][:-16]
 
     for attachment in attachments[:8]:
         entry = {'name': clip(attachment.get('name', 'attachment'), 100),

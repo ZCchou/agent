@@ -724,8 +724,19 @@ class ChatRunService:
                 *attachment_rejections,
             ]
         from agent.context_engine.attachment_references import AttachmentReferenceSelection
+        from agent.rag.routing import CONTINUATION, continuation_task
+        previous_run = self.repository.latest_model_run(conversation_id) if conversation_id else None
+        pending_evidence = bool(previous_run and previous_run['status'] in {'failed', 'cancelled', 'interrupted'} and (previous_run.get('rag_decision') or {}).get('required'))
+        continued = None
+        if pending_evidence and CONTINUATION.fullmatch(content.strip()):
+            prior = self.repository.get_run_conversation(previous_run['id'])
+            continued = continuation_task(previous_run, prior['messages'], self.execution_repository.get_for_run(previous_run['id']))
         references = params.get("attachment_references", [])
+        if continued and not attachments and not references:
+            references = continued['references']
         referenced = self.repository.resolve_attachment_references(conversation_id or "", references)
+        if continued:
+            referenced = [{**item, 'purpose': continued['roles'].get(item['id'], item.get('purpose'))} for item in referenced]
         attachment_selection = AttachmentReferenceSelection(
             self.repository._validate_attachments([*attachments, *referenced]),
         )
@@ -733,8 +744,6 @@ class ChatRunService:
         from agent.rag.routing import decide_evidence, merge_evidence_intent, previous_evidence_task, resolve_attachment_roles
         rag_mode = params.get('rag_mode') if params.get('rag_mode') is not None else (conversation or {}).get('rag_mode', 'auto')
         previous_evidence = previous_evidence_task((conversation or {}).get('messages', []))
-        previous_run = self.repository.latest_model_run(conversation_id) if conversation_id else None
-        pending_evidence = bool(previous_run and previous_run['status'] in {'failed', 'cancelled', 'interrupted'} and (previous_run.get('rag_decision') or {}).get('required'))
         rag_decision = decide_evidence(content, mode=rag_mode, previous_evidence=previous_evidence, pending_evidence=pending_evidence,
                                        skill_required=self.skills.requires_rag(content))
         rag_decision['attachment_roles'] = resolve_attachment_roles(attachments, params.get('attachment_purposes'))
@@ -746,6 +755,8 @@ class ChatRunService:
             prior = self.repository.get_run_conversation(previous_run['id'])
             rag_decision['query_context'] = next(item['content'][:2000] for item in prior['messages'] if item['id'] == previous_run['user_message_id'])
             rag_decision['continued_run_id'] = previous_run['id']
+        if continued:
+            rag_decision.update(query_context=continued['request'], task_type=continued['task_type'], continued_run_id=previous_run['id'])
         if rag_decision['reason'] in {'user_required', 'skill_required', 'template_fill'} and not rag_enabled:
             raise CoreDataError('rag_library_required', '当前任务需要项目资料。请先启用资料库，或关闭强制 RAG 后重新提出普通问题。')
         selection_value = params.get("selection") if isinstance(params.get("selection"), dict) else {}
@@ -1042,10 +1053,16 @@ class ChatRunService:
                 model_id=model_id, conversation_kind=requested_kind or "standard_chat",
                 pending_action=pending_action is not None,
                 recent_messages=recent_conversation_messages,
+                pending_task={'task_type': rag_decision['task_type'], 'required': rag_decision['required'],
+                              'request': rag_decision['query_context']} if rag_decision.get('continued_run_id') else None,
             )
             if semantic_rag:
                 rag_decision = merge_evidence_intent(rag_decision, advisor_intent, error_code=advisor_error_code)
                 if rag_decision.get('needs_confirmation') and not rag_decision['required']:
+                    if advisor_error_code and advisor_error_code != 'routing_intent_invalid':
+                        raise CoreDataError('routing_intent_timeout' if advisor_error_code == 'routing_intent_timeout' else 'routing_intent_unavailable',
+                            '本地模型未能完成任务识别。请检查模型运行状态后重试，输入与附件已保留。',
+                            {'advisor_error_code': advisor_error_code, 'rag_decision': rag_decision})
                     raise CoreDataError('routing_intent_uncertain',
                         '未能确定本轮是否需要项目条款依据。请明确说明任务，或开启强制 RAG 后重试。',
                         {'advisor_error_code': advisor_error_code, 'rag_decision': rag_decision})
@@ -3071,6 +3088,7 @@ class ChatRunService:
         profile: ProviderProfile, model_id: str, conversation_kind: str,
         recent_messages: list[dict[str, str]],
         pending_action: bool = False,
+        pending_task: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         """Ask the selected model for bounded capability and evidence intent."""
         prompt = (
@@ -3091,7 +3109,7 @@ class ChatRunService:
         # UTF-8 bytes form an upper bound for byte-tokenized input. Include
         # system instructions and framing in the shared 2,048-token envelope.
         payload = intent_payload(content, attachments, recent_messages, conversation_kind,
-                                 budget_bytes=max(256, 2048 - len(prompt.encode('utf8')) - 64))
+                                 budget_bytes=max(256, 2048 - len(prompt.encode('utf8')) - 64), pending_task=pending_task)
         provider = self._provider(profile)
         deadline = asyncio.get_running_loop().time() + 30
 
@@ -3126,13 +3144,13 @@ class ChatRunService:
                 )
             )
             if not retry_without_json:
-                return None, getattr(error, "code", "routing_intent_invalid")
+                return None, 'routing_intent_timeout' if isinstance(error, TimeoutError) else getattr(error, "code", "routing_intent_invalid")
             try:
                 return await classify(None), None
             except (
                 ProviderError, ValueError, TypeError, json.JSONDecodeError, TimeoutError,
             ) as retry_error:
-                return None, getattr(retry_error, "code", "routing_intent_invalid")
+                return None, 'routing_intent_timeout' if isinstance(retry_error, TimeoutError) else getattr(retry_error, "code", "routing_intent_invalid")
 
     async def _semantic_follow_up_offer(
         self, *, profile: ProviderProfile, model_id: str, user_request: str,
@@ -4732,6 +4750,8 @@ class ChatRunService:
         conversation = self.repository.get_run_conversation(run_id)
         current = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
         request = current['content']
+        if (run.get('rag_decision') or {}).get('continued_run_id'):
+            request = run['rag_decision'].get('query_context') or request
         format = 'markdown' if re.search(r'markdown|\.md\b', request, re.I) else 'txt' if re.search(r'\btxt\b|\.txt\b', request, re.I) else 'docx'
         evidence_state = self.rag_grounding.runs.get(run_id)
         claims = (evidence_state or {}).get('validated_claims', [])

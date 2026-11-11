@@ -128,3 +128,100 @@ def test_first_project_message_uses_bound_libraries(tmp_path, monkeypatch):
         finally:
             await service.shutdown()
     asyncio.run(scenario())
+
+
+def test_export_of_evidenced_answer_keeps_source_checks_after_semantic_classification():
+    decision = decide_evidence('把刚才的回答保存为Word文档', previous_evidence=True)
+    assert decision['reuse_evidence']
+    result = merge_evidence_intent(decision, {'rag_requirement': 'not_needed', 'task_kinds': ['document_export']})
+    assert result['required']
+    assert result['reuse_evidence']
+
+
+def test_classifier_reports_transport_timeout_distinctly(tmp_path, monkeypatch):
+    from test_tool_continuation_retry import configuration, fixture
+    async def scenario():
+        async def sink(event):
+            pass
+        core, project, chat, service = await fixture(tmp_path, sink, configuration())
+        class UnavailableProvider:
+            async def stream_events(self, *args, **kwargs):
+                raise TimeoutError('model did not respond')
+                yield
+        monkeypatch.setattr(service, '_provider', lambda profile: UnavailableProvider())
+        try:
+            result, code = await service._preflight_intent_advisor(content='普通问题', attachments=[],
+                profile=next(iter(service.profiles.values())), model_id='model', conversation_kind='project_work', recent_messages=[])
+            assert result is None
+            assert code == 'routing_intent_timeout'
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
+def test_classifier_payload_carries_bounded_pending_task():
+    from agent.rag.routing import intent_payload
+    value = json.loads(intent_payload('继续', [], [], 'project_work', budget_bytes=900,
+        pending_task={'task_type': 'document_export', 'required': True, 'request': '填写模板' * 1000}))
+    assert value['pending_task']['task_type'] == 'document_export'
+    assert value['pending_task']['required']
+    assert value['pending_task']['request'].startswith('填写模板')
+    assert len(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()) <= 900
+    escaped = intent_payload('继续', [], [], 'project_work', budget_bytes=300,
+        pending_task={'task_type': 'document_export', 'required': True, 'request': '\x01' * 1000})
+    assert len(escaped.encode()) <= 300
+
+
+def test_pending_task_continuation_keeps_template_selection_and_ranges():
+    from agent.rag.routing import continuation_task
+    from agent.execution.domain import stable_hash
+    from agent.storage import CoreDataError
+    selection = [{'current_attachment_id': 'template', 'source_attachment_id': 'source',
+                  'source_message_id': 'message', 'source_start': 10, 'source_end': 80}]
+    intent = {'effective_requirements': {}, 'attachment_selection': selection, 'effective_attachment_ids': ['template']}
+    plan = {'resolved_intent': intent, 'resolution_hash': stable_hash(intent),
+            'requirements_hash': stable_hash({'requirements_hash': stable_hash({}), 'attachment_selection': selection})}
+    run = {'id': 'previous', 'user_message_id': 'request', 'rag_decision': {'task_type': 'document_export',
+           'required': True, 'attachment_roles': {'template': 'template'}}}
+    messages = [{'id': 'request', 'content': '填写模板振动试验目的并保存为 Word', 'attachments': [{'id': 'template'}]}]
+    result = continuation_task(run, messages, plan)
+    assert result['task_type'] == 'document_export'
+    assert result['request'] == messages[0]['content']
+    assert result['references'] == [{'attachment_id': 'template', 'source_start': 10, 'source_end': 80}]
+    plan['resolution_hash'] = 'tampered'
+    with pytest.raises(CoreDataError, match='integrity'):
+        continuation_task(run, messages, plan)
+
+
+@pytest.mark.parametrize('mode', ['auto', 'required'])
+def test_runtime_continue_preserves_document_task_in_both_modes(tmp_path, monkeypatch, mode):
+    from test_tool_continuation_retry import configuration, fixture
+    async def scenario():
+        async def sink(event):
+            pass
+        config = configuration()
+        config['base_url'] = 'http://127.0.0.1:12345/v1'
+        core, project, chat, service = await fixture(tmp_path, sink, config)
+        monkeypatch.setattr(service.rag, 'project_state', lambda project_id: {'enabled': True})
+        original = core.start_model_run(content='填写项目模板并保存为Word文档', idempotency_key='original',
+            conversation_id=chat['id'], provider_profile_id='synthetic', model_id='model',
+            rag_decision={'requested_mode': mode, 'required': True, 'reason': 'template_fill',
+                          'task_type': 'document_export', 'attachment_roles': {}})
+        core.transition_model_run(original['id'], {'queued'}, 'failed')
+        observed = []
+        async def advisor(**kwargs):
+            observed.append(kwargs)
+            return {'rag_requirement': 'not_needed', 'task_kinds': ['general'], 'files': 'none',
+                    'tools': 'available', 'web': 'not_needed', 'reasoning': 'standard'}, None
+        monkeypatch.setattr(service, '_preflight_intent_advisor', advisor)
+        try:
+            started = await service.start({'conversation_id': chat['id'], 'content': '继续',
+                'idempotency_key': 'continue', 'rag_mode': mode})
+            decision = started['run']['rag_decision']
+            assert decision['task_type'] == 'document_export'
+            assert decision['required']
+            assert decision['query_context'] == '填写项目模板并保存为Word文档'
+            assert observed[0]['pending_task']['task_type'] == 'document_export'
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
