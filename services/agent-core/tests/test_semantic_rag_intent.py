@@ -7,6 +7,22 @@ from agent.execution.coordinator import ExecutionCoordinator
 from agent.rag.routing import decide_evidence, merge_evidence_intent
 
 
+def test_classifier_prompt_demonstrates_array_and_explanation_contract():
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).parents[1] / 'src/agent/runtime.py'
+    syntax = ast.parse(source.read_text(encoding='utf8'))
+    method = next(node for node in ast.walk(syntax)
+                  if isinstance(node, ast.AsyncFunctionDef) and node.name == '_preflight_intent_advisor')
+    prompt = next(node.value.value for node in method.body
+                  if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'prompt' for target in node.targets))
+    assert 'JSON array' in prompt
+    assert '["general"]' in prompt
+    assert '[a-z0-9_.-]{1,80}' in prompt
+    assert len(prompt.encode('utf8')) + 64 + 256 <= 2048
+
+
 def test_semantic_contract_accepts_evidence_and_document_tasks():
     intent = ExecutionCoordinator.parse_routing_intent(json.dumps({
         'web': 'off', 'reasoning': 'standard', 'task_kinds': ['document_export'],
