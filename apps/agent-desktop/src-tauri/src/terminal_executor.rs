@@ -1,8 +1,12 @@
 //! Finite Windows commands within capability-free, per-invocation AppContainers.
 use crate::file_access::{AuthorizedRoot, FileAccessPolicy, VerifiedReadHandle};
 use crate::file_search::Cancellation;
+#[cfg(windows)]
+use crate::offline_terminal::Process as Child;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
+use std::process::Child;
 use std::{
     io::{Read, Write},
     sync::{
@@ -12,10 +16,6 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
-#[cfg(windows)]
-use crate::offline_terminal::Process as Child;
-#[cfg(not(windows))]
-use std::process::Child;
 
 pub(crate) const MAX_TIMEOUT_MS: u64 = 600000;
 pub(crate) const MAX_OUTPUT_BYTES: usize = 1048576;
@@ -38,7 +38,9 @@ pub(crate) fn system_directory() -> Result<std::path::PathBuf, String> {
         return Err("terminal_spawn_failed: Windows system directory unavailable".into());
     }
     use std::os::windows::ffi::OsStringExt;
-    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(&directory[..size])))
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        &directory[..size],
+    )))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -198,7 +200,8 @@ impl TerminalProcess {
     #[cfg(windows)]
     pub fn start(root: &AuthorizedRoot, request: &TerminalRequest) -> Result<Self, String> {
         let cwd = Self::pin_cwd(root, request)?;
-        let project = FileAccessPolicy.open_read(root, &FileAccessPolicy.validate_relative(".")?)?;
+        let project =
+            FileAccessPolicy.open_read(root, &FileAccessPolicy.validate_relative(".")?)?;
         let job = Job::new()?;
         // Nothing supplied by the model is executed until the Host attaches the job.
         // The command travels through stdin after attachment, avoiding Windows command-line limits.
@@ -230,7 +233,13 @@ try {
 } catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }
 "#;
         let shell = powershell_path()?;
-        let child = Child::suspended(&shell, bootstrap, project.path(), &root.protected_root, cwd.path())?;
+        let child = Child::suspended(
+            &shell,
+            bootstrap,
+            project.path(),
+            &root.protected_root,
+            cwd.path(),
+        )?;
         let mut process = Self {
             child,
             job: Some(job),
@@ -372,14 +381,21 @@ mod tests {
     #[test]
     fn offline_terminal_is_appcontainer_and_denies_network_and_ungranted_files() {
         let (root, scope) = scope();
-        let outside = std::env::temp_dir().join(format!("agent-secret-{}.txt", uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("agent-secret-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&outside, "outside-secret").unwrap();
-        let command = format!(r#"
+        let command = format!(
+            r#"
 try {{ [IO.File]::ReadAllText('{}'); Write-Output 'FILE_ESCAPED' }} catch {{ Write-Output 'FILE_DENIED' }};
 try {{ $client=New-Object Net.Sockets.TcpClient; $task=$client.ConnectAsync('1.1.1.1',80); if ($task.Wait(2000) -and $client.Connected) {{ Write-Output 'NETWORK_ESCAPED' }} else {{ Write-Output 'NETWORK_DENIED' }} }} catch {{ Write-Output 'NETWORK_DENIED' }};
 Set-Content local.txt 'allowed'; Get-Content local.txt
-"#, outside.display());
-        let result = TerminalProcess::start(&scope, &request(&command)).unwrap().wait(Cancellation::default()).unwrap();
+"#,
+            outside.display()
+        );
+        let result = TerminalProcess::start(&scope, &request(&command))
+            .unwrap()
+            .wait(Cancellation::default())
+            .unwrap();
         assert!(!result.stdout.contains("FILE_ESCAPED"), "{result:?}");
         assert!(!result.stdout.contains("NETWORK_ESCAPED"), "{result:?}");
         assert!(result.stdout.contains("allowed"), "{result:?}");
@@ -390,66 +406,117 @@ Set-Content local.txt 'allowed'; Get-Content local.txt
     fn offline_terminal_denies_http_dns_socket_and_child_network() {
         let (root, scope) = scope();
         let dns_receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        dns_receiver.set_read_timeout(Some(Duration::from_millis(250))).unwrap();
+        dns_receiver
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
         let dns_port = dns_receiver.local_addr().unwrap().port();
         let child = "try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('1.1.1.1',80); Write-Output 'CHILD_ESCAPED' } catch { Write-Output 'CHILD_DENIED' }";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(child.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
-        let command = format!(r#"
+        let encoded = base64::engine::general_purpose::STANDARD.encode(
+            child
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let command = format!(
+            r#"
 try {{ Invoke-WebRequest 'http://1.1.1.1' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; Write-Output 'HTTP_ESCAPED' }} catch {{ Write-Output 'HTTP_DENIED' }};
 try {{ $udp=New-Object Net.Sockets.UdpClient; $udp.Connect('127.0.0.1',{dns_port}); [void]$udp.Send([byte[]](1),1); Write-Output 'DNS_SOCKET_BUFFERED' }} catch {{ Write-Output 'DNS_SOCKET_DENIED' }};
 & powershell.exe -NoProfile -NonInteractive -EncodedCommand '{encoded}';
-"#);
-        let result = TerminalProcess::start(&scope, &request(&command)).unwrap().wait(Cancellation::default()).unwrap();
+"#
+        );
+        let result = TerminalProcess::start(&scope, &request(&command))
+            .unwrap()
+            .wait(Cancellation::default())
+            .unwrap();
         for marker in ["HTTP_DENIED", "CHILD_DENIED"] {
             assert!(result.stdout.contains(marker), "{result:?}");
         }
         assert!(!result.stdout.contains("ESCAPED"), "{result:?}");
         let mut datagram = [0u8; 8];
-        assert!(dns_receiver.recv_from(&mut datagram).is_err(), "Isolated UDP reached the receiver");
+        assert!(
+            dns_receiver.recv_from(&mut datagram).is_err(),
+            "Isolated UDP reached the receiver"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn dns_resolver_api_cannot_reach_a_controlled_dns_server() {
-        use std::sync::atomic::AtomicBool;
         use std::process::{Command, Stdio};
-        let server = std::net::UdpSocket::bind("127.0.0.1:53").expect("DNS isolation test requires unused loopback UDP53");
-        server.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        use std::sync::atomic::AtomicBool;
+        let server = std::net::UdpSocket::bind("127.0.0.1:53")
+            .expect("DNS isolation test requires unused loopback UDP53");
+        server
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
         let control_name = format!("control-{}", uuid::Uuid::new_v4().simple());
         let isolated_name = format!("isolated-{}", uuid::Uuid::new_v4().simple());
         let observed_control = Arc::new(AtomicBool::new(false));
         let observed_isolated = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
-        let flags = (observed_control.clone(), observed_isolated.clone(), stopped.clone());
+        let flags = (
+            observed_control.clone(),
+            observed_isolated.clone(),
+            stopped.clone(),
+        );
         let names = (control_name.clone(), isolated_name.clone());
         let receiver = std::thread::spawn(move || {
             let mut packet = [0u8; 4096];
             while !flags.2.load(Ordering::SeqCst) {
                 if let Ok((size, sender)) = server.recv_from(&mut packet) {
-                    if size < 12 { continue; }
-                    let control = packet[..size].windows(names.0.len()).any(|value| value == names.0.as_bytes());
-                    let isolated = packet[..size].windows(names.1.len()).any(|value| value == names.1.as_bytes());
-                    if control { flags.0.store(true, Ordering::SeqCst); }
-                    if isolated { flags.1.store(true, Ordering::SeqCst); }
+                    if size < 12 {
+                        continue;
+                    }
+                    let control = packet[..size]
+                        .windows(names.0.len())
+                        .any(|value| value == names.0.as_bytes());
+                    let isolated = packet[..size]
+                        .windows(names.1.len())
+                        .any(|value| value == names.1.as_bytes());
+                    if control {
+                        flags.0.store(true, Ordering::SeqCst);
+                    }
+                    if isolated {
+                        flags.1.store(true, Ordering::SeqCst);
+                    }
                     if control || isolated {
-                        packet[2] = 0x81; packet[3] = 0x83;
+                        packet[2] = 0x81;
+                        packet[3] = 0x83;
                         packet[6..12].fill(0);
                         let _ = server.send_to(&packet[..size], sender);
                     }
                 }
             }
         });
-        let query = |name: &str| format!("try {{ Resolve-DnsName '{name}.example.com.' -Server 127.0.0.1 -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Out-Null }} catch {{ Write-Output 'DNS query finished' }}");
-        let control = Command::new(powershell_path().unwrap()).args(["-NoProfile", "-NonInteractive", "-Command", &query(&control_name)])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let query = |name: &str| {
+            format!("try {{ Resolve-DnsName '{name}.example.com.' -Server 127.0.0.1 -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Out-Null }} catch {{ Write-Output 'DNS query finished' }}")
+        };
+        let control = Command::new(powershell_path().unwrap())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &query(&control_name),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let (root, scope) = scope();
         let mut req = request(&query(&isolated_name));
         req.timeout_ms = 10000;
-        let isolated = TerminalProcess::start(&scope, &req).and_then(|process| process.wait(Cancellation::default()));
+        let isolated = TerminalProcess::start(&scope, &req)
+            .and_then(|process| process.wait(Cancellation::default()));
         stopped.store(true, Ordering::SeqCst);
         receiver.join().unwrap();
-        assert!(control.is_ok() && observed_control.load(Ordering::SeqCst), "Unisolated control must reach the DNS receiver");
+        assert!(
+            control.is_ok() && observed_control.load(Ordering::SeqCst),
+            "Unisolated control must reach the DNS receiver"
+        );
         assert!(isolated.is_ok(), "{isolated:?}");
-        assert!(!observed_isolated.load(Ordering::SeqCst), "AppContainer DNS API reached the receiving service");
+        assert!(
+            !observed_isolated.load(Ordering::SeqCst),
+            "AppContainer DNS API reached the receiving service"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

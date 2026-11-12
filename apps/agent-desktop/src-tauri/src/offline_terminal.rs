@@ -116,18 +116,27 @@ struct ProfileRecord {
     granted_paths: Vec<PathBuf>,
 }
 
-fn project_entries(root: &Path, protected: &Path) -> Result<Vec<crate::file_access::VerifiedReadHandle>, String> {
+fn project_entries(
+    root: &Path,
+    protected: &Path,
+) -> Result<Vec<crate::file_access::VerifiedReadHandle>, String> {
     use crate::file_access::{AuthorizedRoot, FileAccessPolicy};
-    let canonical = root.canonicalize().map_err(|_| failure("Resolve project tree"))?;
+    let canonical = root
+        .canonicalize()
+        .map_err(|_| failure("Resolve project tree"))?;
     let authority = AuthorizedRoot::for_host_path(&canonical, protected);
-    let mut entries = vec![FileAccessPolicy.open_read(&authority, &FileAccessPolicy.validate_relative(".")?)?];
+    let mut entries =
+        vec![FileAccessPolicy.open_read(&authority, &FileAccessPolicy.validate_relative(".")?)?];
     let mut index = 0;
     while index < entries.len() {
         if entries[index].is_dir() {
             for name in entries[index].entries()? {
                 let path = entries[index].path().join(name);
-                let relative = path.strip_prefix(entries[0].path()).map_err(|_| failure("Resolve project entry"))?;
-                let relative = match FileAccessPolicy.validate_relative(&relative.to_string_lossy()) {
+                let relative = path
+                    .strip_prefix(entries[0].path())
+                    .map_err(|_| failure("Resolve project entry"))?;
+                let relative = match FileAccessPolicy.validate_relative(&relative.to_string_lossy())
+                {
                     Ok(path) => path,
                     Err(error) if error.starts_with("forbidden_path:") => continue,
                     Err(error) => return Err(error),
@@ -140,7 +149,10 @@ fn project_entries(root: &Path, protected: &Path) -> Result<Vec<crate::file_acce
                     Err(error) => return Err(error),
                 }
                 if entries.len() > 100_000 {
-                    return Err("terminal_isolation_unavailable: Project contains more than 100000 entries".into());
+                    return Err(
+                        "terminal_isolation_unavailable: Project contains more than 100000 entries"
+                            .into(),
+                    );
                 }
             }
         }
@@ -237,7 +249,11 @@ impl Profile {
             owner_pid: std::process::id(),
             owner_birth: process_birth(unsafe { GetCurrentProcess() })
                 .ok_or_else(|| failure("Read isolation owner identity"))?,
-            granted_paths: entries.iter().map(|entry| entry.path().to_path_buf()).chain(Some(temp.clone())).collect(),
+            granted_paths: entries
+                .iter()
+                .map(|entry| entry.path().to_path_buf())
+                .chain(Some(temp.clone()))
+                .collect(),
         };
         let mut profile = Self {
             name,
@@ -267,13 +283,12 @@ impl Profile {
             let payload = serde_json::to_vec(&self.record)
                 .map_err(|_| failure("Encode isolation recovery"))?;
             if payload.len() > 16 * 1024 * 1024 {
-                return Err("terminal_isolation_unavailable: Project recovery manifest exceeds 16 MiB".into());
+                return Err(
+                    "terminal_isolation_unavailable: Project recovery manifest exceeds 16 MiB"
+                        .into(),
+                );
             }
-            std::fs::write(
-                &temporary,
-                payload,
-            )
-            .map_err(|_| failure("Write isolation recovery"))?;
+            std::fs::write(&temporary, payload).map_err(|_| failure("Write isolation recovery"))?;
             std::fs::rename(temporary, marker)
                 .map_err(|_| failure("Publish isolation recovery"))?;
         }
@@ -324,7 +339,11 @@ impl Profile {
             let profile = Self {
                 name,
                 sid,
-                grants: if record.granted_paths.is_empty() { vec![record.root.clone(), record.temp.clone()] } else { record.granted_paths.clone() },
+                grants: if record.granted_paths.is_empty() {
+                    vec![record.root.clone(), record.temp.clone()]
+                } else {
+                    record.granted_paths.clone()
+                },
                 temp: record.temp.clone(),
                 marker: Some(marker),
                 record,
@@ -751,7 +770,8 @@ mod tests {
     use std::io::Read;
     #[test]
     fn project_hardlink_to_external_file_is_rejected_before_grant() {
-        let base = std::env::temp_dir().join(format!("agent-terminal-link-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("agent-terminal-link-{}", uuid::Uuid::new_v4()));
         let root = base.join("project");
         std::fs::create_dir_all(&root).unwrap();
         let outside = base.join("private.txt");
@@ -765,7 +785,8 @@ mod tests {
     }
     #[test]
     fn alias_added_after_grant_does_not_inherit_terminal_authority() {
-        let base = std::env::temp_dir().join(format!("agent-terminal-late-link-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("agent-terminal-late-link-{}", uuid::Uuid::new_v4()));
         let root = base.join("project");
         std::fs::create_dir_all(&root).unwrap();
         let outside = base.join("private.txt");

@@ -220,7 +220,10 @@ where
         return Err("migration_restart_required: 请完成资料迁移并重启，或从迁移页面恢复。".into());
     }
     if crate::profile_migration::is_finalizing() && message_type.starts_with("model.run.") {
-        return Err("migration_cleanup_in_progress: 正在核验并转移旧版模型文件，请等待收尾完成后操作。".into());
+        return Err(
+            "migration_cleanup_in_progress: 正在核验并转移旧版模型文件，请等待收尾完成后操作。"
+                .into(),
+        );
     }
     crate::offline::validate_dispatch(message_type, &params)?;
     if matches!(

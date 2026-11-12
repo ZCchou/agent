@@ -799,7 +799,10 @@ pub fn write_encrypted<T: Serialize>(
     }
     result
 }
-pub(crate) fn read_encrypted<T: DeserializeOwned>(path: &Path, key: &[u8; 32]) -> Result<T, String> {
+pub(crate) fn read_encrypted<T: DeserializeOwned>(
+    path: &Path,
+    key: &[u8; 32],
+) -> Result<T, String> {
     let bytes = fs::read(path).map_err(|_| safe("recovery_unavailable"))?;
     if bytes.len() < 13 {
         return Err(safe("recovery_damaged"));

@@ -7,13 +7,6 @@ use std::{
 use tauri::Manager;
 mod agent_execution;
 mod app_updates;
-mod program_update;
-mod program_update_data;
-mod program_update_plan;
-mod program_update_session;
-mod update_process;
-mod profile_migration;
-mod profile_recovery;
 mod attachment_processor;
 mod attachment_store;
 mod change_set_planner;
@@ -32,6 +25,12 @@ mod image_normalizer;
 mod local_model_commands;
 mod logging;
 mod offline;
+mod profile_migration;
+mod profile_recovery;
+mod program_update;
+mod program_update_data;
+mod program_update_plan;
+mod program_update_session;
 mod rag_commands;
 #[cfg(test)]
 mod reliability_contracts;
@@ -41,6 +40,7 @@ mod settings;
 mod skill_commands;
 mod system_locale;
 mod tool_event_handler;
+mod update_process;
 mod web_search;
 mod work_tools;
 use core_process_manager::CoreProcessManager;
@@ -89,7 +89,10 @@ pub fn run() {
             profile_migration::initialize(app.handle()).map_err(std::io::Error::other)?;
             let grants_path = app_data_dir.join("work-tool-grants.json");
             let work_tools = if profile_migration::blocks_core() {
-                work_tools::WorkToolManager::disabled(grants_path.clone(), "migration recovery is pending")
+                work_tools::WorkToolManager::disabled(
+                    grants_path.clone(),
+                    "migration recovery is pending",
+                )
             } else {
                 work_tools::WorkToolManager::load(grants_path.clone()).unwrap_or_else(|error| {
                     eprintln!("[agent] Project file authorization is disabled: {error}");
@@ -369,7 +372,9 @@ pub fn run() {
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let app = webview.app_handle().clone();
-                tauri::async_runtime::spawn(async move { let _ = program_update_session::acknowledge_health(app).await; });
+                tauri::async_runtime::spawn(async move {
+                    let _ = program_update_session::acknowledge_health(app).await;
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -603,7 +608,7 @@ pub fn run() {
     });
 }
 
-mod terminal_executor;
 #[cfg(windows)]
 mod offline_terminal;
+mod terminal_executor;
 mod terminal_service;

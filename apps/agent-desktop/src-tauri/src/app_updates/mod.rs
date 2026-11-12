@@ -112,38 +112,74 @@ fn accepted_download_url(url: &url::Url) -> bool {
 }
 
 fn program_redirect_url(url: &url::Url) -> bool {
-    url.scheme() == "https" && url.port_or_known_default() == Some(443)
-        && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
-        && matches!(url.host_str(), Some("github.com" | "release-assets.githubusercontent.com" | "objects.githubusercontent.com"))
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.host_str(),
+            Some(
+                "github.com"
+                    | "release-assets.githubusercontent.com"
+                    | "objects.githubusercontent.com"
+            )
+        )
 }
 
-async fn download_signed_program(app: &AppHandle, update: &Update, update_id: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(900))
+async fn download_signed_program(
+    app: &AppHandle,
+    update: &Update,
+    update_id: &str,
+) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(900))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() < 5 && program_redirect_url(attempt.url()) { attempt.follow() }
-            else { attempt.error("Program download left the allowed release hosts") }
-        })).build().map_err(|_| "app_update_network")?;
-    let mut response = client.get(update.download_url.clone()).send().await.map_err(|_| "app_update_network")?;
-    if !response.status().is_success() { return Err("app_update_network".into()); }
+            if attempt.previous().len() < 5 && program_redirect_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("Program download left the allowed release hosts")
+            }
+        }))
+        .build()
+        .map_err(|_| "app_update_network")?;
+    let mut response = client
+        .get(update.download_url.clone())
+        .send()
+        .await
+        .map_err(|_| "app_update_network")?;
+    if !response.status().is_success() {
+        return Err("app_update_network".into());
+    }
     let total = response.content_length();
     let limit = 512 * 1024 * 1024;
-    if total.is_some_and(|size| size > limit as u64) { return Err("app_update_package_too_large".into()); }
+    if total.is_some_and(|size| size > limit as u64) {
+        return Err("app_update_package_too_large".into());
+    }
     let mut bytes = Vec::new();
     let mut last_sent = 0;
     while let Some(chunk) = response.chunk().await.map_err(|_| "app_update_network")? {
-        if bytes.len().saturating_add(chunk.len()) > limit { return Err("app_update_package_too_large".into()); }
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err("app_update_package_too_large".into());
+        }
         bytes.extend_from_slice(&chunk);
         if bytes.len().saturating_sub(last_sent) >= 128 * 1024 {
             last_sent = bytes.len();
             let state = app.state::<AppUpdateService>();
             let mut cache = state.inner.lock().map_err(|_| "app_update_not_ready")?;
-            if cache.view.update_id.as_deref() != Some(update_id) { return Err("app_update_stale".into()); }
+            if cache.view.update_id.as_deref() != Some(update_id) {
+                return Err("app_update_stale".into());
+            }
             cache.view.downloaded_bytes = bytes.len() as u64;
             cache.view.total_bytes = total;
             emit(app, &cache.view);
         }
     }
-    crate::program_update::verify_signed_bytes(&bytes, update.signature.as_bytes(), include_str!("../../updater-public-key.txt"))?;
+    crate::program_update::verify_signed_bytes(
+        &bytes,
+        update.signature.as_bytes(),
+        include_str!("../../updater-public-key.txt"),
+    )?;
     Ok(bytes)
 }
 
@@ -155,16 +191,19 @@ fn matches_channel(url: &url::Url, channel: Channel, version: &str) -> bool {
         .path_segments()
         .map(|parts| parts.collect::<Vec<_>>())
         .unwrap_or_default();
-    if segments.len() != 6 || segments[5] != format!("agent-{version}-windows-x86_64-program.zip")
-        || segments[4] != format!("v{version}") {
+    if segments.len() != 6
+        || segments[5] != format!("agent-{version}-windows-x86_64-program.zip")
+        || segments[4] != format!("v{version}")
+    {
         return false;
     }
     match channel {
         Channel::Stable => !version.contains('-'),
-        Channel::Preview => version.split_once("-preview.")
+        Channel::Preview => version
+            .split_once("-preview.")
             .is_some_and(|(base, serial)| {
-                !base.contains('-') &&
-                !serial.is_empty()
+                !base.contains('-')
+                    && !serial.is_empty()
                     && !serial.starts_with('0')
                     && serial.bytes().all(|c| c.is_ascii_digit())
             }),
@@ -390,7 +429,9 @@ pub async fn install_app_update(
     update_id: String,
     draft: Option<draft::RestartDraft>,
 ) -> Result<(), String> {
-    if crate::profile_migration::is_busy(&app) { return Err("app_update_busy".into()); }
+    if crate::profile_migration::is_busy(&app) {
+        return Err("app_update_busy".into());
+    }
     let (update, mut bytes) = {
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
         cache.check_identity(&update_id)?;
@@ -425,15 +466,22 @@ pub async fn install_app_update(
             .map_err(|_| "app_update_core_unavailable")?
             .shutdown_for_update()
             .map_err(|_| "app_update_core_unavailable")?;
-        let root = app.path().app_data_dir().map_err(|_| "app_update_install_failed")?;
+        let root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "app_update_install_failed")?;
         let payload = std::mem::take(&mut bytes);
         let signature = update.signature.clone();
         let version = update.version.clone();
         let id = update_id.clone();
         let (result, returned) = tauri::async_runtime::spawn_blocking(move || {
-            let result = crate::program_update_session::prepare_and_handoff(&root, &payload, &signature, &version, &id);
+            let result = crate::program_update_session::prepare_and_handoff(
+                &root, &payload, &signature, &version, &id,
+            );
             (result, payload)
-        }).await.map_err(|_| "app_update_handoff_failed")?;
+        })
+        .await
+        .map_err(|_| "app_update_handoff_failed")?;
         bytes = returned;
         result?;
         app.exit(0);
@@ -472,7 +520,12 @@ pub async fn install_app_update(
         .await;
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
         cache.bytes = if bytes.is_empty() { None } else { Some(bytes) };
-        cache.view.state = if cache.bytes.is_some() { "ready" } else { "available" }.into();
+        cache.view.state = if cache.bytes.is_some() {
+            "ready"
+        } else {
+            "available"
+        }
+        .into();
         cache.view.error_code = Some(error.clone());
         emit(&app, &cache.view);
         return Err(error);
@@ -485,12 +538,21 @@ mod tests {
     use super::*;
     #[test]
     fn program_download_redirects_stay_with_public_github_asset_hosts() {
-        for value in ["https://github.com/ZCchou/agent/releases/download/v0.16.0-preview.1/file.zip",
-            "https://release-assets.githubusercontent.com/assets/file?signature=value", "https://objects.githubusercontent.com/assets/file"] {
+        for value in [
+            "https://github.com/ZCchou/agent/releases/download/v0.16.0-preview.1/file.zip",
+            "https://release-assets.githubusercontent.com/assets/file?signature=value",
+            "https://objects.githubusercontent.com/assets/file",
+        ] {
             assert!(program_redirect_url(&value.parse().unwrap()));
         }
-        for value in ["http://github.com/file", "https://evil.test/file", "https://github.com.evil.test/file",
-            "https://user@github.com/file", "https://127.0.0.1/file", "https://github.com:444/file"] {
+        for value in [
+            "http://github.com/file",
+            "https://evil.test/file",
+            "https://github.com.evil.test/file",
+            "https://user@github.com/file",
+            "https://127.0.0.1/file",
+            "https://github.com:444/file",
+        ] {
             assert!(!program_redirect_url(&value.parse().unwrap()));
         }
     }
@@ -501,14 +563,26 @@ mod tests {
         assert!(matches_channel(&url, Channel::Preview, version));
         assert!(!matches_channel(&url, Channel::Stable, version));
         assert!(!matches_channel(&url, Channel::Preview, "0.16.0-preview.2"));
-        assert!(!accepted_download_url(&format!("{url}?file=other").parse().unwrap()));
-        assert!(Channel::Preview.endpoint().ends_with("/airworthiness-preview.json"));
+        assert!(!accepted_download_url(
+            &format!("{url}?file=other").parse().unwrap()
+        ));
+        assert!(Channel::Preview
+            .endpoint()
+            .ends_with("/airworthiness-preview.json"));
     }
     #[test]
     fn signed_release_urls_must_match_channel_version_and_program_package() {
         let preview: url::Url="https://github.com/ZCchou/agent/releases/download/v0.14.2-preview.1/agent-0.14.2-preview.1-windows-x86_64-program.zip".parse().unwrap();
-        assert!(matches_channel(&preview, Channel::Preview, "0.14.2-preview.1"));
-        assert!(!matches_channel(&preview, Channel::Stable, "0.14.2-preview.1"));
+        assert!(matches_channel(
+            &preview,
+            Channel::Preview,
+            "0.14.2-preview.1"
+        ));
+        assert!(!matches_channel(
+            &preview,
+            Channel::Stable,
+            "0.14.2-preview.1"
+        ));
         assert!(!matches_channel(&preview, Channel::Preview, "0.14.3"));
         let stable: url::Url = preview
             .as_str()

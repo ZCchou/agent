@@ -170,9 +170,17 @@ pub struct AgentExecutionManager {
 }
 
 impl AgentExecutionManager {
-    pub(crate) fn for_startup(recovery_dir: PathBuf, installation_secret: &str, health_probe: bool, migration_pending: bool) -> Result<Self, String> {
+    pub(crate) fn for_startup(
+        recovery_dir: PathBuf,
+        installation_secret: &str,
+        health_probe: bool,
+        migration_pending: bool,
+    ) -> Result<Self, String> {
         if health_probe || migration_pending {
-            return Ok(Self::disabled(recovery_dir, "startup recovery is suspended"));
+            return Ok(Self::disabled(
+                recovery_dir,
+                "startup recovery is suspended",
+            ));
         }
         Self::new(recovery_dir, installation_secret)
     }
@@ -233,30 +241,59 @@ impl AgentExecutionManager {
         }
     }
 
-    pub fn register_document(&mut self, key: &str, filename: &str, expected_hash: &str) -> Result<(), String> {
-        if uuid::Uuid::parse_str(key).is_err() || Path::new(filename).file_name().and_then(|name| name.to_str()) != Some(filename)
-            || !matches!(Path::new(filename).extension().and_then(|name| name.to_str()), Some("docx" | "md" | "txt")) {
+    pub fn register_document(
+        &mut self,
+        key: &str,
+        filename: &str,
+        expected_hash: &str,
+    ) -> Result<(), String> {
+        if uuid::Uuid::parse_str(key).is_err()
+            || Path::new(filename)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(filename)
+            || !matches!(
+                Path::new(filename)
+                    .extension()
+                    .and_then(|name| name.to_str()),
+                Some("docx" | "md" | "txt")
+            )
+        {
             return Err("document_artifact_invalid: Invalid managed document identity".into());
         }
         let directory = self.protected_root.join("document-artifacts");
         let scope = AuthorizedRoot::for_host_path(&directory, Path::new(""));
-        let source = FileAccessPolicy.open_read(&scope, &FileAccessPolicy.validate_relative(filename)?)?;
+        let source =
+            FileAccessPolicy.open_read(&scope, &FileAccessPolicy.validate_relative(filename)?)?;
         if source.hash(MAX_CHANGE_BYTES)? != expected_hash {
             return Err("document_artifact_changed: Managed document hash mismatch".into());
         }
-        self.document_sources.insert(key.into(), (source.path().to_path_buf(), expected_hash.into()));
+        self.document_sources.insert(
+            key.into(),
+            (source.path().to_path_buf(), expected_hash.into()),
+        );
         Ok(())
     }
 
     fn document_bytes(&self, key: &str) -> Result<Vec<u8>, String> {
-        let (source, expected) = self.document_sources.get(key).ok_or("document_artifact_unavailable: Regenerate the document before publishing")?;
+        let (source, expected) = self
+            .document_sources
+            .get(key)
+            .ok_or("document_artifact_unavailable: Regenerate the document before publishing")?;
         let directory = self.protected_root.join("document-artifacts");
         let scope = AuthorizedRoot::for_host_path(&directory, Path::new(""));
-        let relative = source.strip_prefix(&directory).map_err(|_| "document_artifact_invalid: Invalid managed source")?;
-        let file = FileAccessPolicy.open_read(&scope, &FileAccessPolicy.validate_relative(&relative.to_string_lossy())?)?;
+        let relative = source
+            .strip_prefix(&directory)
+            .map_err(|_| "document_artifact_invalid: Invalid managed source")?;
+        let file = FileAccessPolicy.open_read(
+            &scope,
+            &FileAccessPolicy.validate_relative(&relative.to_string_lossy())?,
+        )?;
         let bytes = file.read_bytes(MAX_CHANGE_BYTES)?;
         if format!("{:x}", Sha256::digest(&bytes)) != *expected {
-            return Err("document_artifact_changed: Managed document changed before publishing".into());
+            return Err(
+                "document_artifact_changed: Managed document changed before publishing".into(),
+            );
         }
         Ok(bytes)
     }
@@ -969,7 +1006,10 @@ impl AgentExecutionManager {
                 mutation.expected_hash = before_hash.clone();
             }
             mutation.expected_after_hash = match mutation.kind.as_str() {
-                "create_text" if mutation.artifact_key.is_some() => Some(format!("{:x}", Sha256::digest(self.document_bytes(mutation.artifact_key.as_deref().unwrap())?))),
+                "create_text" if mutation.artifact_key.is_some() => Some(format!(
+                    "{:x}",
+                    Sha256::digest(self.document_bytes(mutation.artifact_key.as_deref().unwrap())?)
+                )),
                 "create_text" | "overwrite_text" => Some(format!(
                     "{:x}",
                     Sha256::digest(mutation.content.as_deref().unwrap_or_default().as_bytes())
@@ -1381,7 +1421,8 @@ mod tests {
         let store = private.join("document-artifacts");
         fs::create_dir(&store).unwrap();
         let private_alias = std::env::temp_dir().join(private.file_name().unwrap());
-        let mut manager = AgentExecutionManager::new(private_alias.join("points"), "document-secret").unwrap();
+        let mut manager =
+            AgentExecutionManager::new(private_alias.join("points"), "document-secret").unwrap();
         let key = Uuid::new_v4().to_string();
         let filename = format!("{key}.docx");
         let bytes = b"PK\x00managed-document\xff";
@@ -1389,13 +1430,35 @@ mod tests {
         let hash = format!("{:x}", Sha256::digest(bytes));
         manager.register_document(&key, &filename, &hash).unwrap();
         let arguments = json!({"title":"保存模板", "mutations":[{"kind":"create_text","path":"模板.docx","artifact_key":key}]});
-        let disposition = manager.prepare_changes("document-op".into(),"run".into(),"work".into(),"project".into(),root.clone(),1,ApprovalMode::Open,&arguments).unwrap();
+        let disposition = manager
+            .prepare_changes(
+                "document-op".into(),
+                "run".into(),
+                "work".into(),
+                "project".into(),
+                root.clone(),
+                1,
+                ApprovalMode::Open,
+                &arguments,
+            )
+            .unwrap();
         assert!(matches!(disposition, ChangeDisposition::Executed(_)));
         assert_eq!(fs::read(root.join("模板.docx")).unwrap(), bytes);
         assert!(!arguments.to_string().contains("managed-document"));
         fs::write(store.join(&filename), b"changed").unwrap();
         let changed = json!({"title":"保存模板", "mutations":[{"kind":"create_text","path":"changed.docx","artifact_key":key}]});
-        assert!(manager.prepare_changes("other-op".into(),"run".into(),"work".into(),"project".into(),root.clone(),1,ApprovalMode::Open,&changed).is_err());
+        assert!(manager
+            .prepare_changes(
+                "other-op".into(),
+                "run".into(),
+                "work".into(),
+                "project".into(),
+                root.clone(),
+                1,
+                ApprovalMode::Open,
+                &changed
+            )
+            .is_err());
         assert!(!root.join("changed.docx").exists());
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(private).unwrap();

@@ -131,21 +131,37 @@ pub fn load_update_draft(
     store: State<'_, Mutex<AttachmentStore>>,
 ) -> Result<Option<RestoredUpdateDraft>, String> {
     let mut store = store.lock().map_err(|_| "app_update_draft_failed")?;
-    load_for_mode(&checkpoint_path(&app)?, &mut store, crate::program_update_session::is_health_probe())
+    load_for_mode(
+        &checkpoint_path(&app)?,
+        &mut store,
+        crate::program_update_session::is_health_probe(),
+    )
 }
 
 #[tauri::command]
 pub fn ack_update_draft(app: AppHandle, update_id: String) -> Result<(), String> {
-    ack_for_mode(&checkpoint_path(&app)?, &update_id, crate::program_update_session::is_health_probe())
+    ack_for_mode(
+        &checkpoint_path(&app)?,
+        &update_id,
+        crate::program_update_session::is_health_probe(),
+    )
 }
 
-fn load_for_mode(path: &Path, store: &mut AttachmentStore, health_probe: bool) -> Result<Option<RestoredUpdateDraft>, String> {
-    if health_probe { return Ok(None); }
+fn load_for_mode(
+    path: &Path,
+    store: &mut AttachmentStore,
+    health_probe: bool,
+) -> Result<Option<RestoredUpdateDraft>, String> {
+    if health_probe {
+        return Ok(None);
+    }
     load(path, store)
 }
 
 fn ack_for_mode(path: &Path, id: &str, health_probe: bool) -> Result<(), String> {
-    if health_probe { return Err("app_update_health_probe".into()); }
+    if health_probe {
+        return Err("app_update_health_probe".into());
+    }
     remove_owned(path, id)
 }
 
@@ -188,17 +204,34 @@ mod tests {
     use super::*;
     #[test]
     fn health_probe_cannot_consume_or_acknowledge_a_restart_draft() {
-        let root = std::env::temp_dir().join(format!("agent-update-probe-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("agent-update-probe-{}", uuid::Uuid::new_v4()));
         let mut store = AttachmentStore::new(root.clone()).unwrap();
         let path = root.join("checkpoint.json");
-        let draft = RestartDraft { conversation_id:None, kind:"standard_chat".into(), project_id:None, chat_group_id:None,
-            category:"casual".into(), text:"keep unsent draft".into(), attachment_ids:vec![], rejected_ids:vec![], references:vec![] };
+        let draft = RestartDraft {
+            conversation_id: None,
+            kind: "standard_chat".into(),
+            project_id: None,
+            chat_group_id: None,
+            category: "casual".into(),
+            text: "keep unsent draft".into(),
+            attachment_ids: vec![],
+            rejected_ids: vec![],
+            references: vec![],
+        };
         save(&path, "probe", Some(draft), &store).unwrap();
         let before = fs::read(&path).unwrap();
         assert!(load_for_mode(&path, &mut store, true).unwrap().is_none());
         assert!(ack_for_mode(&path, "probe", true).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert_eq!(load_for_mode(&path, &mut store, false).unwrap().unwrap().draft.text, "keep unsent draft");
+        assert_eq!(
+            load_for_mode(&path, &mut store, false)
+                .unwrap()
+                .unwrap()
+                .draft
+                .text,
+            "keep unsent draft"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

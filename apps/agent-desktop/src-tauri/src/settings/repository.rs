@@ -16,9 +16,17 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 
 const GENERAL_KEY: &str = "general";
 
-fn explicit_store<R: tauri::Runtime>(app: &AppHandle<R>, path: impl AsRef<std::path::Path>) -> Result<Arc<Store<R>>, SettingsError> {
-    let store = app.store_builder(path).disable_auto_save().build()
-        .map_err(|error| SettingsError::Storage(format!("failed to open settings store: {error}")))?;
+fn explicit_store<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: impl AsRef<std::path::Path>,
+) -> Result<Arc<Store<R>>, SettingsError> {
+    let store = app
+        .store_builder(path)
+        .disable_auto_save()
+        .build()
+        .map_err(|error| {
+            SettingsError::Storage(format!("failed to open settings store: {error}"))
+        })?;
     // All writes are explicit. Detach the resource so plugin Exit cannot save
     // an obsolete cache after migration or update recovery replaced the file.
     store.close_resource();
@@ -117,7 +125,9 @@ impl SettingsRepository for TauriStoreSettingsRepository {
 
     fn save(&self, settings: &AppSettings) -> Result<(), SettingsError> {
         if crate::profile_migration::blocks_core() {
-            return Err(SettingsError::Storage("migration_activation_in_progress".into()));
+            return Err(SettingsError::Storage(
+                "migration_activation_in_progress".into(),
+            ));
         }
         let settings_value = serde_json::to_value(settings).map_err(|error| {
             SettingsError::Serialization(format!("failed to serialize settings: {error}"))
@@ -178,8 +188,10 @@ mod tests {
     #[test]
     fn explicit_store_cannot_overwrite_migrated_settings_during_host_exit() {
         use tauri_plugin_store::StoreExt;
-        let app = tauri::test::mock_builder().plugin(tauri_plugin_store::Builder::default().build())
-            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir(&root).unwrap();
         let path = root.join("settings.json");
@@ -187,9 +199,13 @@ mod tests {
         store.set("settings", json!({"source":"old target cache"}));
         store.save().unwrap();
         std::fs::write(&path, br#"{"settings":{"source":"migrated"}}"#).unwrap();
-        assert!(app.get_store(&path).is_none(), "Exit must have no cached settings store to save");
+        assert!(
+            app.get_store(&path).is_none(),
+            "Exit must have no cached settings store to save"
+        );
         app.cleanup_before_exit();
-        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["settings"]["source"], "migrated");
         std::fs::remove_dir_all(root).unwrap();
     }

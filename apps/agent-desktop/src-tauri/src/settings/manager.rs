@@ -52,7 +52,10 @@ impl SettingsManager {
         self.initialize_for_startup(false)
     }
 
-    pub(crate) fn initialize_for_startup(&self, migration_pending: bool) -> Result<AppSettings, SettingsError> {
+    pub(crate) fn initialize_for_startup(
+        &self,
+        migration_pending: bool,
+    ) -> Result<AppSettings, SettingsError> {
         let _guard = self.operation_lock.lock().map_err(|_| {
             SettingsError::Storage("settings manager lock was poisoned".to_string())
         })?;
@@ -72,7 +75,10 @@ impl SettingsManager {
     }
 
     pub(crate) fn wait_for_pending_operations(&self) -> Result<(), SettingsError> {
-        let _guard = self.operation_lock.lock().map_err(|_| SettingsError::Storage("settings manager lock was poisoned".into()))?;
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SettingsError::Storage("settings manager lock was poisoned".into()))?;
         Ok(())
     }
 
@@ -1755,7 +1761,9 @@ mod tests {
     #[test]
     fn pending_migration_initialization_reads_without_normalizing_or_saving() {
         let original = AppSettings::default();
-        let repository = Arc::new(FailingSettingsRepository { settings: Mutex::new(Some(original.clone())) });
+        let repository = Arc::new(FailingSettingsRepository {
+            settings: Mutex::new(Some(original.clone())),
+        });
         let manager = SettingsManager::new(repository);
         assert_eq!(manager.initialize_for_startup(true).unwrap(), original);
     }
