@@ -108,7 +108,7 @@ def main():
     signature = sign(archive, args.private_key)
     record = feed(version, signature, args.channel, args.notes_file.read_text(encoding='utf8'))
     destination = args.output / f'airworthiness-{args.channel}.json'
-    destination.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
+    destination.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf8', newline='\n')
     sign(destination, args.private_key)
     print(json.dumps({'program': archive.name, **identity(archive), 'feed': destination.name}))
 

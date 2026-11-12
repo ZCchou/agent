@@ -71,3 +71,33 @@ def test_release_signer_is_noninteractive_and_bounded(tmp_path, monkeypatch):
     command, options = calls[0]
     assert command[command.index('--password') + 1] == ''
     assert options['timeout'] == 120
+
+
+def test_release_main_signs_lf_feed_bytes_on_windows(tmp_path, monkeypatch):
+    import sys
+    release = module()
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'application.json').write_text(json.dumps({'version': '0.16.0-preview.1'}), encoding='utf8')
+    notes = tmp_path / 'notes.txt'
+    notes.write_text('发布说明', encoding='utf8')
+    output = tmp_path / 'output'
+    signed_feeds = []
+
+    def archive(_, destination):
+        destination.write_bytes(b'program fixture')
+
+    def sign(path, _):
+        if path.suffix == '.json':
+            data = path.read_bytes()
+            assert b'\r' not in data
+            assert data.endswith(b'\n')
+            signed_feeds.append(data)
+        return 'signature'
+
+    monkeypatch.setattr(release, 'build_archive', archive)
+    monkeypatch.setattr(release, 'sign', sign)
+    monkeypatch.setattr(sys, 'argv', ['program_release', '--source', str(source), '--output', str(output),
+                                    '--private-key', str(tmp_path / 'unused.key'), '--notes-file', str(notes)])
+    release.main()
+    assert len(signed_feeds) == 1
