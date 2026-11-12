@@ -1,8 +1,8 @@
 """Deterministic runtime-only pruning and third-party license inventory.
 
 Python headers, static/import libraries and debug symbols cannot be loaded by the
-frozen Python worker. Dynamic runtime DLLs remain, except the TensorRT provider
-which the supported CPU/CUDA provider selector never requests.
+frozen Python worker. Identical top-level copies of Torch DLLs are consolidated
+into Torch's own lib directory. The supported provider selector excludes TensorRT.
 """
 from __future__ import annotations
 
@@ -60,6 +60,8 @@ def excluded(path: Path) -> bool:
 
 
 def prune(root: Path) -> dict:
+    if root.is_symlink() or (hasattr(root, 'is_junction') and root.is_junction()):
+        raise ValueError('Linked build output refused')
     root = root.resolve()
     if root.name != 'rag-runtime' or not (root / 'rag-worker.exe').is_file() or root.is_symlink():
         raise ValueError('Expected a newly built, owned rag-runtime directory')
@@ -73,8 +75,25 @@ def prune(root: Path) -> dict:
             removed.append({'path': path.relative_to(root).as_posix(), 'bytes': path.stat().st_size,
                             'sha256': digest})
             path.unlink()
-    return {'policy': 'static-build-headers-debug-and-unused-tensorrt-provider-v1',
-            'removed_files': removed, 'removed_bytes': sum(item['bytes'] for item in removed)}
+    duplicate_bytes = 0
+    for canonical in sorted((root / '_internal/torch/lib').glob('*.dll')):
+        duplicate = root / '_internal' / canonical.name
+        if not duplicate.is_file() or duplicate.stat().st_size != canonical.stat().st_size:
+            continue
+        with canonical.open('rb') as stream:
+            canonical_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
+        with duplicate.open('rb') as stream:
+            duplicate_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if duplicate_hash != canonical_hash:
+            continue
+        size = duplicate.stat().st_size
+        removed.append({'path': duplicate.relative_to(root).as_posix(), 'bytes': size,
+                        'sha256': duplicate_hash, 'canonical_path': canonical.relative_to(root).as_posix()})
+        duplicate.unlink()
+        duplicate_bytes += size
+    return {'policy': 'runtime-only-and-identical-torch-dlls-v2',
+            'removed_files': removed, 'removed_bytes': sum(item['bytes'] for item in removed),
+            'deduplicated_dll_bytes': duplicate_bytes}
 
 
 def collect_licenses(root: Path, cuda_license: Path) -> dict:
