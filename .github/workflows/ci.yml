@@ -55,6 +55,9 @@ jobs:
       - name: Run offline Core tests
         run: python -m pytest
 
+      - name: Validate signed program update packaging
+        run: python -m pytest ../../tools/tests/test_program_release.py -q
+
       - name: Verify context evaluation and negative mutations
         run: python evals/context/run_context_eval.py --verify-mutations
 
