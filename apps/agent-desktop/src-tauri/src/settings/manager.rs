@@ -48,6 +48,7 @@ impl SettingsManager {
     ///
     /// 第一次运行时会创建默认 settings.json；
     /// 已存在设置则验证 schema 后直接返回。
+    #[cfg(test)]
     pub fn ensure_initialized(&self) -> Result<AppSettings, SettingsError> {
         self.initialize_for_startup(false)
     }

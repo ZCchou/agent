@@ -6,6 +6,8 @@ mod program_update_data;
 #[path = "../program_update_helper.rs"]
 mod program_update_helper;
 #[path = "../program_update_plan.rs"]
+// The Host also uses this module's record-replacement entry point.
+#[allow(dead_code)]
 mod program_update_plan;
 #[path = "../update_process.rs"]
 mod update_process;

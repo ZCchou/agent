@@ -333,7 +333,7 @@ fn start_worker(app: &AppHandle, id: &str, action: &str) -> Result<(), String> {
             let last = output
                 .split(|byte| *byte == b'\n')
                 .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-                .last();
+                .next_back();
             let mut failure = last.filter(|value| matches!(value["status"].as_str(), Some("failed" | "cancelled")))
                 .unwrap_or_else(|| json!({"status":"interrupted","phase":action,"error":{"code":"migration_worker_interrupted"}}));
             failure["phase"] = json!(action);

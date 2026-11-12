@@ -66,7 +66,7 @@ impl RagPathGrants {
         if grant.kind != kind || grant.created.elapsed() >= Duration::from_secs(900) {
             return Err("File selection expired or does not match this operation.".into());
         }
-        let paths: Vec<PathBuf> = if (action == "document.import" || action == "document.inspect") {
+        let paths: Vec<PathBuf> = if action == "document.import" || action == "document.inspect" {
             params["paths"]
                 .as_array()
                 .ok_or("Expected selected document paths")?
@@ -90,7 +90,7 @@ impl RagPathGrants {
             .as_object_mut()
             .ok_or("Expected parameters")?
             .remove("grant_id");
-        if (action == "document.import" || action == "document.inspect") {
+        if action == "document.import" || action == "document.inspect" {
             params["paths"] = json!(paths);
         } else {
             params["path"] = json!(paths[0]);
@@ -207,7 +207,7 @@ fn validate_params(action: &str, params: &Value) -> Result<(), String> {
                 items.len() <= 10_000
                     && items.iter().all(|item| {
                         item.as_u64()
-                            .is_some_and(|page| page >= 1 && page <= 10_000)
+                            .is_some_and(|page| (1..=10_000).contains(&page))
                     })
             }),
             "version_ids" => value

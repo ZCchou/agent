@@ -27,8 +27,10 @@ mod logging;
 mod offline;
 mod profile_migration;
 mod profile_recovery;
+// Host uses identity/signature helpers, while the updater binary uses the
+// transaction functions from this shared module.
+#[allow(dead_code)]
 mod program_update;
-mod program_update_data;
 mod program_update_plan;
 mod program_update_session;
 mod rag_commands;
@@ -40,7 +42,6 @@ mod settings;
 mod skill_commands;
 mod system_locale;
 mod tool_event_handler;
-mod update_process;
 mod web_search;
 mod work_tools;
 use core_process_manager::CoreProcessManager;
