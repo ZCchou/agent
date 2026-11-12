@@ -51,14 +51,15 @@ def test_candidate_preserves_sources_and_copies_conflicting_attachment_manifests
         assert len({row[0] for row in rows}) == 2
         for identity, key in rows:
             assert (candidate / key).read_bytes() == before
-            manifest = json.loads((candidate / 'message-attachments' / (identity + '.json')).read_text())
+            manifest = json.loads((candidate / 'message-attachments' / (identity + '.json')).read_text(encoding='utf8'))
             assert manifest['id'] == identity
+            assert manifest['name'] == '试验模板.docx'
             assert manifest['storage_key'] == key
         assert not connection.execute('PRAGMA foreign_key_check').fetchall()
     with sqlite3.connect(target / 'agent.db') as connection:
         assert connection.execute('SELECT count(*) FROM projects').fetchone()[0] == 0
     assert (primary / f'message-attachments/{attachment_id}.docx').read_bytes() == before
-    state = json.loads((tmp_path / 'migration-job' / 'state.json').read_text())
+    state = json.loads((tmp_path / 'migration-job' / 'state.json').read_text(encoding='utf8'))
     assert state['phase'] == 'prepared'
     assert 'completed_bytes' not in state
 
@@ -77,7 +78,7 @@ def test_auxiliary_models_are_verified_copied_and_referenced_from_selected_stora
     models = tmp_path / 'selected-models'
     result = MigrationCoordinator(target, models, tmp_path / 'migration-job').prepare([{'root': str(source), 'label': 'Document Preview'}])
     candidate = Path(result['candidate_root'])
-    registry = json.loads((candidate / 'rag/rag-models.json').read_text())
+    registry = json.loads((candidate / 'rag/rag-models.json').read_text(encoding='utf8'))
     assert Path(registry['root']) == models / 'auxiliary'
     assert registry['models'][0]['digest'] == model['digest']
     ModelStore(candidate / 'rag')._verify(registry['models'][0])
@@ -121,7 +122,7 @@ def test_stale_secondary_model_path_reuses_only_the_verified_matching_identity(t
     store = ModelStore(primary / 'rag')
     record = asyncio.run(store.import_model(model_directory(tmp_path / 'weights'), 'bge-m3'))
     shutil.copytree(primary, secondary)
-    registry = json.loads((secondary / 'rag/rag-models.json').read_text())
+    registry = json.loads((secondary / 'rag/rag-models.json').read_text(encoding='utf8'))
     registry['root'] = str(tmp_path / 'removed-qa-models')
     (secondary / 'rag/rag-models.json').write_text(json.dumps(registry), encoding='utf8')
     migration = MigrationCoordinator(tmp_path / 'target', tmp_path / 'models', tmp_path / 'job')
@@ -148,8 +149,8 @@ def test_prepare_keeps_raw_snapshot_and_merges_configuration_with_final_paths(tm
     target = tmp_path / 'target'
     result = MigrationCoordinator(target, tmp_path / 'models', tmp_path / 'job').prepare([{'root': str(source), 'label': 'Document'}])
     candidate = Path(result['candidate_root'])
-    assert json.loads((candidate / 'settings.json').read_text()) == settings
-    assert json.loads((candidate / 'work-tool-grants.json').read_text()) == grants
+    assert json.loads((candidate / 'settings.json').read_text(encoding='utf8')) == settings
+    assert json.loads((candidate / 'work-tool-grants.json').read_text(encoding='utf8')) == grants
     raw = Path(result['profiles'][0]['raw_snapshot'])
     assert raw.is_file()
     with sqlite3.connect(raw) as connection:
