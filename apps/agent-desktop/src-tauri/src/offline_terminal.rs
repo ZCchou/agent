@@ -593,7 +593,10 @@ impl Process {
         if bootstrap.contains('"') {
             return Err("terminal_isolation_unavailable: Invalid trusted bootstrap".into());
         }
-        let mut command = wide(format!("\"{}\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -Command \"{bootstrap}\"", shell.display()));
+        // Load only Windows PowerShell's trusted modules. AppContainer registry
+        // discovery and module caches can differ from the parent shell.
+        let module_bootstrap = "try { Import-Module ($PSHOME+'\\Modules\\Microsoft.PowerShell.Management') -ErrorAction Stop; Import-Module ($PSHOME+'\\Modules\\Microsoft.PowerShell.Utility') -ErrorAction Stop } catch { [Console]::Error.WriteLine(('terminal_module_load_failed: '+$_.ToString())); exit 125 };";
+        let mut command = wide(format!("\"{}\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -Command \"{module_bootstrap}{bootstrap}\"", shell.display()));
         let system = crate::terminal_executor::system_directory()?;
         let windows = system
             .parent()
@@ -605,6 +608,10 @@ impl Process {
                 shell.parent().unwrap().display()
             ),
             "PATHEXT=.COM;.EXE;.BAT;.CMD".into(),
+            format!(
+                "PSModulePath={}",
+                shell.parent().unwrap().join("Modules").display()
+            ),
             format!("AGENT_TERMINAL_CWD={}", working_directory.display()),
             format!("SystemRoot={}", windows.display()),
             format!("WINDIR={}", windows.display()),
@@ -810,7 +817,7 @@ mod tests {
             std::env::temp_dir().join(format!("agent-terminal-probe-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("read.txt"), "readable").unwrap();
-        let bootstrap = r#"[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); [Console]::WriteLine(('cwd='+$env:AGENT_TERMINAL_CWD)); try { [Console]::WriteLine([IO.File]::ReadAllText(($env:AGENT_TERMINAL_CWD+'\read.txt'))) } catch { [Console]::WriteLine(('read='+$_.Exception.ToString())) }; try { Set-Location -LiteralPath $env:AGENT_TERMINAL_CWD -ErrorAction Stop; [Console]::WriteLine('location-ok') } catch { [Console]::WriteLine(('location='+$_.Exception.ToString())) }; exit 0"#;
+        let bootstrap = r#"[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); [Console]::WriteLine(('modules='+$env:PSModulePath)); [Console]::WriteLine(('cwd='+$env:AGENT_TERMINAL_CWD)); try { [Console]::WriteLine([IO.File]::ReadAllText(($env:AGENT_TERMINAL_CWD+'\read.txt'))) } catch { [Console]::WriteLine(('read='+$_.Exception.ToString())) }; try { Set-Location -LiteralPath $env:AGENT_TERMINAL_CWD -ErrorAction Stop; [Console]::WriteLine('location-ok') } catch { [Console]::WriteLine(('location='+$_.Exception.ToString())) }; exit 0"#;
         let mut process = Process::suspended(
             &crate::terminal_executor::powershell_path().unwrap(),
             bootstrap,
@@ -833,6 +840,17 @@ mod tests {
         drop(process);
         std::fs::remove_dir_all(root).unwrap();
         assert!(output.contains("location-ok"), "{output}");
+        let modules = crate::terminal_executor::powershell_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("Modules");
+        assert!(
+            output
+                .lines()
+                .any(|line| line == format!("modules={}", modules.display())),
+            "{output}"
+        );
     }
     #[test]
     fn abandoned_profile_grants_are_recovered_without_removing_project_files() {
