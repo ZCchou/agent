@@ -108,6 +108,9 @@ jobs:
     name: windows-host-check
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # Host tests use the frozen Core. Runtime payloads are staged by packaging.
+      TAURI_CONFIG: '{"bundle":{"resources":null}}'
     defaults:
       run:
         shell: pwsh
