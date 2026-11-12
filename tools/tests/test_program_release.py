@@ -55,6 +55,51 @@ def test_feed_requires_signed_program_package_on_independent_channel():
         release.feed('0.16.0-preview.1', 'signature', 'punkagent', '')
 
 
+def test_program_update_can_retain_verified_pre_deduplication_runtime(tmp_path):
+    release = module()
+    source = tmp_path / 'source'
+    legacy = tmp_path / 'legacy'
+    for root in (source, legacy):
+        (root / 'rag-runtime').mkdir(parents=True)
+    canonical = '_internal/torch/lib/torch_cpu.dll'
+    duplicate = '_internal/torch_cpu.dll'
+    new = {'build_identity': {'worker.py': 'unchanged'}, 'files': {
+        canonical: 'same', 'rag-worker.exe': 'worker', 'build-assets.json': 'new-metadata'}}
+    old = {**new, 'files': {**new['files'], duplicate: 'same', 'build-assets.json': 'old-metadata'}}
+    files = {}
+    for name in release.PROGRAM_FILES:
+        (source / name).write_bytes(name.encode())
+        files[name] = release.identity(source / name)
+    def owner(root, runtime):
+        path = root / 'rag-runtime/runtime.json'
+        path.write_text(json.dumps(runtime))
+        result = {'schema_version': 1, 'application_id': release.APPLICATION_ID,
+                  'version': '0.16.0-preview.2', 'files': files,
+                  'core_contract': {'schema_version': 30, 'protocol_version': 23, 'build_id': 'test'},
+                  'runtime_manifests': {'rag-runtime/runtime.json': release.identity(path)}}
+        (root / 'application.json').write_text(json.dumps(result))
+        return result
+    owner(source, new)
+    previous = owner(legacy, old)
+    result = release.build_archive(source, tmp_path / 'compatible.zip', runtime_source=legacy)
+    assert result['runtime_manifests'] == previous['runtime_manifests']
+    for change in ('worker', 'dll', 'added', 'removed', 'build_identity'):
+        altered = json.loads(json.dumps(old))
+        if change == 'worker':
+            altered['files']['rag-worker.exe'] = 'changed'
+        elif change == 'dll':
+            altered['files'][duplicate] = 'different'
+        elif change == 'added':
+            del altered['files'][canonical]
+        elif change == 'removed':
+            altered['files']['other.txt'] = 'extra'
+        else:
+            altered['build_identity'] = {'worker.py': 'changed'}
+        owner(legacy, altered)
+        with pytest.raises(ValueError, match='runtime'):
+            release.build_archive(source, tmp_path / f'{change}.zip', runtime_source=legacy)
+
+
 def test_release_signer_is_noninteractive_and_bounded(tmp_path, monkeypatch):
     from types import SimpleNamespace
     release = module()
