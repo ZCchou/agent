@@ -140,11 +140,9 @@ jobs:
           python-version: "3.12"
           auto-activate-base: false
 
-      - name: Build the real frozen Python Sidecar and run Core tests
-        run: |
-          conda run --no-capture-output -n agent python -m pip install -r services/agent-core/requirements-rag-cpu.lock
-          if ($LASTEXITCODE -ne 0) { throw "Locked CPU inference test dependency installation failed." }
-          .\tools\build-python-sidecar.bat
+      - name: Build the real frozen Python Sidecar
+        # The core-check job runs the complete Core suite with inference dependencies.
+        run: .\tools\build-python-sidecar.bat --skip-tests
 
       - name: Verify the frozen Sidecar compatibility handshake
         run: .\tools\verify-python-sidecar.ps1

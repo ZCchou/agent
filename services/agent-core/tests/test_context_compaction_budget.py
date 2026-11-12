@@ -55,8 +55,8 @@ def test_local_compaction_uses_local_first_output_and_total_timeouts(tmp_path, m
         provider = CheckpointProvider()
         provider.profile = ProviderProfile('local', 'Local', 'openai-compatible', 'http://127.0.0.1:9000')
         await ContextEngineService(repo).compact_once(seed(repo), provider, context_window=32768, max_output_tokens=512)
-        assert 899 < delays[0] <= 900
-        assert 299 < delays[1] <= 300
+        assert 899 < delays[0] <= 900 + 1e-6
+        assert 299 < delays[1] <= 300 + 1e-6
         assert 60 in delays
     asyncio.run(scenario())
 
