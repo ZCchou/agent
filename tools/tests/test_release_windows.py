@@ -31,6 +31,15 @@ def write_json(path, obj):
 
 
 class SourceStateTests(unittest.TestCase):
+    def test_rag_builder_accepts_external_build_and_cuda_license_paths(self):
+        script = TOOLS / 'build-rag-runtime.ps1'
+        result = run('powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+                     '(Get-Command $env:AGENT_RAG_TEST_SCRIPT).Parameters.Keys | ConvertTo-Json',
+                     env={**os.environ, 'AGENT_RAG_TEST_SCRIPT': str(script)})
+        parameters = json.loads(result.stdout)
+        self.assertIn('BuildDirectory', parameters)
+        self.assertIn('CudaLicensePath', parameters)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='agent-release-git-')
         self.addCleanup(self.temp.cleanup)

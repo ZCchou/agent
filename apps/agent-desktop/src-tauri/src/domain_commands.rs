@@ -57,6 +57,8 @@ pub struct Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
+    #[serde(default)]
+    pub rag_mode: Option<String>,
     pub id: String,
     pub kind: String,
     pub title: String,
@@ -248,6 +250,8 @@ pub struct ModelRunStartRequest {
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing)]
     pub attachment_staging_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub attachment_purposes: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub attachment_references: Vec<AttachmentReference>,
     #[serde(default, skip_serializing)]
@@ -262,6 +266,8 @@ pub struct ModelRunStartRequest {
     pub selection: Option<ModelSelectionInput>,
     #[serde(default)]
     pub web_search_request_mode: Option<String>,
+    #[serde(default)]
+    pub rag_mode: Option<String>,
     #[serde(default, skip_deserializing)]
     pub web_search_global_enabled: bool,
     #[serde(default, skip_deserializing)]
@@ -282,6 +288,10 @@ fn effective_automatic_selection(persisted_mode: Option<&str>, requested_automat
 
 fn is_local_model_profile(profile: &crate::settings::model::ProviderProfileSettings) -> bool {
     crate::offline::validate_profile(profile).is_ok()
+}
+
+fn selectable_model_status(provider_id: &str, status: &str) -> bool {
+    status != "unavailable" || provider_id.starts_with("managed:")
 }
 
 #[tauri::command]
@@ -760,7 +770,9 @@ pub async fn update_conversation_routing(
             .find(|profile| profile.id == *provider_id && profile.enabled)
             .ok_or_else(|| "provider_disabled: The selected provider is disabled.".to_string())?;
         let selected_model = profile.models.iter().find(|model| {
-            model.id == *selected_model_id && model.enabled && model.status != "unavailable"
+            model.id == *selected_model_id
+                && model.enabled
+                && selectable_model_status(&profile.id, &model.status)
         });
         if selected_model.is_none() {
             return Err("model_not_enabled: The selected model is not enabled.".to_string());
@@ -1123,6 +1135,43 @@ pub async fn open_project_directory(
 }
 
 #[tauri::command]
+pub async fn open_project_document(
+    app: AppHandle,
+    manager: State<'_, Mutex<CoreProcessManager>>,
+    work_tools: State<'_, Mutex<WorkToolManager>>,
+    conversation_id: String,
+    path: String,
+) -> Result<(), String> {
+    let conversation = core::<ConversationResult>(
+        &app,
+        &manager,
+        "conversation.get",
+        json!({"conversation_id":conversation_id}),
+    )
+    .await?
+    .conversation;
+    if conversation.kind != "project_work" || !path.to_lowercase().ends_with(".docx") {
+        return Err(
+            "document_open_forbidden: Select a DOCX file within the current project".into(),
+        );
+    }
+    let project = conversation
+        .project_id
+        .ok_or("document_open_forbidden: No project selected")?;
+    let tools = work_tools
+        .lock()
+        .map_err(|_| "project_grant_unavailable: Project authorization is busy")?;
+    let scope = tools.authorized_access(&project, &conversation_id)?;
+    let policy = crate::file_access::FileAccessPolicy;
+    let target = policy.open_read(&scope, &policy.validate_relative(&path)?)?;
+    if !target.is_file() {
+        return Err("document_open_forbidden: Select a regular document file".into());
+    }
+    tauri_plugin_opener::open_path(target.path(), None::<&str>)
+        .map_err(|error| format!("document_open_failed: {error}"))
+}
+
+#[tauri::command]
 pub async fn preview_project_file(
     app: AppHandle,
     manager: State<'_, Mutex<CoreProcessManager>>,
@@ -1301,11 +1350,14 @@ mod routing_serialization_tests {
             "../../../../contracts/unified-invocation-v3.4.json"
         ))
         .unwrap();
-        assert_eq!(contract["ipc_version"], 18);
+        assert_eq!(
+            contract["ipc_version"],
+            crate::core_bridge::PROTOCOL_VERSION
+        );
         assert_eq!(contract["settings_schema_version"], 18);
-        assert_eq!(contract["core_schema_version"], 25);
+        assert_eq!(contract["core_schema_version"], 30);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema25-local-runtime-v1");
+        assert_eq!(contract["build_id"], "schema30-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();
@@ -1864,6 +1916,26 @@ pub async fn update_conversation(
             "conversation_id": conversation_id, "title": title,
             "category": category
         }),
+    )
+    .await?
+    .conversation)
+}
+
+#[tauri::command]
+pub async fn update_conversation_rag(
+    app: AppHandle,
+    manager: State<'_, Mutex<CoreProcessManager>>,
+    conversation_id: String,
+    mode: String,
+) -> Result<Conversation, String> {
+    if !matches!(mode.as_str(), "auto" | "required") {
+        return Err("invalid_rag_mode: Choose auto or required".into());
+    }
+    Ok(core::<ConversationResult>(
+        &app,
+        &manager,
+        "conversation.rag.update",
+        json!({"conversation_id": conversation_id, "mode": mode}),
     )
     .await?
     .conversation)
@@ -2462,6 +2534,12 @@ pub async fn list_conversation_tool_operations(
 #[cfg(test)]
 mod local_model_policy_tests {
     use super::*;
+    #[test]
+    fn registered_managed_models_can_be_selected_before_loading() {
+        assert!(selectable_model_status("managed:registered", "unavailable"));
+        assert!(!selectable_model_status("manual-local", "unavailable"));
+        assert!(selectable_model_status("manual-local", "available"));
+    }
     #[test]
     fn https_loopback_is_local_for_project_scope_and_fixed_conversation_selection() {
         let mut profile = crate::settings::AppSettings::default()

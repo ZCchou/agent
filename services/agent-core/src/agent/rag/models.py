@@ -165,10 +165,22 @@ class ModelStore:
 
     def runtime_status(self):
         try:
-            command = self._command(force=False)
+            if getattr(sys, "frozen", False):
+                base = Path(sys.executable).resolve().parent / "rag-runtime"
+                metadata = _json(base / "runtime.json")
+                if metadata.get("schema_version") != 1 or metadata.get("protocol_version") != 1 or _linked(base):
+                    raise ValueError("Invalid inference runtime manifest")
+                executable = _safe_relative(base, metadata["executable"])
+                if not isinstance(metadata.get("files"), dict) or metadata["executable"] not in metadata["files"]:
+                    raise ValueError("Inference runtime executable is unlisted")
+                command = [str(executable)]
+            else:
+                command = [sys.executable, "-m", "agent.rag.worker"]
             libraries = {name: importlib.util.find_spec(name) is not None for name in ("torch", "transformers", "safetensors", "onnx", "onnxruntime")}
-            return {"available": True, "command": command[0], "version": 1, "libraries": libraries, "cuda_requires_probe": True, "source_runtime": not getattr(sys, "frozen", False)}
-        except CoreDataError as exc:
+            return {"available": True, "command": command[0], "version": 1, "libraries": libraries,
+                    "cuda_requires_probe": True, "source_runtime": not getattr(sys, "frozen", False),
+                    "integrity_check": "on_load"}
+        except (CoreDataError, OSError, ValueError, KeyError, TypeError) as exc:
             return {"available": False, "version": 1, "error": str(exc)}
 
     def inspect(self, path, profile=None):
@@ -491,7 +503,28 @@ class ModelStore:
             force = self._loaded_models.get(device) != (worker, identity) or worker.process is None or worker.process.returncode is not None
             try:
                 path = await asyncio.to_thread(self._verified_path, record, root, force)
-                result = await worker.request(action, {"path": str(path), "profile": record["profile"], "backend": record["backend"], "device": device, "digest": record["digest"], **params})
+                request_params = {"path": str(path), "profile": record["profile"], "backend": record["backend"],
+                                  "device": device, "digest": record["digest"], **params}
+                if action == 'probe':
+                    result = await worker.request(action, request_params)
+                else:
+                    texts = params['texts']
+                    batch_size = 2 if record['backend'] == 'onnx' else max(1, len(texts))
+                    result = []
+                    offset = 0
+                    while offset < len(texts):
+                        batch = texts[offset:offset + batch_size]
+                        try:
+                            batch_result = await worker.request(action, {**request_params, 'texts': batch})
+                        except CoreDataError as exc:
+                            if exc.code != 'rag_resource_exhausted' or batch_size == 1:
+                                raise
+                            batch_size = 1
+                            continue
+                        if not isinstance(batch_result, list) or len(batch_result) != len(batch):
+                            raise CoreDataError('rag_model_error', 'Inference returned an invalid batch size')
+                        result.extend(batch_result)
+                        offset += len(batch)
                 self._loaded_models[device] = (worker, identity)
                 return result
             except asyncio.CancelledError:

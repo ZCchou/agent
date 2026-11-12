@@ -5,6 +5,8 @@ param(
     [string]$InstallDirectory,
     [string]$ManifestSha256,
     [switch]$RunPrerequisites,
+    [switch]$IncludeOcr,
+    [switch]$Airworthiness,
     [switch]$DeferCommit,
     [string]$TransactionToken,
     [int]$InstallerProcessId = 0,
@@ -24,6 +26,16 @@ foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Secu
 $components = @('llm-runtime', 'rag-runtime')
 $appFiles = @('agent-desktop.exe', 'agent.exe', 'agent-core.exe', 'uninstall.exe')
 $owner = 'io.github.zcchou.agent.offline-runtime.v1'
+if ($IncludeOcr) {
+    $components += @('ocr-runtime', 'ocr-model-package')
+    $appFiles += 'agent_desktop_lib.dll'
+    $owner = 'io.github.zcchou.agent.ocrpreview.offline-runtime.v1'
+}
+if ($Airworthiness) {
+    $components = @('llm-runtime', 'rag-runtime', 'ocr-runtime', 'ocr-model-package', 'office-runtime')
+    $appFiles += @('agent_desktop_lib.dll', 'agent-updater.exe', 'application.json')
+    $owner = 'io.github.zcchou.agent.airworthiness.offline-runtime.v1'
+}
 $restartRequired = $false
 if ($TransactionToken) { $TransactionToken = ([guid]::Parse($TransactionToken)).ToString('N') }
 
@@ -87,8 +99,18 @@ function Read-ApplicationManifest([string]$Path, [string]$Digest) {
         throw 'Application identity manifest differs from this installer'
     }
     $record = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($record.schema_version -ne 1 -or @($record.files.PSObject.Properties).Count -ne 2) { throw 'Invalid application identity manifest' }
-    foreach ($name in @('agent-desktop.exe', 'agent-core.exe')) {
+    $allowed = @('agent-desktop.exe', 'agent-core.exe')
+    if ($IncludeOcr) { $allowed += 'agent_desktop_lib.dll' }
+    if ($Airworthiness) { $allowed += @('agent_desktop_lib.dll', 'agent-updater.exe', 'application.json') }
+    if ($record.schema_version -ne 1 -or @($record.files.PSObject.Properties).Count -lt 2) { throw 'Invalid application identity manifest' }
+    foreach ($entry in $record.files.PSObject.Properties) {
+        if ($entry.Name -notin $allowed -or $entry.Value.bytes -le 0 -or $entry.Value.sha256 -cnotmatch '^[a-f0-9]{64}$') {
+            throw 'Invalid application identity entry'
+        }
+    }
+    $required = @('agent-desktop.exe', 'agent-core.exe')
+    if ($Airworthiness) { $required += @('agent_desktop_lib.dll', 'agent-updater.exe', 'application.json') }
+    foreach ($name in $required) {
         $entry = $record.files.PSObject.Properties[$name]
         if (-not $entry -or $entry.Value.bytes -le 0 -or $entry.Value.sha256 -cnotmatch '^[a-f0-9]{64}$') {
             throw 'Missing pinned Host or Core identity'
@@ -146,7 +168,7 @@ function Verify-Tree([string]$Root, $Manifest, [string[]]$OnlyComponents = @()) 
 function Assert-Idle([string]$Root) {
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
     foreach ($process in Get-Process -ErrorAction Stop) {
-        if ($process.Path -and $process.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($process.Path -and ([IO.Path]::GetFullPath($process.Path)).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Close the application and its managed workers before upgrading. Busy PID $($process.Id)"
         }
     }

@@ -105,11 +105,14 @@ def default_threads():
 
 
 class Catalog:
-    def __init__(self, repository):
+    def __init__(self, repository, *, recover=True):
         self.repository = repository
+        self._context_declarations = {}
         with repository._connect() as connection:
             row = connection.execute("SELECT value FROM local_model_settings WHERE key='root'").fetchone()
             self.root = checked_path(row[0] if row else repository.database_path.parent / "local-models")
+            if not recover:
+                return
             self.root.mkdir(parents=True, exist_ok=True)
             connection.execute("UPDATE local_model_jobs SET status='interrupted',error=?,updated_at=? WHERE status IN ('queued','running')",
                                (canonical({"code": "interrupted", "message": "Application stopped before the job completed."}), now()))
@@ -207,12 +210,24 @@ class Catalog:
             rows = connection.execute("SELECT * FROM local_models ORDER BY created_at,id").fetchall()
         return [self._model(row) for row in rows]
 
-    @staticmethod
-    def _model(row):
+    def _model(self, row):
         result = dict(row)
         result["is_default"] = bool(result["is_default"])
         result["files"] = json.loads(result.pop("files_json"))
         result["error"] = json.loads(result["error"]) if result["error"] else None
+        result['declared_context_length'] = None
+        try:
+            path = relative_file(self.root / 'objects' / result['id'], result['files'][0]['name'])
+            stat = path.stat()
+            identity = (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            cached = self._context_declarations.get(result['id'])
+            if cached is None or cached[0] != identity:
+                inspection = inspect_gguf(path)
+                cached = (identity, inspection['declared_context_length'])
+                self._context_declarations[result['id']] = cached
+            result['declared_context_length'] = cached[1]
+        except (CoreDataError, OSError, IndexError):
+            pass
         return result
 
     def get(self, model_id):
@@ -258,7 +273,7 @@ class Catalog:
                     "architecture": copied["architecture"], "quantization": copied["quantization"],
                     "context_length": min(8192, copied["context_length"]), "max_context_length": copied["context_length"],
                     "size_bytes": copied["size_bytes"], "digest": digest, "template_digest": copied["template_digest"],
-                    "adapter_digest": adapter, "device": "cpu", "gpu_layers": -1, "threads": default_threads(),
+                    "adapter_digest": adapter, "device": "auto", "gpu_layers": -1, "threads": default_threads(),
                     "status": "imported", "is_default": 0, "source": None, "license": None, "error": None,
                     "files_json": canonical(files), "created_at": now()}
                 if destination.exists():
@@ -303,7 +318,7 @@ class Catalog:
             raise CoreDataError("model_integrity", "The managed chat template or adapter configuration was modified.")
         return (first, inspection) if include_inspection else first
 
-    def configure(self, model_id, params):
+    def validate_configuration(self, model_id, params):
         record = self.get(model_id)
         values = {key: value for key, value in params.items() if key != "model_id"}
         permitted = {"device", "context_length", "gpu_layers", "threads", "is_default", "source", "license"}
@@ -319,6 +334,10 @@ class Catalog:
         for key in ("source", "license"):
             if key in values and values[key] is not None and (not isinstance(values[key], str) or len(values[key]) > 4096):
                 raise CoreDataError("invalid_model_configuration", f"Invalid {key} metadata.")
+        return values
+
+    def configure(self, model_id, params):
+        values = self.validate_configuration(model_id, params)
         if values:
             with self.repository._connect() as connection:
                 if values.get("is_default"):

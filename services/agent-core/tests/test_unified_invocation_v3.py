@@ -28,6 +28,41 @@ def model_spec(**overrides) -> InvocationSpec:
     return InvocationSpec(**values)
 
 
+def test_compiler_counts_response_schema_in_text_request_budget():
+    import json
+    spec = model_spec(max_output_tokens=512, response_format='json_schema',
+                      response_schema_json=json.dumps({'enum': ['source-' + str(i) for i in range(1000)]}))
+    with pytest.raises(CoreDataError) as caught:
+        InvocationCompiler().compile_model(spec, [{'role': 'user', 'content': 'short request'}], context_window=2048)
+    assert caught.value.code == 'provider_context_limit_exceeded'
+    assert caught.value.details['input_overhead_tokens'] > 0
+
+
+def test_compiler_exposes_complete_request_budget_with_schema():
+    import json
+    from agent.context_engine.policy import estimate_tokens
+    messages = [{'role': 'user', 'content': '请填写试验目的'}]
+    schema = {'type': 'object', 'properties': {'answer': {'type': 'string'}}}
+    spec = model_spec(max_output_tokens=2048, response_format='json_schema', response_schema_json=json.dumps(schema))
+    prepared = InvocationCompiler().compile_model(spec, messages, context_window=8192)
+    budget = prepared.input_budget
+    assert budget['input_hard_limit'] == 4915
+    assert budget['context_window'] == 8192 and budget['output_reserve'] == 2048
+    assert budget['request_tokens'] > estimate_tokens(messages)
+    assert budget['remaining_input_tokens'] == 4915 - budget['request_tokens']
+
+
+def test_compiler_counts_native_tool_history_with_null_assistant_content():
+    from agent.context_engine.policy import estimate_tokens
+    messages = [{'role': 'user', 'content': 'inspect'},
+                {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'one', 'type': 'function',
+                    'function': {'name': 'fs_list', 'arguments': '{"path":"."}'}}]},
+                {'role': 'tool', 'tool_call_id': 'one', 'content': '{"entries":[]}'}]
+    prepared = InvocationCompiler().compile_model(model_spec(max_output_tokens=2048), messages, context_window=8192)
+    assert prepared.input_budget['message_tokens'] == estimate_tokens(messages)
+    assert prepared.input_budget['request_tokens'] > estimate_tokens(messages)
+
+
 def test_managed_runtime_identity_is_hashed_and_audited_without_transport_secrets():
     plain = model_spec()
     first = model_spec(managed_runtime=(("engine_commit", "a" * 40), ("backend", "cuda"), ("session_id", "session-1")))
@@ -158,7 +193,7 @@ def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed()
             "provider", "Offline", "fake", "memory://fake", allowed_model_ids=("model",),
             primary_protocol="openai_responses",
         )}
-        service.invocation_compiler = SimpleNamespace(compile_model=lambda *_args: SimpleNamespace(
+        service.invocation_compiler = SimpleNamespace(compile_model=lambda *_args, **_kwargs: SimpleNamespace(
             request_fingerprint="request-fingerprint",
         ))
         service.model_invocation = InvocationServiceStub()

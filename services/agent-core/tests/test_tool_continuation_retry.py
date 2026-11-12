@@ -49,7 +49,7 @@ def install_http(monkeypatch, replies):
 
 
 async def configure(service, value):
-    response = await handle_async_message({"v": 18, "id": "host-feedback",
+    response = await handle_async_message({"v": 23, "id": "host-feedback",
         "type": "provider.configure", "params": value}, service)
     assert "error" not in response, response
 
@@ -195,7 +195,9 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
         with repository._connect() as connection:
             snapshots = [dict(row) for row in connection.execute("SELECT * FROM context_snapshots WHERE run_id=? ORDER BY round_no", (run_id,))]
             invocations = [dict(row) for row in connection.execute("SELECT * FROM invocation_specs WHERE plan_id=? ORDER BY round_no", (parent["execution_plan_id"],))]
-        assert len(snapshots) == len(invocations) == 3
+        assert len(invocations) == 3
+        assert len(snapshots) == len(invocations) + 1
+        assert service.context.context_repository.preview(run_id)['input_scope'] == 'compiled_request'
         retried = await service.retry(run_id, context_strategy=strategy)
         assert retried["execution_plan_id"], "explicit retry must have a persisted plan before dispatch"
         assert service.execution_repository.get_for_run(retried["id"])

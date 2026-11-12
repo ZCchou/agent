@@ -1,6 +1,8 @@
 import type { AttachmentReference, ContextSnapshot, Conversation, ExecutionPlan, ModelRun, ModelRunEvent, ModelSelectionDecision, ModelSelectionRequest, ProjectKnowledge } from "../../types/domain";
 
 export interface StartModelRunInput {
+  ragMode?: "auto" | "required";
+  attachmentPurposes?: Record<string, "template" | "reference">;
   conversationId?: string;
   kind?: "standard_chat" | "project_work";
   category?: string;

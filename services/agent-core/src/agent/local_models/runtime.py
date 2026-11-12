@@ -106,8 +106,9 @@ def process_failure(output, returncode=None):
 
 
 class ManagedRuntime:
-    def __init__(self, catalog, *, runtime_root=None, load_timeout=300, idle_timeout=600, permit):
+    def __init__(self, catalog, *, runtime_root=None, load_timeout=300, idle_timeout=600, permit, pinned=lambda: False):
         self.catalog = catalog
+        self.pinned = pinned
         self.manifest = RuntimeManifest(runtime_root)
         self.load_timeout = load_timeout
         self.idle_timeout = idle_timeout
@@ -362,9 +363,9 @@ class ManagedRuntime:
             await asyncio.sleep(min(1, max(0.02, self.idle_timeout / 4)))
             if session != self.session_id or not self.alive:
                 return
-            if not self.permit.locked() and time.monotonic() - self._last_used >= self.idle_timeout:
+            if not self.permit.locked() and not self.pinned() and time.monotonic() - self._last_used >= self.idle_timeout:
                 async with self.permit:
-                    if session == self.session_id and time.monotonic() - self._last_used >= self.idle_timeout:
+                    if session == self.session_id and not self.pinned() and time.monotonic() - self._last_used >= self.idle_timeout:
                         await self.unload()
                         return
 

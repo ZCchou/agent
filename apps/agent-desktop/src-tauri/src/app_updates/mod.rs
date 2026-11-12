@@ -20,10 +20,10 @@ impl Channel {
     fn endpoint(self) -> &'static str {
         match self {
             Self::Preview => {
-                "https://raw.githubusercontent.com/ZCchou/agent/main/updates/preview.json"
+                "https://raw.githubusercontent.com/ZCchou/agent/main/updates/airworthiness-preview.json"
             }
             Self::Stable => {
-                "https://raw.githubusercontent.com/ZCchou/agent/main/updates/stable.json"
+                "https://raw.githubusercontent.com/ZCchou/agent/main/updates/airworthiness-stable.json"
             }
         }
     }
@@ -104,8 +104,83 @@ fn accepted_download_url(url: &url::Url) -> bool {
         && url.host_str() == Some("github.com")
         && url.username().is_empty()
         && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.port_or_known_default() == Some(443)
         && url.path().starts_with("/ZCchou/agent/releases/download/")
         && !url.path().ends_with('/')
+}
+
+fn program_redirect_url(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.host_str(),
+            Some(
+                "github.com"
+                    | "release-assets.githubusercontent.com"
+                    | "objects.githubusercontent.com"
+            )
+        )
+}
+
+async fn download_signed_program(
+    app: &AppHandle,
+    update: &Update,
+    update_id: &str,
+) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(900))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() < 5 && program_redirect_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("Program download left the allowed release hosts")
+            }
+        }))
+        .build()
+        .map_err(|_| "app_update_network")?;
+    let mut response = client
+        .get(update.download_url.clone())
+        .send()
+        .await
+        .map_err(|_| "app_update_network")?;
+    if !response.status().is_success() {
+        return Err("app_update_network".into());
+    }
+    let total = response.content_length();
+    let limit = 512 * 1024 * 1024;
+    if total.is_some_and(|size| size > limit as u64) {
+        return Err("app_update_package_too_large".into());
+    }
+    let mut bytes = Vec::new();
+    let mut last_sent = 0;
+    while let Some(chunk) = response.chunk().await.map_err(|_| "app_update_network")? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err("app_update_package_too_large".into());
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes.len().saturating_sub(last_sent) >= 128 * 1024 {
+            last_sent = bytes.len();
+            let state = app.state::<AppUpdateService>();
+            let mut cache = state.inner.lock().map_err(|_| "app_update_not_ready")?;
+            if cache.view.update_id.as_deref() != Some(update_id) {
+                return Err("app_update_stale".into());
+            }
+            cache.view.downloaded_bytes = bytes.len() as u64;
+            cache.view.total_bytes = total;
+            emit(app, &cache.view);
+        }
+    }
+    crate::program_update::verify_signed_bytes(
+        &bytes,
+        update.signature.as_bytes(),
+        include_str!("../../updater-public-key.txt"),
+    )?;
+    Ok(bytes)
 }
 
 fn matches_channel(url: &url::Url, channel: Channel, version: &str) -> bool {
@@ -116,15 +191,19 @@ fn matches_channel(url: &url::Url, channel: Channel, version: &str) -> bool {
         .path_segments()
         .map(|parts| parts.collect::<Vec<_>>())
         .unwrap_or_default();
-    if segments.len() != 6 || segments[5] != format!("agent-{version}-windows-x86_64-setup.exe") {
+    if segments.len() != 6
+        || segments[5] != format!("agent-{version}-windows-x86_64-program.zip")
+        || segments[4] != format!("v{version}")
+    {
         return false;
     }
     match channel {
-        Channel::Stable => segments[4] == format!("v{version}"),
-        Channel::Preview => segments[4]
-            .strip_prefix(&format!("v{version}-preview."))
-            .is_some_and(|serial| {
-                !serial.is_empty()
+        Channel::Stable => !version.contains('-'),
+        Channel::Preview => version
+            .split_once("-preview.")
+            .is_some_and(|(base, serial)| {
+                !base.contains('-')
+                    && !serial.is_empty()
                     && !serial.starts_with('0')
                     && serial.bytes().all(|c| c.is_ascii_digit())
             }),
@@ -179,12 +258,14 @@ async fn bounded_body(
 
 #[tauri::command]
 pub fn app_update_status(service: State<'_, AppUpdateService>) -> Result<UpdateView, String> {
-    Ok(service
-        .inner
-        .lock()
-        .map_err(|_| "app_update_not_ready")?
-        .view
-        .clone())
+    let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
+    if cache.view.state == "idle" {
+        if let Some(error) = crate::program_update_session::previous_update_error() {
+            cache.view.state = "error".into();
+            cache.view.error_code = Some(error);
+        }
+    }
+    Ok(cache.view.clone())
 }
 
 #[tauri::command]
@@ -193,7 +274,6 @@ pub async fn check_app_update(
     service: State<'_, AppUpdateService>,
     channel: Channel,
 ) -> Result<UpdateView, String> {
-    crate::offline::deny_network()?;
     // An independent release signing identity must be configured before any network access.
     if app
         .config()
@@ -220,6 +300,7 @@ pub async fn check_app_update(
     let outcome = async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| "app_update_network")?;
         let response = client
@@ -309,7 +390,6 @@ pub async fn download_app_update(
     service: State<'_, AppUpdateService>,
     update_id: String,
 ) -> Result<UpdateView, String> {
-    crate::offline::deny_network()?;
     let update = {
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
         cache.check_identity(&update_id)?;
@@ -322,29 +402,7 @@ pub async fn download_app_update(
         emit(&app, &cache.view);
         update
     };
-    let progress_app = app.clone();
-    let progress_id = update_id.clone();
-    let mut last_sent = 0_u64;
-    let result = update
-        .download(
-            move |chunk, total| {
-                let state = progress_app.state::<AppUpdateService>();
-                if let Ok(mut cache) = state.inner.lock() {
-                    if cache.view.update_id.as_deref() != Some(&progress_id) {
-                        return;
-                    }
-                    cache.view.downloaded_bytes =
-                        cache.view.downloaded_bytes.saturating_add(chunk as u64);
-                    cache.view.total_bytes = total;
-                    if cache.view.downloaded_bytes.saturating_sub(last_sent) >= 128 * 1024 {
-                        last_sent = cache.view.downloaded_bytes;
-                        emit(&progress_app, &cache.view);
-                    }
-                };
-            },
-            || {},
-        )
-        .await;
+    let result = download_signed_program(&app, &update, &update_id).await;
     let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
     match result {
         Ok(bytes) => {
@@ -355,7 +413,7 @@ pub async fn download_app_update(
         }
         Err(error) => {
             cache.view.state = "error".into();
-            cache.view.error_code = Some(error_code(&error).into());
+            cache.view.error_code = Some(error);
             cache.bytes = None;
         }
     }
@@ -371,8 +429,10 @@ pub async fn install_app_update(
     update_id: String,
     draft: Option<draft::RestartDraft>,
 ) -> Result<(), String> {
-    crate::offline::deny_network()?;
-    let (update, bytes) = {
+    if crate::profile_migration::is_busy(&app) {
+        return Err("app_update_busy".into());
+    }
+    let (update, mut bytes) = {
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
         cache.check_identity(&update_id)?;
         let update = cache.update.clone().ok_or("app_update_not_ready")?;
@@ -406,11 +466,25 @@ pub async fn install_app_update(
             .map_err(|_| "app_update_core_unavailable")?
             .shutdown_for_update()
             .map_err(|_| "app_update_core_unavailable")?;
-        update
-            .install(&bytes)
-            .map_err(|_| "app_update_install_failed".to_string())?;
-        #[cfg(not(windows))]
-        app.restart();
+        let root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "app_update_install_failed")?;
+        let payload = std::mem::take(&mut bytes);
+        let signature = update.signature.clone();
+        let version = update.version.clone();
+        let id = update_id.clone();
+        let (result, returned) = tauri::async_runtime::spawn_blocking(move || {
+            let result = crate::program_update_session::prepare_and_handoff(
+                &root, &payload, &signature, &version, &id,
+            );
+            (result, payload)
+        })
+        .await
+        .map_err(|_| "app_update_handoff_failed")?;
+        bytes = returned;
+        result?;
+        app.exit(0);
         Ok(())
     }
     .await;
@@ -445,8 +519,13 @@ pub async fn install_app_update(
         )
         .await;
         let mut cache = service.inner.lock().map_err(|_| "app_update_not_ready")?;
-        cache.bytes = Some(bytes);
-        cache.view.state = "ready".into();
+        cache.bytes = if bytes.is_empty() { None } else { Some(bytes) };
+        cache.view.state = if cache.bytes.is_some() {
+            "ready"
+        } else {
+            "available"
+        }
+        .into();
         cache.view.error_code = Some(error.clone());
         emit(&app, &cache.view);
         return Err(error);
@@ -458,14 +537,56 @@ pub async fn install_app_update(
 mod tests {
     use super::*;
     #[test]
-    fn signed_release_urls_must_match_channel_version_and_installer() {
-        let preview: url::Url="https://github.com/ZCchou/agent/releases/download/v0.14.2-preview.1/agent-0.14.2-windows-x86_64-setup.exe".parse().unwrap();
-        assert!(matches_channel(&preview, Channel::Preview, "0.14.2"));
-        assert!(!matches_channel(&preview, Channel::Stable, "0.14.2"));
+    fn program_download_redirects_stay_with_public_github_asset_hosts() {
+        for value in [
+            "https://github.com/ZCchou/agent/releases/download/v0.16.0-preview.1/file.zip",
+            "https://release-assets.githubusercontent.com/assets/file?signature=value",
+            "https://objects.githubusercontent.com/assets/file",
+        ] {
+            assert!(program_redirect_url(&value.parse().unwrap()));
+        }
+        for value in [
+            "http://github.com/file",
+            "https://evil.test/file",
+            "https://github.com.evil.test/file",
+            "https://user@github.com/file",
+            "https://127.0.0.1/file",
+            "https://github.com:444/file",
+        ] {
+            assert!(!program_redirect_url(&value.parse().unwrap()));
+        }
+    }
+    #[test]
+    fn unified_feed_accepts_only_matching_program_zip_and_channel() {
+        let version = "0.16.0-preview.1";
+        let url: url::Url = format!("https://github.com/ZCchou/agent/releases/download/v{version}/agent-{version}-windows-x86_64-program.zip").parse().unwrap();
+        assert!(matches_channel(&url, Channel::Preview, version));
+        assert!(!matches_channel(&url, Channel::Stable, version));
+        assert!(!matches_channel(&url, Channel::Preview, "0.16.0-preview.2"));
+        assert!(!accepted_download_url(
+            &format!("{url}?file=other").parse().unwrap()
+        ));
+        assert!(Channel::Preview
+            .endpoint()
+            .ends_with("/airworthiness-preview.json"));
+    }
+    #[test]
+    fn signed_release_urls_must_match_channel_version_and_program_package() {
+        let preview: url::Url="https://github.com/ZCchou/agent/releases/download/v0.14.2-preview.1/agent-0.14.2-preview.1-windows-x86_64-program.zip".parse().unwrap();
+        assert!(matches_channel(
+            &preview,
+            Channel::Preview,
+            "0.14.2-preview.1"
+        ));
+        assert!(!matches_channel(
+            &preview,
+            Channel::Stable,
+            "0.14.2-preview.1"
+        ));
         assert!(!matches_channel(&preview, Channel::Preview, "0.14.3"));
         let stable: url::Url = preview
             .as_str()
-            .replace("v0.14.2-preview.1/", "v0.14.2/")
+            .replace("0.14.2-preview.1", "0.14.2")
             .parse()
             .unwrap();
         assert!(matches_channel(&stable, Channel::Stable, "0.14.2"));

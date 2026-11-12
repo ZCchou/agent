@@ -1,3 +1,4 @@
+import { ProjectLibraries } from "../rag/ProjectLibraries";
 import { isLocalProvider } from "../../services/modelSelection";
 import { Archive, BriefcaseBusiness, Folder, FolderKey, MoreHorizontal, Pencil, Pin, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -273,6 +274,7 @@ export function ProjectsPage() {
             </div>
             <p>{t("projects.detail.purposeBehavior", { purpose: t(`projects.categories.${selected.category}`) })}</p>
           </div>
+          <ProjectLibraries key={selected.id} projectId={selected.id} />
           <section className="project-knowledge">
             <h3>{t("models.projectKnowledge")}</h3>
             {knowledge.length === 0 ? <p>{t("models.noKnowledge")}</p> : knowledge.map((item) => (

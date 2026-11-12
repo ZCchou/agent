@@ -52,6 +52,8 @@ pub struct FileMutation {
     pub expected_hash: Option<String>,
     #[serde(default)]
     pub expected_after_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,12 +166,31 @@ pub struct AgentExecutionManager {
     pending: HashMap<String, PendingChangeSet>,
     recent: Vec<ChangeSetView>,
     undo_catalog: UndoCatalog,
+    document_sources: HashMap<String, (PathBuf, String)>,
 }
 
 impl AgentExecutionManager {
+    pub(crate) fn for_startup(
+        recovery_dir: PathBuf,
+        installation_secret: &str,
+        health_probe: bool,
+        migration_pending: bool,
+    ) -> Result<Self, String> {
+        if health_probe || migration_pending {
+            return Ok(Self::disabled(
+                recovery_dir,
+                "startup recovery is suspended",
+            ));
+        }
+        Self::new(recovery_dir, installation_secret)
+    }
+
     pub fn new(recovery_dir: PathBuf, installation_secret: &str) -> Result<Self, String> {
         fs::create_dir_all(&recovery_dir).map_err(|_| {
             "recovery_unavailable: Recovery storage could not be created".to_string()
+        })?;
+        let recovery_dir = recovery_dir.canonicalize().map_err(|_| {
+            "recovery_unavailable: Recovery storage identity could not be resolved".to_string()
         })?;
         let key: [u8; 32] = Sha256::digest(installation_secret.as_bytes()).into();
         let protected_root = recovery_dir.parent().unwrap_or(&recovery_dir).to_path_buf();
@@ -182,6 +203,7 @@ impl AgentExecutionManager {
             pending: HashMap::new(),
             recent: Vec::new(),
             undo_catalog,
+            document_sources: HashMap::new(),
         };
         manager.rebuild_recent_from_catalog();
         manager.refresh_journal_views()?;
@@ -199,6 +221,7 @@ impl AgentExecutionManager {
             pending: HashMap::new(),
             recent: Vec::new(),
             undo_catalog: UndoCatalog::default(),
+            document_sources: HashMap::new(),
         }
     }
 
@@ -216,6 +239,63 @@ impl AgentExecutionManager {
             "fs.read" => self.read(root, arguments),
             _ => Err("unsupported_tool: The requested file tool is not supported".to_string()),
         }
+    }
+
+    pub fn register_document(
+        &mut self,
+        key: &str,
+        filename: &str,
+        expected_hash: &str,
+    ) -> Result<(), String> {
+        if uuid::Uuid::parse_str(key).is_err()
+            || Path::new(filename)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(filename)
+            || !matches!(
+                Path::new(filename)
+                    .extension()
+                    .and_then(|name| name.to_str()),
+                Some("docx" | "md" | "txt")
+            )
+        {
+            return Err("document_artifact_invalid: Invalid managed document identity".into());
+        }
+        let directory = self.protected_root.join("document-artifacts");
+        let scope = AuthorizedRoot::for_host_path(&directory, Path::new(""));
+        let source =
+            FileAccessPolicy.open_read(&scope, &FileAccessPolicy.validate_relative(filename)?)?;
+        if source.hash(MAX_CHANGE_BYTES)? != expected_hash {
+            return Err("document_artifact_changed: Managed document hash mismatch".into());
+        }
+        self.document_sources.insert(
+            key.into(),
+            (source.path().to_path_buf(), expected_hash.into()),
+        );
+        Ok(())
+    }
+
+    fn document_bytes(&self, key: &str) -> Result<Vec<u8>, String> {
+        let (source, expected) = self
+            .document_sources
+            .get(key)
+            .ok_or("document_artifact_unavailable: Regenerate the document before publishing")?;
+        let directory = self.protected_root.join("document-artifacts");
+        let scope = AuthorizedRoot::for_host_path(&directory, Path::new(""));
+        let relative = source
+            .strip_prefix(&directory)
+            .map_err(|_| "document_artifact_invalid: Invalid managed source")?;
+        let file = FileAccessPolicy.open_read(
+            &scope,
+            &FileAccessPolicy.validate_relative(&relative.to_string_lossy())?,
+        )?;
+        let bytes = file.read_bytes(MAX_CHANGE_BYTES)?;
+        if format!("{:x}", Sha256::digest(&bytes)) != *expected {
+            return Err(
+                "document_artifact_changed: Managed document changed before publishing".into(),
+            );
+        }
+        Ok(bytes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -707,6 +787,7 @@ impl AgentExecutionManager {
         plan.execution_hash(&view.mutations)?;
         let mutations = view.mutations.iter().map(|mutation| {
             let bytes = match mutation.kind.as_str() {
+                "create_text" if mutation.artifact_key.is_some() => self.document_bytes(mutation.artifact_key.as_deref().unwrap())?,
                 "patch_text" => self.render_patch(root, &mutation.path, mutation)?.into_bytes(),
                 "copy" => self.open_file(root, mutation.source_path.as_deref().unwrap_or_default())?.read_bytes(MAX_CHANGE_BYTES)?,
                 _ => mutation.content.as_deref().unwrap_or_default().as_bytes().to_vec(),
@@ -925,6 +1006,10 @@ impl AgentExecutionManager {
                 mutation.expected_hash = before_hash.clone();
             }
             mutation.expected_after_hash = match mutation.kind.as_str() {
+                "create_text" if mutation.artifact_key.is_some() => Some(format!(
+                    "{:x}",
+                    Sha256::digest(self.document_bytes(mutation.artifact_key.as_deref().unwrap())?)
+                )),
                 "create_text" | "overwrite_text" => Some(format!(
                     "{:x}",
                     Sha256::digest(mutation.content.as_deref().unwrap_or_default().as_bytes())
@@ -1102,6 +1187,9 @@ impl AgentExecutionManager {
     }
 
     fn persist_undo_catalog(&self) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_activation_in_progress".into());
+        }
         write_encrypted(
             &self.recovery_dir.join(UNDO_CATALOG_FILE),
             &self.key,
@@ -1264,6 +1352,9 @@ impl AgentExecutionManager {
     }
 
     pub(crate) fn ensure_available(&self) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_activation_in_progress".into());
+        }
         if self.disabled_reason.is_some() {
             return Err(
                 "tool_system_unavailable: Secure file recovery is unavailable; pure chat remains available"
@@ -1321,6 +1412,56 @@ mod tests {
         let path = std::env::temp_dir().join(format!("agent-execution-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn managed_document_publication_keeps_binary_out_of_change_json_and_checks_hash() {
+        let root = temp_dir();
+        let private = temp_dir();
+        let store = private.join("document-artifacts");
+        fs::create_dir(&store).unwrap();
+        let private_alias = std::env::temp_dir().join(private.file_name().unwrap());
+        let mut manager =
+            AgentExecutionManager::new(private_alias.join("points"), "document-secret").unwrap();
+        let key = Uuid::new_v4().to_string();
+        let filename = format!("{key}.docx");
+        let bytes = b"PK\x00managed-document\xff";
+        fs::write(store.join(&filename), bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        manager.register_document(&key, &filename, &hash).unwrap();
+        let arguments = json!({"title":"保存模板", "mutations":[{"kind":"create_text","path":"模板.docx","artifact_key":key}]});
+        let disposition = manager
+            .prepare_changes(
+                "document-op".into(),
+                "run".into(),
+                "work".into(),
+                "project".into(),
+                root.clone(),
+                1,
+                ApprovalMode::Open,
+                &arguments,
+            )
+            .unwrap();
+        assert!(matches!(disposition, ChangeDisposition::Executed(_)));
+        assert_eq!(fs::read(root.join("模板.docx")).unwrap(), bytes);
+        assert!(!arguments.to_string().contains("managed-document"));
+        fs::write(store.join(&filename), b"changed").unwrap();
+        let changed = json!({"title":"保存模板", "mutations":[{"kind":"create_text","path":"changed.docx","artifact_key":key}]});
+        assert!(manager
+            .prepare_changes(
+                "other-op".into(),
+                "run".into(),
+                "work".into(),
+                "project".into(),
+                root.clone(),
+                1,
+                ApprovalMode::Open,
+                &changed
+            )
+            .is_err());
+        assert!(!root.join("changed.docx").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(private).unwrap();
     }
 
     #[test]

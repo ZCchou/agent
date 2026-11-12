@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { LocalModelRepository } from "../repositories/LocalModelRepository";
-import type { LocalModel, LocalModelConfiguration, LocalModelJob, LocalModelList, LocalPathSelection, LocalRuntimeCapabilities, LocalRuntimeStatus } from "../../types/localModels";
+import type { LocalModelPreparation, LocalModel, LocalModelConfiguration, LocalModelJob, LocalModelList, LocalPathSelection, LocalRuntimeCapabilities, LocalRuntimeStatus } from "../../types/localModels";
 function request<T>(action: string, params: object = {}): Promise<T> {
   return invoke<T>("local_model_request", { action, params });
 }
@@ -11,9 +11,12 @@ export class TauriLocalModelRepository implements LocalModelRepository {
   inspect(selection: LocalPathSelection) { return request<{ model: LocalModel }>("model.inspect", selection); }
   importModel(selection: LocalPathSelection) { return request<{ job: LocalModelJob }>("model.import", selection); }
   configure(modelId: string, configuration: LocalModelConfiguration) { return request<{ model: LocalModel }>("model.configure", { model_id: modelId, ...configuration }); }
+  configureAndLoad(modelId: string, configuration: LocalModelConfiguration) { return request<{ job: LocalModelJob }>("model.configure_load", { model_id: modelId, ...configuration }); }
   remove(modelId: string) { return request("model.remove", { model_id: modelId }); }
   setRoot(selection: LocalPathSelection) { return request("storage.root", selection); }
   capabilities(verify = true) { return request<LocalRuntimeCapabilities>("runtime.capabilities", { verify }); }
+  prepare(modelId: string, preparationId?: string) { return request<LocalModelPreparation>("runtime.prepare", { model_id: modelId, ...(preparationId ? { preparation_id: preparationId } : {}) }); }
+  release(preparationId: string) { return request("runtime.release", { preparation_id: preparationId }); }
   load(modelId: string) { return request<{ job: LocalModelJob }>("runtime.load", { model_id: modelId }); }
   unload() { return request<LocalRuntimeStatus>("runtime.unload"); }
   status() { return request<LocalRuntimeStatus>("runtime.status"); }

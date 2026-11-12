@@ -171,16 +171,16 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
                      'tokenizer.json', 'LICENSE', 'NOTICE', 'model.onnx', 'weights.bin'):
             self.assertFalse(assets.excluded(Path(name)))
 
-    def test_release_sidecar_contract_is_ipc18_schema25(self):
+    def test_release_sidecar_contract_is_ipc19_schema26(self):
         import re
         root = TOOLS.parent
         protocol = (root / 'services/agent-core/src/agent/protocol.py').read_text(encoding='utf-8')
         storage = (root / 'services/agent-core/src/agent/storage.py').read_text(encoding='utf-8')
         bridge = (root / 'apps/agent-desktop/src-tauri/src/core_bridge.rs').read_text(encoding='utf-8')
-        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*18\b')
-        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*25\b')
-        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*18\b')
-        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*25\b')
+        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*23\b')
+        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*30\b')
+        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*23\b')
+        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*30\b')
         verifier = (TOOLS / 'verify-python-sidecar.ps1').read_text(encoding='utf-8')
         self.assertIn('$actual.schema_version -ne $expectedSchema', verifier)
         self.assertIn('$actual.protocol_version -ne $expectedProtocol', verifier)
@@ -215,11 +215,15 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         args[-1] = '0' * 64
         self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
 
-    def invoke_installer(self, install, action='Install', fault='', defer=False, token=None):
+    def invoke_installer(self, install, action='Install', fault='', defer=False, token=None, include_ocr=False,
+                         airworthiness=False, complete_application=True):
         application = self.root / 'application-manifest.json'
         app_files = {name: {'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()}
                      for name, content in {'agent-desktop.exe': b'complete new host',
                                            'agent-core.exe': b'complete new core'}.items()}
+        if airworthiness and complete_application:
+            for name in ('agent_desktop_lib.dll', 'agent-updater.exe', 'application.json'):
+                app_files[name] = {'bytes': 7, 'sha256': hashlib.sha256(b'fixture').hexdigest()}
         application.write_text(json.dumps({'schema_version': 1, 'files': app_files}))
         manifest = {'schema_version': 1, 'release_id': 'test-123',
                     'files': self.delivery.inventory(self.root)}
@@ -234,6 +238,10 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
                  hashlib.sha256(application.read_bytes()).hexdigest()]
         if fault:
             args += ['-Fault', fault]
+        if include_ocr:
+            args += ['-IncludeOcr']
+        if airworthiness:
+            args += ['-Airworthiness']
         if defer:
             args += ['-DeferCommit']
             import uuid
@@ -246,6 +254,49 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
             import os
             args += ['-TransactionToken', token, '-InstallerProcessId', str(os.getpid())]
         return subprocess.run(args, capture_output=True, text=True)
+
+    def test_unified_installer_requires_complete_program_identity(self):
+        for name in ('ocr-runtime/python/python.exe', 'ocr-model-package/ocr-model.json', 'office-runtime/program/soffice.exe'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'fixture')
+        with tempfile.TemporaryDirectory(prefix='agent-unified-install-') as name:
+            result = self.invoke_installer(Path(name), defer=True, airworthiness=True, complete_application=False)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unified_components_have_independent_owner_and_office_support(self):
+        for name in ('ocr-runtime/python/python.exe', 'ocr-model-package/ocr-model.json', 'office-runtime/program/soffice.exe'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'fixture')
+        with tempfile.TemporaryDirectory(prefix='agent-unified-install-') as name:
+            install = Path(name)
+            result = self.invoke_installer(install, airworthiness=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((install / 'office-runtime/program/soffice.exe').is_file())
+            self.assertIn('airworthiness', (install / '.managed-runtime/owner.txt').read_text())
+            refused = self.invoke_installer(install, action='Uninstall', include_ocr=True)
+            self.assertNotEqual(refused.returncode, 0)
+            result = self.invoke_installer(install, action='Uninstall', airworthiness=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((install / 'office-runtime').exists())
+
+    def test_ocr_components_install_and_uninstall_with_distinct_ownership(self):
+        for name in ('ocr-runtime/python/python.exe', 'ocr-model-package/ocr-model.json'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'OCR fixture')
+        with tempfile.TemporaryDirectory(prefix='agent-ocr-install-') as directory:
+            install = Path(directory)
+            result = self.invoke_installer(install, include_ocr=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((install / 'ocr-runtime/python/python.exe').exists())
+            self.assertTrue((install / 'ocr-model-package/ocr-model.json').exists())
+            self.assertIn('ocrpreview', (install / '.managed-runtime/owner.txt').read_text())
+            result = self.invoke_installer(install, action='Uninstall', include_ocr=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ('llm-runtime', 'rag-runtime', 'ocr-runtime', 'ocr-model-package'):
+                self.assertFalse((install / name).exists())
 
     def test_second_deferred_installer_cannot_recover_or_commit_active_transaction(self):
         with tempfile.TemporaryDirectory(prefix='agent-owned-install-') as name:
@@ -353,7 +404,7 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         import time
         with tempfile.TemporaryDirectory(prefix='agent-owned-install-') as name:
             install = Path(name)
-            mutex = 'Local\\agent-offline-install-' + hashlib.sha256(str(install).lower().encode()).hexdigest().upper()
+            mutex = 'Local\\agent-offline-install-' + hashlib.sha256(str(install.resolve()).lower().encode()).hexdigest().upper()
             ready = self.root / 'mutex-ready.tmp'
             helper = self.root / 'mutex.ps1'
             helper.write_text('param($name,$ready)\n$m=New-Object Threading.Mutex($true,$name); [IO.File]::WriteAllText($ready,"ready"); Start-Sleep 30')

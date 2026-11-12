@@ -48,6 +48,10 @@ async function openKnowledge(page) {
           model.status = "ready"; model.dimension = 1024;
           return structuredClone(model);
         }
+        case "library.overview": return {libraries:[{...library,document_count:2,ready_count:2,project_count:binding?1:0,processing_count:0}]};
+        case "document.list": return {documents:library.documents.map(d=>({...d,adopted:true})),total:library.documents.length};
+        case "document.history": return {versions:library.documents};
+        case "ocr.model.list": return {models:[],runtime:{available:true}};
         case "library.list": return structuredClone({ libraries: params.project_id ? binding ? [{ ...library, ...binding }] : [] : [library] });
         case "library.bind":
           binding = { project_id: params.project_id, enabled: params.enabled, index_id: params.enabled ? library.active_index_id : null };
@@ -57,6 +61,14 @@ async function openKnowledge(page) {
           jobs.push({ id: "index-job", kind: "index.build", library_id: library.id, status: "completed", progress: 1 });
           return { job: structuredClone(jobs[0]) };
         case "job.list": return structuredClone({ jobs });
+        case "document.preview": return {
+          version: { ...version, id: params.version_id, revision: "R1", source: "Local PDF", document_number: "DO-160" },
+          warnings: ["OCR is running. Image regions are not yet included."],
+          chunks: Array.from({ length: 200 }, (_, index) => ({
+            id: `chunk-${index}`, text: `Clause ${index + 1}. Environmental qualification requirements. `.repeat(12), locator: { page: index + 1 },
+          })),
+          total_chunks: 386,
+        };
         default: throw new Error(`Unexpected RAG action: ${action}`);
       }
     };
@@ -64,12 +76,24 @@ async function openKnowledge(page) {
   await page.goto("http://127.0.0.1:5173");
   await page.getByRole("button", { name: "System features" }).click();
   await page.getByRole("navigation").getByRole("button", { name: "Local knowledge", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Local knowledge", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "资料库", level: 2 })).toBeVisible();
 }
+
+test("document preview keeps its passages readable in a desktop-sized window", async ({ page }) => {
+  await openKnowledge(page);
+  await page.setViewportSize({ width: 1002, height: 723 });
+  await page.getByRole("button", {name:"打开资料库 Airworthiness library"}).click();
+  await page.getByRole("button", {name:"预览",exact:true}).first().click();
+  const passages=page.locator(".rag-reader-text");
+  await expect(passages.locator("article")).toHaveCount(200);
+  await expect.poll(()=>passages.evaluate(el=>el.clientHeight)).toBeGreaterThan(120);
+  await page.getByRole("button",{name:"返回资料库",exact:true}).click();
+});
 
 test("auxiliary model import uses a native path grant and can be probed", async ({ page }) => {
   await openKnowledge(page);
-  await page.getByRole("tab", { name: "Auxiliary models" }).click();
+  await page.getByRole("navigation").getByRole("button",{name:"Models",exact:true}).click();
+  await page.getByRole("tab", { name: "检索模型",exact:true }).click();
   await page.getByRole("combobox", { name: "Model type", exact: true }).selectOption("bge-m3");
   await page.getByRole("button", { name: "Choose model folder" }).click();
   await expect(page.getByText("C:\\fixtures\\bge-m3", { exact: true })).toBeVisible();
@@ -89,30 +113,17 @@ test("auxiliary model import uses a native path grant and can be probed", async 
   ]);
 });
 
-test("a project keeps its bound index until reviewed revisions are built and adopted", async ({ page }) => {
+test("manual version selection is available only in advanced library settings", async ({page}) => {
   await openKnowledge(page);
-  await page.getByRole("combobox", { name: "Project", exact: true }).selectOption("project-1");
-  const library = page.locator(".rag-card").filter({ has: page.getByRole("heading", { name: "Airworthiness library", exact: true }) });
-  await library.getByRole("button", { name: "Enable for project" }).click();
-  await expect(library.getByText("Index used by this project index-initial", { exact: true })).toBeVisible();
-  const build = library.getByRole("button", { name: "Build retrieval index" });
+  await page.getByRole("button",{name:"打开资料库 Airworthiness library"}).click();
+  await expect(page.getByRole("button",{name:"Build retrieval index"})).toHaveCount(0);
+  await page.getByRole("tab",{name:"设置",exact:true}).click();
+  await page.getByText("高级维护",{exact:true}).click();
+  const build=page.getByRole("button",{name:"Build retrieval index"});
   await expect(build).toBeDisabled();
-  const standard = library.getByRole("group", { name: "Airworthiness standard", exact: true });
-  const appendix = library.getByRole("group", { name: "Supporting appendix", exact: true });
-  await expect(appendix.getByRole("radio", { name: "A1 · Supporting appendix" })).toBeChecked();
-  await standard.getByRole("radio", { name: "R2 · Airworthiness standard" }).check();
-  await appendix.getByRole("radio", { name: "Exclude this source" }).check();
-  await expect(standard.getByRole("radio", { name: "R1 · Airworthiness standard" })).not.toBeChecked();
+  const standard=page.getByRole("group",{name:"Airworthiness standard",exact:true});
+  await standard.getByRole("radio").nth(1).check();
+  await expect(build).toBeEnabled();
   await build.click();
-  await expect(library.getByText("Library current index index-reviewed", { exact: true })).toBeVisible();
-  await expect(library.getByText("Index used by this project index-initial", { exact: true })).toBeVisible();
-  await library.getByRole("button", { name: "Use current index" }).click();
-  await expect(library.getByText("Index used by this project index-reviewed", { exact: true })).toBeVisible();
-  await expect(library.getByRole("button", { name: "Use current index" })).toBeDisabled();
-  const calls = await page.evaluate(() => window.__ragCalls.filter((call) => ["library.bind", "index.build"].includes(call.args.action)).map((call) => call.args));
-  expect(calls).toEqual([
-    { action: "library.bind", params: { library_id: "airworthiness", project_id: "project-1", enabled: true } },
-    { action: "index.build", params: { library_id: "airworthiness", version_ids: ["standard-r2"] } },
-    { action: "library.bind", params: { library_id: "airworthiness", project_id: "project-1", enabled: true } },
-  ]);
+  await expect.poll(()=>page.evaluate(()=>window.__ragCalls.some(x=>x.args.action==='index.build' && x.args.params.version_ids.includes('standard-r2')))).toBe(true);
 });

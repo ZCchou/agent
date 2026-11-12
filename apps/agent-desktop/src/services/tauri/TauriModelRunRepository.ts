@@ -9,6 +9,8 @@ export class TauriModelRunRepository implements ModelRunRepository {
       conversation_id: input.conversationId ?? null, kind: input.kind ?? null,
       category: input.category ?? null, chat_group_id: input.chatGroupId ?? null,
       project_id: input.projectId ?? null, content: input.content,
+      ...(input.ragMode ? { rag_mode: input.ragMode } : {}),
+      ...(input.attachmentPurposes && Object.keys(input.attachmentPurposes).length ? { attachment_purposes: input.attachmentPurposes } : {}),
       ...(input.editMessageId ? { edit_message_id: input.editMessageId } : {}),
       provider_profile_id: input.providerProfileId, model_id: input.modelId,
       idempotency_key: input.idempotencyKey ?? null,

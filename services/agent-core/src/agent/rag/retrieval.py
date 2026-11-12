@@ -9,6 +9,32 @@ import struct
 from agent.storage import CoreDataError
 
 
+def explicit_subject(query: str) -> str | None:
+    match = re.search(r'(?:关于|有关)\s*(.{2,60}?)\s*(?:的)?(?:相关)?(?:内容|条款|规定|要求|资料|知识)(?=[\s。？！?!，,]|$)', query)
+    return match.group(1).strip().removesuffix('的').strip() if match else None
+
+
+def matches_subject(text: str, subject: str) -> bool:
+    compact_subject = re.sub(r'\s+', '', subject).casefold()
+    compact_text = re.sub(r'\s+', '', text).casefold()
+    if compact_subject in compact_text:
+        return True
+    terms = set(lexical_tokens(compact_subject))
+    matched = terms.intersection(lexical_tokens(compact_text))
+    return len(matched) >= 2 and len(matched) >= len(terms) * 0.65
+
+
+def reference_material(text: str, query: str) -> bool:
+    """Identify explicit front matter/navigation without excluding formal scope sections."""
+    titles = r'译者的话|译者序|编者的话|前言|序言|目\s*录|foreword|preface|table of contents'
+    if re.search(titles + r'|译者|作者|编者|谁翻译|谁编写|出版|修订历史|版本历史', query, re.IGNORECASE):
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if any(re.fullmatch(titles, line, re.IGNORECASE) for line in lines[:3]):
+        return True
+    return sum(bool(re.search(r'(?:…{2,}|\.{5,}|·{5,})\s*\w+(?:[-－]\d+)?\s*$', line)) for line in lines) >= 2
+
+
 def lexical_tokens(text: str) -> list[str]:
     tokens = re.findall(r'[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)*', text.lower())
     for run in re.findall(r'[\u3400-\u9fff]+', text):

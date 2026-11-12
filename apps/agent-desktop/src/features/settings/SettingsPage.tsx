@@ -1,4 +1,5 @@
 import { AppUpdateCard } from "../updater/AppUpdateCard";
+import { ProfileMigrationCard } from '../migration/ProfileMigrationCard';
 import { ChevronRight, Globe2, Image as ImageIcon, Languages, Trash2 } from "lucide-react";
 
 import {
@@ -193,6 +194,7 @@ export function SettingsPage() {
 
 
       <AppUpdateCard />
+      <ProfileMigrationCard />
       <Card className="settings-language-card">
         <div className="settings-language-card__icon">
           <Languages

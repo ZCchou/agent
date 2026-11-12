@@ -1,6 +1,7 @@
 [package]
 name = "agent-desktop"
-version = "0.14.2"
+default-run = "agent-desktop"
+version = "0.16.0-preview.1"
 description = "Local-first desktop agent with auditable model, tool, vision, and web routing"
 authors = ["agent contributors"]
 license = "MIT"
@@ -17,6 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -41,6 +45,8 @@ bytes = "1"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 kamadak-exif = "0.6"
 minisign-verify = "0.2.5"
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2"] }
+semver = "1"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
@@ -54,7 +60,7 @@ strip = true
 tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_Security", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_Security", "Win32_Security_Isolation", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

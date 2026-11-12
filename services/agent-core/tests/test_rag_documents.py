@@ -7,6 +7,66 @@ from agent.rag.documents import parse_document, parse_text
 from agent.storage import CoreDataError
 
 
+def test_pdf_page_header_and_internal_headings_do_not_inherit_old_clause():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('1.15 旧章节', {'kind': 'pdf', 'page': 45}),
+        ('8－1\n8.0 振动\n8.1 试验目的\n验证设备性能。\n8.2 适用范围\n适用于机载设备。\n8.2.1.3 短时高量级振动试验\n发动机叶片损失会造成异常振动。\n警告：还应评估限制条件。', {'kind': 'pdf', 'page': 46}),
+        ('8－2\n本条款的跨页续段。\n8.2.2 试验曲线选择\n根据安装位置选择。', {'kind': 'pdf', 'page': 47}),
+    ], [])
+    by_clause = {item['clause_number']: item for item in parsed['chunks'] if item['clause_number']}
+    assert '8.1' in by_clause and '8.2' in by_clause and '8.2.1.3' in by_clause
+    warning = next(item for item in parsed['chunks'] if '警告' in item['text'])
+    continuation = next(item for item in parsed['chunks'] if '跨页续段' in item['text'])
+    assert warning['clause_number'] == continuation['clause_number'] == '8.2.1.3'
+    assert warning['locator']['clause_parent_id'] == continuation['locator']['clause_parent_id']
+    assert all(item['clause_number'] != '1.15' for item in parsed['chunks'] if item['locator']['page'] >= 46)
+    assert warning['locator']['page'] == 46
+
+
+def test_pdf_decimal_table_cells_and_contents_entries_are_not_clause_headings():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('8－0\n8.2.1.3 短时试验…………8－1\n8.2.2 曲线选择…………8－2', {'kind': 'pdf', 'page': 45}),
+        ('8－8\n1.15 2.50 3.75\n8.2.2.1 试验描述\n1.15\n10.25 11.50 20.75\n试验曲线应经确认。', {'kind': 'pdf', 'page': 53}),
+    ], [])
+    assert {item['clause_number'] for item in parsed['chunks']} == {None, '8.2.2.1'}
+    assert next(item for item in parsed['chunks'] if '试验描述' in item['text'])['clause_number'] == '8.2.2.1'
+
+
+def test_separator_only_blocks_and_fragments_are_excluded():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([(' | | --- | ', {}), ('A' * 1200 + '\n' + ' | ' * 400, {})], [])
+    assert all(any(character.isalnum() for character in item['text']) for item in parsed['chunks'])
+    with pytest.raises(CoreDataError) as error:
+        parse_text('| --- |\n\n***')
+    assert error.value.code == 'rag_document_no_text'
+
+
+def test_pdf_section_heading_resets_clause_but_page_continuation_keeps_it():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('14.0 Existing clause', {'kind': 'pdf', 'page': 159}),
+        ('Existing clause continued.', {'kind': 'pdf', 'page': 160}),
+        ('Section 16\nPOWER INPUT\nNew section text.', {'kind': 'pdf', 'page': 161}),
+        ('New section continued.', {'kind': 'pdf', 'page': 162}),
+    ], [])
+    assert [item['clause_number'] for item in parsed['chunks']] == ['14.0', '14.0', None, None]
+    assert parsed['chunks'][1]['locator']['clause_parent_id'] == 'block-1'
+    assert parsed['chunks'][2]['locator']['clause_parent_id'] == 'block-3'
+
+
+def test_repeated_pdf_section_header_preserves_cross_page_clause():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('Section 14\nEnvironment', {'kind': 'pdf', 'page': 1}),
+        ('14.0 Existing clause', {'kind': 'pdf', 'page': 2}),
+        ('Section 14\nExisting clause continuation.', {'kind': 'pdf', 'page': 3}),
+        ('Section 16\nPower input', {'kind': 'pdf', 'page': 4}),
+    ], [])
+    assert [item['clause_number'] for item in parsed['chunks']] == [None, '14.0', '14.0', None]
+
+
 def test_docx_preserves_paragraph_table_order_and_locators(tmp_path):
     path = tmp_path / 'regulation.docx'
     document = '''<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
@@ -170,10 +230,21 @@ def test_long_clause_preserves_exception_sentence_and_parent_relationship():
     assert len({chunk['locator']['block_id'] for chunk in parsed['chunks']}) == 1
     assert all(chunk['locator']['parent_length'] == len(text) for chunk in parsed['chunks'])
     assert all(chunk['locator']['context_required'] for chunk in parsed['chunks'])
-    assert all(chunk['locator']['splitting_version'] == 'source-block-v2' for chunk in parsed['chunks'])
+    assert all(chunk['locator']['splitting_version'] == 'source-block-v4' for chunk in parsed['chunks'])
     assert parsed['chunks'][0]['locator']['continues_after']
     assert parsed['chunks'][-1]['locator']['continues_before']
     assert parsed['warnings']
+
+
+def test_pdf_cover_heading_after_publisher_header_resets_prior_clause():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('14.0 Waterproofness', {'kind': 'pdf', 'page': 140}),
+        ('RTCA, Inc.\nWashington, DC\nEnvironmental Conditions\nSection 16\nPower Input',
+         {'kind': 'pdf', 'page': 161}),
+    ], [])
+    assert parsed['chunks'][-1]['clause_number'] is None
+    assert parsed['chunks'][-1]['locator']['clause_parent_id'] != parsed['chunks'][0]['locator']['clause_parent_id']
 
 
 def test_docx_heading_paths_table_continuation_and_note_anchor(tmp_path):

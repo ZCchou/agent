@@ -1,0 +1,11 @@
+{
+  "version": "0.16.0-preview.1",
+  "notes": "# agent 0.16.0-preview.1\n\n统一版以 Document Preview 功能为基础，整合 OCR 和文档处理能力。\n\n- 自动模式使用当前本地模型进行语义意图识别，纯寒暄走快速路径，强制 RAG 按对话持久保存。\n- 统一按钮尺寸、Lucide 图标和禁用状态提示。\n- 设置提供两个旧预览版的数据迁移、冲突预览、模型库选择及恢复入口。\n- 恢复手动检查更新，使用独立发布源和签名程序包，程序更新包含 Host、Core、应用 DLL 与更新辅助程序。\n- 使用独立应用标识、数据目录、凭据空间和更新通道，迁移会保留共享模型文件。\n\n## 安装\n\n下载 setup.exe 和全部 10 个 offline.partNN.zip，放在同一个目录后运行安装器。安装器校验并解压组件。GGUF 对话模型及 RAG 嵌入、重排序权重通过本地文件导入，README 提供下载方法。OCR 模型随离线包提供。\n\n旧预览版用户首次迁入统一版需使用完整安装包，随后在设置中迁移数据。程序更新包用于已安装且运行组件兼容的统一版。建议迁移前关闭旧预览版，按界面显示的来源和存储空间确认后执行。\n\n## 验证范围\n\n源码验证已完成 Core 1,363 项、前端 209 项、浏览器 204 项、Host 295 项与更新辅助程序 12 项测试。Host 另有 2 项忽略。发行工具测试另有环境相关跳过项。\n\n实际 CPU ONNX 嵌入输出为 1,024 维，向量范数约为 1。重排序相关样例得分 0.9781，无关样例约为 0.0000163。\n\nQwen3-1.7B 使用 CUDA 加载成功，23 层使用 GPU。生产分类函数的两条真实样例通过，普通软件问题和适航证据任务分别约 4 秒和 3 秒。初测发现的任务数组与原因码格式问题已通过明确提示修复。\n\n本机隔离目录安装、Core 握手、卸载和注册项清理已通过。该完整生命周期测试使用提示修复前的构建。最终 Core 已重建并通过健康检查与全套回归，最终安装器重新编译，复用相同运行组件。最终安装器的整套安装、卸载流程尚未重复执行。应用内更新通道在签名清单合入 main 后启用，当前合入见 PR #1。\n\n安装器尚无 Authenticode 签名，程序更新包和更新清单采用独立密钥签名。干净 Windows 断网安装、本次构建的完整 GPU 业务链路、真实企业资料质量，以及完整模板回填的桌面操作验收仍待完成。适航输出需人工专业复核。\n",
+  "pub_date": "2026-11-11T22:37:40.136186Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc1dYdVpWNFlhZ2JabDdKVmFQU3l1c21YTURiWGJlbkRZV2tPbFo2Smh4cDVFbDgrU3FEbzdjUm1iR3ZIU0lwWUhYbGNyaWFwd1pUcytpbkloOWdyRkZjU0VyL2QzOFFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDM2NjU5CWZpbGU6YWdlbnQtMC4xNi4wLXByZXZpZXcuMS13aW5kb3dzLXg4Nl82NC1wcm9ncmFtLnppcApYVnB2VVVJdnlvRXRkVHIra3MvNHZRaFZGUk14NElXNFIvMTFWSDVrUVJZNVZMei83MllMODJsSmh1clRDRnNKQ2o3ZlZIWUh0MDRLSTF6d1MvUW1BZz09Cg==",
+      "url": "https://github.com/ZCchou/agent/releases/download/v0.16.0-preview.1/agent-0.16.0-preview.1-windows-x86_64-program.zip"
+    }
+  }
+}

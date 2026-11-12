@@ -1,6 +1,16 @@
-import type { RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
+import type { RagDocument, RagFileInspection, RagTaskDetail } from "../../types/rag";
+import type { OcrImportOptions, OcrCatalog, OcrPage, RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
 
 export interface RagRepository {
+  overview(projectId?: string): Promise<{ libraries: RagLibrary[] }>;
+  documents(libraryId: string, offset?: number, query?: string, includeWithdrawn?: boolean): Promise<{ documents: RagDocument[]; total: number }>;
+  history(documentId: string): Promise<{ versions: (RagDocument & { id: string })[] }>;
+  inspectDocuments(libraryId: string, selection: RagPathSelection): Promise<{ files: RagFileInspection[] }>;
+  taskDetail(jobId: string): Promise<RagTaskDetail>;
+  resumeJob(jobId: string, acceptPartial?: boolean): Promise<unknown>;
+  searchLibrary(libraryId: string, query: string): Promise<RagSearchResult>;
+  updateMetadata(confirmation: RagDocumentConfirmation): Promise<unknown>;
+  openOriginal(versionId: string): Promise<void>;
   selectPaths(kind: RagPathKind, modelFile?: boolean): Promise<RagPathSelection | null>;
   revokeSelection(selection: RagPathSelection): Promise<void>;
   listModels(): Promise<RagModelList>;
@@ -15,12 +25,17 @@ export interface RagRepository {
   updateLibrary(libraryId: string, draft: RagLibraryDraft): Promise<unknown>;
   removeLibrary(libraryId: string): Promise<unknown>;
   bindLibrary(libraryId: string, projectId: string, enabled: boolean): Promise<unknown>;
-  importDocuments(libraryId: string, selection: RagPathSelection): Promise<unknown>;
+  importDocuments(libraryId: string, selection: RagPathSelection, options?: OcrImportOptions): Promise<unknown>;
+  listOcrModels(): Promise<OcrCatalog>;
+  importOcrModel(selection: RagPathSelection): Promise<unknown>;
+  ocrPages(versionId: string, page?: number): Promise<{ pages: OcrPage[]; summary: Record<string, unknown> }>;
+  renderOcrPage(versionId: string, page: number): Promise<{ data_url: string }>;
   pasteDocument(libraryId: string, title: string, content: string): Promise<unknown>;
-  previewDocument(versionId: string, offset?: number, limit?: number): Promise<RagDocumentPreview>;
+  previewDocument(versionId: string, offset?: number, limit?: number, page?: number): Promise<RagDocumentPreview>;
   confirmDocument(confirmation: RagDocumentConfirmation): Promise<unknown>;
   withdrawDocument(versionId: string): Promise<unknown>;
   listJobs(): Promise<{ jobs: RagJob[] }>;
+  pauseJob(jobId: string): Promise<unknown>;
   cancelJob(jobId: string): Promise<unknown>;
   buildIndex(libraryId: string, versionIds?: string[]): Promise<unknown>;
   search(projectId: string, query: string, libraryIds?: string[]): Promise<RagSearchResult>;

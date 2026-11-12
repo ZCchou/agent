@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { skillRepository } from "../../services/runtime";
 import type { Skill } from "../../types/skills";
 import "./skills.css";
+import { IconButton } from '../../components/ui/Button';
 
 export function SkillPicker({ disabled, value, onChange }: { disabled: boolean; value: string; onChange(value: string): void }) {
   const { t } = useTranslation("common");
@@ -25,8 +26,8 @@ export function SkillPicker({ disabled, value, onChange }: { disabled: boolean; 
     return () => { active = false; document.removeEventListener("mousedown", dismiss); };
   }, [open, disabled]);
   return <div className="skill-picker" ref={root} onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}>
-    <button type="button" className="chat-composer__icon" disabled={disabled} aria-label={t("skills.choose")}
-      title={t("skills.choose")} aria-expanded={open && !disabled} onClick={() => setOpen(!open)}><Sparkles size={18} /></button>
+    <IconButton size="composer" variant="ghost" className="chat-composer__icon" disabled={disabled} label={t("skills.choose")}
+      aria-expanded={open && !disabled} onClick={() => setOpen(!open)}><Sparkles /></IconButton>
     {open && !disabled ? <div className="skill-picker__menu">
       {loading ? <p>{t("skills.loading")}</p> : error ? <p role="alert">{t("skills.loadError")}</p> : !skills.length ? <p>{t("skills.pickerEmpty")}</p> : skills.map((skill) => (
         <button type="button" key={skill.id} aria-label={skill.name} onClick={() => {

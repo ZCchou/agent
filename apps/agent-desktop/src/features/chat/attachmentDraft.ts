@@ -6,6 +6,8 @@ export const MAX_DRAFT_ATTACHMENTS = 8;
 export const MAX_DRAFT_REJECTIONS = 8;
 export const MAX_DRAFT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
+export const MAX_DRAFT_DOCUMENT_TOTAL_BYTES = 200 * 1024 * 1024;
+
 export interface AttachmentBatchMerge {
   attachments: MessageAttachment[];
   rejectedAttachments: RejectedAttachment[];
@@ -19,6 +21,15 @@ export function mergeAttachmentBatch(
   currentRejected: RejectedAttachment[],
   selected: AttachmentImportBatchResult,
 ): AttachmentBatchMerge {
+  const candidateHashes = new Set(current.map((item) => item.sha256));
+  const candidates = selected.accepted.filter((item) => {
+    if (candidateHashes.has(item.sha256)) return false;
+    candidateHashes.add(item.sha256);
+    return true;
+  }).slice(0, Math.max(0, MAX_DRAFT_ATTACHMENTS - current.length));
+  const hasDocument = [...current, ...candidates].some((item) =>
+    item.artifacts?.some((artifact) => artifact.kind === "document.source"));
+  const maxTotalBytes = hasDocument ? MAX_DRAFT_DOCUMENT_TOTAL_BYTES : MAX_DRAFT_ATTACHMENT_BYTES;
   const seenHashes = new Set(current.map((item) => item.sha256));
   let totalBytes = current.reduce((total, item) => total + item.byte_size, 0);
   const accepted: MessageAttachment[] = [];
@@ -32,7 +43,7 @@ export function mergeAttachmentBatch(
     } else if (current.length + accepted.length >= MAX_DRAFT_ATTACHMENTS) {
       discardedIds.push(attachment.id);
       errorCode ??= "attachment_count_invalid";
-    } else if (totalBytes + attachment.byte_size > MAX_DRAFT_ATTACHMENT_BYTES) {
+    } else if (totalBytes + attachment.byte_size > maxTotalBytes) {
       discardedIds.push(attachment.id);
       errorCode ??= "attachments_too_large";
     } else {
@@ -54,4 +65,7 @@ export function mergeAttachmentBatch(
     discardedIds,
     errorCode,
   };
+}
+export function defaultAttachmentPurpose(name: string): "template" | "reference" {
+  return /\.docx$/i.test(name) && /模板|template/i.test(name) ? "template" : "reference";
 }

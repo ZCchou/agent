@@ -17,8 +17,8 @@ COMPILER = Path('C:/Users/Administrator/AppData/Local/tauri/NSIS/makensis.exe')
 @unittest.skipUnless(os.environ.get('AGENT_TEST_REAL_NSIS') == '1', 'Opt-in native NSIS lifecycle tests')
 class NsisLifecycleTests(unittest.TestCase):
     def setUp(self):
-        parent = ROOT / '.artifacts/local-runtime-work/task5-nsis-lifecycle-tests'
-        parent.mkdir(exist_ok=True)
+        parent = Path(os.environ.get('AGENT_TEST_ARTIFACT_DIR', str(ROOT / '.artifacts/local-runtime-work/task5-nsis-lifecycle-tests')))
+        parent.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix='owned-', dir=parent)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -117,7 +117,8 @@ SectionEnd
     def test_current_tauri_mui_template_compiles_with_recovery_abort_callback(self):
         import re
         import shutil
-        rendered = ROOT / 'apps/agent-desktop/src-tauri/target/release/nsis/x64/installer.nsi'
+        target = Path(os.environ.get('CARGO_TARGET_DIR', str(ROOT / 'apps/agent-desktop/src-tauri/target')))
+        rendered = target / 'release/nsis/x64/installer.nsi'
         self.assertTrue(rendered.is_file(), 'Render the current pinned Tauri installer before this regression')
         for name in ('utils.nsh', 'FileAssociation.nsh'):
             shutil.copyfile(rendered.parent / name, self.root / name)

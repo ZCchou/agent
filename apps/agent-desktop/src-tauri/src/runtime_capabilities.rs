@@ -68,6 +68,8 @@ fn observe_managers(
         "fs.propose_changes":{"status":if executor_available {action_status} else {"unavailable"},
             "reason_code":if !workspace_available {Some(reason)} else if !executor_available {Some("executor_unavailable")} else {None},
             "limits":{"max_change_bytes":MAX_CHANGE_BYTES,"max_mutations":MAX_MUTATIONS}},
+        "document.export":{"status":if executor_available {action_status} else {"unavailable"},
+            "reason_code":if !workspace_available {Some(reason)} else if !executor_available {Some("executor_unavailable")} else {None}},
         "terminal.run":{"status":if !shell_available {"unavailable"} else {action_status},
             "reason_code":if !workspace_available {Some(reason)} else if !shell_available {Some("powershell_unavailable")} else {None},
             "limits":{"max_timeout_ms":MAX_TIMEOUT_MS,"max_output_bytes":MAX_OUTPUT_BYTES}}

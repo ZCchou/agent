@@ -10,6 +10,54 @@ from agent.rag.models import ModelStore
 from agent.storage import CoreDataError
 
 
+@pytest.mark.parametrize('fail_pairs', [False, True])
+@pytest.mark.parametrize('action', ['embed', 'rerank'])
+def test_onnx_small_batches_and_memory_retry_preserve_results(tmp_path, monkeypatch, fail_pairs, action):
+    import sys
+    script = tmp_path / 'batch_worker.py'
+    log = tmp_path / 'batches.jsonl'
+    script.write_text(f'''import sys
+import json
+from pathlib import Path
+
+for line in sys.stdin:
+    request = json.loads(line)
+    texts = request['params'].get('texts', [])
+    with Path({str(log)!r}).open('a') as stream:
+        stream.write(json.dumps(texts) + '\\n')
+    if {fail_pairs!r} and len(texts) > 1:
+        response = {{'id': request['id'], 'error': 'Failed to allocate memory for requested buffer'}}
+    else:
+        values = [[float(text)] + [0.0] * 1023 for text in texts] if request['action'] == 'embed' else [float(text) / 10 for text in texts]
+        response = {{'id': request['id'], 'result': values}}
+    print(json.dumps(response), flush=True)
+''', encoding='utf-8')
+    store = ModelStore(tmp_path / 'data')
+    source = model_directory(tmp_path / 'source')
+    profile = 'bge-m3'
+    if action == 'rerank':
+        profile = 'bge-reranker-v2-m3'
+        (source / 'config.json').write_text(json.dumps({'model_type': 'xlm-roberta',
+            'architectures': ['XLMRobertaForSequenceClassification'], 'hidden_size': 1024, 'num_labels': 1}))
+    record = asyncio.run(store.import_model(source, profile))
+    store._state['models'][0]['backend'] = 'onnx'
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+    async def exercise():
+        try:
+            texts = ['0', '1', '2', '3', '4']
+            if action == 'embed':
+                vectors = await store.embed(record['id'], texts)
+                assert [vector[0] for vector in vectors] == [0, 1, 2, 3, 4]
+            else:
+                assert await store.rerank(record['id'], 'query', texts) == [0, 0.1, 0.2, 0.3, 0.4]
+        finally:
+            await store.close()
+    asyncio.run(exercise())
+    batches = [json.loads(line) for line in log.read_text().splitlines()]
+    assert max(map(len, batches)) <= 2
+    assert batches == ([['0', '1'], ['0'], ['1'], ['2'], ['3'], ['4']] if fail_pairs else [['0', '1'], ['2', '3'], ['4']])
+
+
 def model_directory(root, profile="bge-m3"):
     root.mkdir()
     config = {"model_type": "xlm-roberta", "architectures": ["XLMRobertaModel"], "hidden_size": 1024}
@@ -106,7 +154,8 @@ def test_runtime_manifest_rejects_tampered_executable(tmp_path, monkeypatch):
     store = ModelStore(tmp_path / "data")
     assert store._command() == [str(executable)]
     executable.write_bytes(b"changed")
-    assert store.runtime_status()["available"] is False
+    with pytest.raises(CoreDataError, match="hash mismatch"):
+        store._command()
 
 
 def test_model_config_profile_mismatch_is_rejected(tmp_path):
@@ -168,7 +217,8 @@ def test_runtime_rejects_unlisted_executable_files(tmp_path, monkeypatch):
     (runtime / "injected.dll").write_bytes(b"unlisted")
     monkeypatch.setattr(models.sys, "frozen", True, raising=False)
     monkeypatch.setattr(models.sys, "executable", str(base / "agent-core.exe"))
-    assert ModelStore(tmp_path / "data").runtime_status()["available"] is False
+    with pytest.raises(CoreDataError, match="unlisted or missing"):
+        ModelStore(tmp_path / "data")._command()
 
 
 def test_model_store_close_prevents_new_inference_workers(tmp_path):
@@ -322,7 +372,7 @@ def test_import_copy_does_not_hold_registry_read_lock(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
-def test_runtime_status_reuses_hashes_but_new_worker_admission_rehashes(tmp_path, monkeypatch):
+def test_runtime_status_is_lightweight_but_worker_admission_checks_hashes(tmp_path, monkeypatch):
     import agent.rag.models as models
     base = tmp_path / "app"
     runtime = base / "rag-runtime"
@@ -341,9 +391,27 @@ def test_runtime_status_reuses_hashes_but_new_worker_admission_rehashes(tmp_path
     monkeypatch.setattr(models, "_hash", counted_hash)
     assert store.runtime_status()["available"]
     assert store.runtime_status()["available"]
-    assert len(hashes) == 1
+    assert hashes == []
     store._command()
-    assert len(hashes) == 2
+    assert len(hashes) == 1
+
+
+def test_runtime_status_never_walks_component_directories(tmp_path, monkeypatch):
+    import agent.rag.models as models
+    base = tmp_path / 'app'
+    runtime = base / 'rag-runtime'
+    runtime.mkdir(parents=True)
+    (runtime / 'rag-worker.exe').write_bytes(b'worker')
+    (runtime / 'runtime.json').write_text(json.dumps({'schema_version': 1, 'protocol_version': 1,
+        'executable': 'rag-worker.exe', 'files': {'rag-worker.exe': hashlib.sha256(b'worker').hexdigest()}}))
+    monkeypatch.setattr(models.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(models.sys, 'executable', str(base / 'agent-core.exe'))
+    def forbidden_walk(*args, **kwargs):
+        raise AssertionError('Page status must not scan the runtime directory')
+    monkeypatch.setattr(models.os, 'walk', forbidden_walk)
+    status = ModelStore(tmp_path / 'data').runtime_status()
+    assert status['available']
+    assert status['integrity_check'] == 'on_load'
 
 def test_cpu_worker_is_reused_only_for_the_same_model_identity(tmp_path, monkeypatch):
     import sys

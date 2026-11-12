@@ -39,10 +39,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: services/agent-core/requirements-build.lock
+          cache-dependency-path: |
+            services/agent-core/requirements-build.lock
+            services/agent-core/requirements-rag-cpu.lock
 
       - name: Install locked Core and development dependencies
         run: |
+          python -m pip install -r requirements-rag-cpu.lock
+          if ($LASTEXITCODE -ne 0) { throw "Locked CPU inference test dependency installation failed." }
           python -m pip install -r requirements-build.lock
           if ($LASTEXITCODE -ne 0) { throw "Locked Python dependency installation failed." }
           python -m pip install --no-build-isolation --no-deps -e ".[dev]"
@@ -104,6 +108,9 @@ jobs:
     name: windows-host-check
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # Host tests use the frozen Core. Runtime payloads are staged by packaging.
+      TAURI_CONFIG: '{"bundle":{"resources":null}}'
     defaults:
       run:
         shell: pwsh
@@ -133,8 +140,9 @@ jobs:
           python-version: "3.12"
           auto-activate-base: false
 
-      - name: Build the real frozen Python Sidecar and run Core tests
-        run: .\tools\build-python-sidecar.bat
+      - name: Build the real frozen Python Sidecar
+        # The core-check job runs the complete Core suite with inference dependencies.
+        run: .\tools\build-python-sidecar.bat --skip-tests
 
       - name: Verify the frozen Sidecar compatibility handshake
         run: .\tools\verify-python-sidecar.ps1

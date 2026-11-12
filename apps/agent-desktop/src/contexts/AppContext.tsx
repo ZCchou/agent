@@ -12,6 +12,7 @@ import {
 import { getAgentCoreStatus, pingAgentCore, type CoreStatus } from "../services/tauri/coreBridge";
 
 interface DraftConversation {
+  ragMode?: "auto" | "required";
   kind: ConversationKind;
   category: ProjectCategory;
   projectId: string | null;
@@ -46,6 +47,7 @@ interface AppContextValue {
   consumeNewProjectRequest: () => void;
   draft: DraftConversation;
   setDraftCategory: (category: ProjectCategory) => void;
+  setDraftRagMode: (mode: "auto" | "required") => void;
   startNewChat: (chatGroupId?: string | null) => void;
   startNewWork: (projectId: string) => void;
   conversationCreated: (conversation: Conversation) => Promise<void>;
@@ -202,6 +204,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     newProjectRequested, consumeNewProjectRequest,
     draft,
     setDraftCategory: (category) => setDraft((current) => ({ ...current, category })),
+    setDraftRagMode: (ragMode) => setDraft((current) => ({ ...current, ragMode })),
     startNewChat, startNewWork, conversationCreated,
     coreStatus, coreOnline: coreStatus.healthy, refreshCoreStatus,
     replaceWorkspaceResources,

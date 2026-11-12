@@ -17,6 +17,8 @@ export function resolveIndexVersions(documents: RagDocument[], choices: IndexVer
     if (choice === null) continue;
     if (choice && versions.some((version) => version.version_id === choice)) {
       versionIds.push(choice);
+    } else if (choice === undefined && versions.some((version) => version.adopted)) {
+      versionIds.push(versions.find((version) => version.adopted)!.version_id);
     } else if (choice === undefined && versions.length === 1) {
       versionIds.push(versions[0].version_id);
     } else {

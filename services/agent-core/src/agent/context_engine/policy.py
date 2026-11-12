@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.context_engine.domain import ContextEngineError, ContextPolicy, CompactionTarget
-from agent.context_engine.compaction import compaction_messages
+from agent.context_engine.compaction import compaction_messages, checkpoint_schema
 from agent.execution.output_budget import FALLBACK_CONTEXT_WINDOW, OutputBudget, resolve_output_budget
 
 
 DEFAULT_POLICY = ContextPolicy(
-    version="context-default-v4",
-    target_ratio=0.55,
+    version="context-default-v5",
+    target_ratio=0.80,
     hard_limit_ratio=0.85,
     fallback_context_window=FALLBACK_CONTEXT_WINDOW,
     minimum_output_reserve=512,
@@ -85,8 +85,8 @@ def resolve_budget(
         ).reservation_tokens,
     )
     hard_limit = max(1, int(window * policy.hard_limit_ratio) - output_reserve)
-    target_ratio = 0.40 if strict else 0.70 if expanded else policy.target_ratio
-    input_target = min(hard_limit, max(1, int(window * target_ratio) - output_reserve))
+    target_ratio = 0.65 if strict else 0.90 if expanded else policy.target_ratio
+    input_target = max(1, int(hard_limit * target_ratio))
     if input_target <= 0 or hard_limit <= 0:
         raise ContextEngineError("context_policy_invalid", "The model context policy leaves no input space.")
     return window, input_target, output_reserve, hard_limit
@@ -115,16 +115,17 @@ def resolve_compaction_request(
     """
     window = target.context_window if target.context_window is not None else DEFAULT_POLICY.fallback_context_window
     margin = max(128, math.ceil(window * 0.05))
+    compact_format = target.protocol_id in {'openai_chat', 'ollama', 'ollama_chat'}
 
     def exhausted():
         return ContextEngineError("context_compaction_budget_exhausted", "No history segment fits the complete compaction request budget.")
 
     def prompt(entries):
-        messages = compaction_messages(entries)
+        messages = compaction_messages(entries, compact_format=compact_format)
         if correction is not None:
             messages += [{"role": "assistant", "content": correction}, {"role": "user", "content": (
-                "Return one concise valid JSON object using every required key and no prose. "
-                "Every non-empty item needs text, source_ids, and trust. Cite only an "
+                "Correct the validation problem and return the JSON structure in json_example with no prose. "
+                "Every item needs its text and source_ids. Cite only an "
                 "allowed_source_id from the request."
             )}]
         return messages
@@ -144,6 +145,10 @@ def resolve_compaction_request(
             "response_format": {"type": "json_object"},
             "options": {"num_predict": 8192},
         }
+        if compact_format:
+            entries = json.loads(messages[1]['content'])['sources']
+            envelope['response_format'] = {'type': 'json_schema', 'json_schema': {
+                'name': 'conversation_checkpoint', 'strict': True, 'schema': checkpoint_schema(entries)}}
         return math.ceil(len(json.dumps(envelope, ensure_ascii=False).encode("utf-8")) / 3)
 
     try:

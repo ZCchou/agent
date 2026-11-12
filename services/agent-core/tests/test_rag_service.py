@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -25,6 +26,37 @@ class Engines:
         pass
 
 
+def test_explicit_subject_retrieval_excludes_preface_and_contents(tmp_path):
+    class MisleadingScores(Engines):
+        queries = []
+
+        async def rerank(self, model_id, query, texts):
+            self.queries.append(query)
+            return [0.99 if '译者' in text else 0.01 for text in texts]
+
+    async def exercise():
+        engine = MisleadingScores()
+        core = CoreRepository(tmp_path / 'agent.db')
+        service = RagService(core, engine)
+        project = core.create_project('测试', 'work')['id']
+        try:
+            library = (await service.handle('library.create', {'name': '测试', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await ready(service, library, content='译者的话\n本书介绍适航审定与航空工业。\n\n图8-1 发动机振动试验…………8-10\n图8-2 发动机试验…………8-11\n\n8.1 发动机舱内设备的试验条件。')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            result = await service.search(project, '随机抽取一条适航审定的关于发动机的内容')
+            assert [item['text'] for item in result['evidence']] == ['8.1 发动机舱内设备的试验条件。']
+            assert engine.queries == ['发动机']
+            preface = await service.search(project, '译者的话')
+            assert any(item['text'].startswith('译者的话') for item in preface['evidence'])
+            with pytest.raises(CoreDataError) as error:
+                await service.search(project, '关于液压泵的条款')
+            assert error.value.code == 'rag_no_evidence'
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
 async def ready(service, library, title='标准', content='25.1309 失效状态安全性要求'):
     result = await service.handle('document.paste', {'library_id': library, 'title': title, 'content': content})
     version_id = result['version']['id']
@@ -34,13 +66,89 @@ async def ready(service, library, title='标准', content='25.1309 失效状态�
 
 async def wait_job(service, result):
     job_id = result['job']['id']
-    for _ in range(100):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
         jobs = (await service.handle('job.list', {}))['jobs']
         job = next(item for item in jobs if item['id'] == job_id)
         if job['status'] not in {'queued', 'running'}:
             return job
         await asyncio.sleep(.01)
     raise AssertionError('job did not finish')
+
+
+def test_reauthorization_is_project_scoped_atomic_and_fresh_on_retry(tmp_path):
+    from contextlib import closing
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        project = core.create_project('Project', 'work')['id']
+        other = core.create_project('Other', 'work')['id']
+        service = RagService(core, Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Rules', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            await ready(service, library)
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            old = (await service.search(project, '失效', run_id='old'))['evidence'][0]
+            first = service.reauthorize_evidence(project, [old['id']], run_id='retry')['evidence'][0]
+            second = service.reauthorize_evidence(project, [old['id']], run_id='retry')['evidence'][0]
+            assert len({old['id'], first['id'], second['id']}) == 3
+            with pytest.raises(CoreDataError):
+                service.reauthorize_evidence(other, [old['id']], run_id='new')
+            with closing(service.repository.connect()) as connection:
+                before = connection.execute('SELECT count(*) FROM rag_searches').fetchone()[0]
+            with pytest.raises(CoreDataError):
+                service.reauthorize_evidence(project, [old['id'], 'missing'], run_id='new')
+            with closing(service.repository.connect()) as connection:
+                assert connection.execute('SELECT count(*) FROM rag_searches').fetchone()[0] == before
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': False})
+            with pytest.raises(CoreDataError):
+                service.reauthorize_evidence(project, [old['id']], run_id='new')
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_legacy_separator_chunks_are_filtered_during_search_and_reindex(tmp_path):
+    from contextlib import closing
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        project = core.create_project('Project', 'work')['id']
+        service = RagService(core, Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Rules', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            await ready(service, library, content='Valid requirement.\n\nLegacy separator.')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            with closing(service.repository.connect()) as connection, connection:
+                connection.execute("UPDATE rag_chunks SET text='| --- |' WHERE text='Legacy separator.'")
+                connection.execute("UPDATE rag_indexes SET splitter_versions='[\"source-block-v2\"]'")
+            result = await service.search(project, 'requirement')
+            assert [item['text'] for item in result['evidence']] == ['Valid requirement.']
+            assert any('Reimport' in warning for warning in result['warnings'])
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            with closing(service.repository.connect()) as connection:
+                assert connection.execute('SELECT chunk_count FROM rag_indexes ORDER BY created_at DESC LIMIT 1').fetchone()[0] == 1
+        finally:
+            await service.close()
+    asyncio.run(exercise())
+
+
+def test_office_import_uses_normal_parser_and_preserves_cell_locator(tmp_path):
+    from test_office_documents import package, spreadsheet
+    async def exercise():
+        service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines())
+        try:
+            library = (await service.handle('library.create', {'name': 'Sheets', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            path = package(tmp_path, '.xlsx', spreadsheet())
+            job = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))
+            assert job['status'] == 'completed', job
+            version = service.repository.list_libraries()[0]['documents'][0]['version_id']
+            preview = service.repository.preview(version)
+            assert preview['chunks'][0]['text'] == 'Shared text'
+            assert preview['chunks'][0]['locator']['cell'] == 'B3'
+        finally:
+            await service.close()
+    asyncio.run(exercise())
 
 
 def test_isolation_confirmation_index_withdraw_generation(tmp_path):
@@ -127,6 +235,7 @@ def test_cancelled_index_cannot_publish_late_and_restart_marks_interrupted(tmp_p
         engine.release.set()
         await asyncio.sleep(.05)
         assert service.repository.job(job['id'])['status'] == 'cancelled'
+        assert service.repository.job(job['id'])['termination_source'] == 'user_action'
         assert service.repository.list_libraries()[0]['active_index_id'] is None
         interrupted = service.repository.new_job('index.build', library)
         await service.close()
@@ -193,11 +302,7 @@ def test_library_model_change_keeps_previous_model_index_and_version_filter(tmp_
         with pytest.raises(CoreDataError):
             await service.search(project, '失效', version_ids=['outside'])
         assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
-        assert service.project_state(project) == old_binding
-        with pytest.raises(CoreDataError) as error:
-            await service.handle('model.remove', {'model_id': 'embed'})
-        assert error.value.code == 'rag_model_in_use'
-        await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+        assert service.project_state(project)['generation'] > old_binding['generation']
         assert service.project_state(project)['generation'] > old_binding['generation']
         assert (await service.handle('model.remove', {'model_id': 'embed'}))['removed'] == 'embed'
         assert (await service.search(project, '失效', version_ids=[second]))['evidence'][0]['version_id'] == second
@@ -263,7 +368,8 @@ def test_immediate_shutdown_cancels_jobs_before_first_execution(tmp_path, recwar
         await ready(service, library)
         job = (await service.handle('index.build', {'library_id': library}))['job']
         await service.close()
-        assert service.repository.job(job['id'])['status'] == 'cancelled'
+        assert service.repository.job(job['id'])['status'] == 'interrupted'
+        assert service.repository.job(job['id'])['termination_source'] == 'app_exit'
     asyncio.run(exercise())
     import gc
     gc.collect()
@@ -322,7 +428,7 @@ def test_permanent_project_delete_cascades_evidence_without_deleting_library(tmp
     asyncio.run(exercise())
 
 
-def test_projects_keep_bound_document_revision_until_explicit_rebind(tmp_path):
+def test_projects_automatically_adopt_ready_document_revision(tmp_path):
     async def exercise():
         core = CoreRepository(tmp_path / 'agent.db')
         first_project = core.create_project('First', 'work')['id']
@@ -335,7 +441,7 @@ def test_projects_keep_bound_document_revision_until_explicit_rebind(tmp_path):
         async def revision(number):
             previous = {document['version_id'] for document in service.repository.list_libraries()[0]['documents']}
             source.write_text(f'25.1309 第{number}版失效要求', encoding='utf-8')
-            assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(source)]})))['status'] == 'completed'
+            assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(source)], 'auto_index': False, 'decisions': {str(source): 'replace'}})))['status'] == 'completed'
             version = next(document['version_id'] for document in service.repository.list_libraries()[0]['documents'] if document['version_id'] not in previous)
             await service.handle('document.confirm', {'version_id': version, 'title': '标准', 'revision': str(number), 'source': '局方', 'document_number': 'CCAR-25'})
             return version
@@ -351,16 +457,16 @@ def test_projects_keep_bound_document_revision_until_explicit_rebind(tmp_path):
         with pytest.raises(CoreDataError):
             await service.handle('index.build', {'library_id': library, 'version_ids': [first, second]})
         assert (await wait_job(service, await service.handle('index.build', {'library_id': library, 'version_ids': [second]})))['status'] == 'completed'
-        assert service.project_state(first_project) == before
-        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == first
-        assert (await service.search(second_project, '失效'))['evidence'][0]['version_id'] == first
+        assert service.project_state(first_project)['generation'] > before['generation']
+        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == second
+        assert (await service.search(second_project, '失效'))['evidence'][0]['version_id'] == second
         await service.handle('library.bind', {'library_id': library, 'project_id': second_project, 'enabled': True})
         assert (await service.search(second_project, '失效'))['evidence'][0]['version_id'] == second
-        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == first
+        assert (await service.search(first_project, '失效'))['evidence'][0]['version_id'] == second
         bindings = (await service.handle('library.list', {'project_id': second_project}))['libraries']
         assert bindings[0]['index_id'] == service.project_state(second_project)['index_ids'][0]
         with pytest.raises(CoreDataError):
-            await service.search(first_project, '失效', version_ids=[second])
+            await service.search(first_project, '失效', version_ids=[first])
         await service.close()
     asyncio.run(exercise())
 
@@ -406,11 +512,11 @@ def test_import_text_file_path_creates_revisions_of_same_document(tmp_path):
         library = (await service.handle('library.create', {'name': '法规', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
         path = tmp_path / 'standard.md'
         path.write_text('25.1309 第一版安全性', encoding='utf-8')
-        imported = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]}))
+        imported = await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)], 'decisions': {str(path): 'replace'}}))
         assert imported['status'] == 'completed', imported
         first = service.repository.list_libraries()[0]['documents'][0]
         path.write_text('25.1309 第二版安全性', encoding='utf-8')
-        assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)]})))['status'] == 'completed'
+        assert (await wait_job(service, await service.handle('document.import', {'library_id': library, 'paths': [str(path)], 'decisions': {str(path): 'replace'}})))['status'] == 'completed'
         documents = service.repository.list_libraries()[0]['documents']
         assert len(documents) == 2
         assert {document['id'] for document in documents} == {first['id']}
@@ -458,7 +564,7 @@ def test_batch_import_gives_each_parser_its_budget_after_queue_wait(tmp_path, mo
         try:
             result = await service.handle('document.import', {'library_id': library, 'paths': [str(path) for path in paths]})
             jobs = [await wait_job(service, {'job': job}) for job in result['jobs']]
-            assert [job['status'] for job in jobs] == ['completed', 'completed'], jobs
+            assert [job['status'] for job in jobs] == ['completed'], jobs
             documents = service.repository.list_libraries()[0]['documents']
             assert {document['title'] for document in documents} == {'first', 'second'}
             assert len(documents) == 2
@@ -641,6 +747,9 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         await ready(service, library, content=content)
         assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
         evidence = (await service.search(project, '失效', run_id='context-run'))['evidence'][0]
+        with service.repository.connect() as connection:
+            original = connection.execute('SELECT original_hash FROM rag_versions WHERE id=?', (evidence['version_id'],)).fetchone()[0]
+        assert evidence['original_hash'] == original
         read = service.read_evidence(project, evidence['id'])
         assert read['text'] == evidence['text']
         assert read['text_hash'] == evidence['text_hash']
@@ -659,6 +768,6 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         with closing(service.repository.connect()) as connection:
             versions = connection.execute('SELECT splitter_versions FROM rag_indexes').fetchone()[0]
         import json
-        assert json.loads(versions) == ['source-block-v2']
+        assert json.loads(versions) == ['source-block-v4']
         await service.close()
     asyncio.run(exercise())

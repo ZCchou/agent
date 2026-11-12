@@ -1,3 +1,5 @@
+import { suspendedImportLibrary } from "../rag/ImportWizard";
+import { AuxiliaryConfiguration } from "../rag/AuxiliaryModels";
 import { LocalModelsPanel } from "./LocalModelsPanel";
 import { isLocalProvider } from "../../services/modelSelection";
 import {
@@ -36,6 +38,11 @@ function providerIcon(kind: ProviderKind) {
 export function ModelsPage() {
   const { t } = useTranslation("common");
   const { setCurrentPage, coreOnline } = useApp();
+  const [modelTab, setModelTab] = useState<"generation" | "retrieval" | "ocr">(() => {
+    const saved=window.sessionStorage.getItem("agent:model-tab");window.sessionStorage.removeItem("agent:model-tab");
+    return saved === "retrieval" || saved === "ocr" ? saved : "generation";
+  });
+  const tabs = <nav className="rag-tabs" role="tablist" aria-label="模型用途">{([['generation','对话模型'],['retrieval','检索模型'],['ocr','OCR 模型']] as const).map(([id,label]) => <Button key={id} role="tab" aria-selected={modelTab===id} onClick={()=>setModelTab(id)}>{label}</Button>)}</nav>;
   const presets: Preset[] = [
     { id: "ollama", kind: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434" },
     { id: "custom", kind: "openai_compatible", name: "本机兼容服务", baseUrl: "http://127.0.0.1:8080/v1" },
@@ -360,6 +367,8 @@ export function ModelsPage() {
     };
   }
 
+  if (modelTab !== "generation") return <div className="page-content models-page">{suspendedImportLibrary() && <Button onClick={()=>setCurrentPage("rag")}>返回资料导入</Button>}{tabs}<AuxiliaryConfiguration key={modelTab} kind={modelTab}/></div>;
+
   if (!settings || !modelSettings) return <div className="state-message"><p>{error ?? t("models.loading")}</p>
     {error ? <Button onClick={() => void loadSettings()}>{t("actions.retry")}</Button> : null}
   </div>;
@@ -387,7 +396,8 @@ export function ModelsPage() {
 
       {error && !editing && !viewingProvider ? <div className="models-alert" role="alert"><XCircle size={18} /><span>{error}</span><button type="button" onClick={() => setError(null)} aria-label={t("actions.close")}><X size={16} /></button></div> : null}
 
-      <LocalModelsPanel onChanged={loadSettings} onAuxiliary={() => { window.sessionStorage.setItem("agent:rag-tab", "models"); setCurrentPage("rag"); }} />
+      {tabs}
+      <LocalModelsPanel onChanged={loadSettings} onAuxiliary={() => setModelTab("retrieval")} />
 
       <Card className="models-default-card">
         <div className="models-default-card__copy"><span className="models-default-card__icon"><Bot size={21} /></span><div><h2>{t("models.defaultModel")}</h2><p>{t("models.defaultDescription")}</p></div></div>

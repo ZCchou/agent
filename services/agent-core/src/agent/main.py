@@ -140,6 +140,9 @@ async def _run(repository: CoreRepository, logger: logging.Logger) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] in (["--profile-migration"], ["--profile-health"]):
+        from agent.profile_migration_cli import main as profile_worker_main
+        raise SystemExit(profile_worker_main(sys.argv[1:]))
     if sys.argv[1:] == ["--document-worker"]:
         from agent.document_parser.worker import main as document_worker_main
         raise SystemExit(document_worker_main())

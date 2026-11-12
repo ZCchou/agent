@@ -85,7 +85,7 @@ def test_schema20_upgrade_preserves_rows_and_revokes_legacy_claims(tmp_path: Pat
     CoreRepository(path)
     keeper.close()
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 25
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 30
         assert {table: connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables} == before
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert {table: sorted((tuple(row) for row in connection.execute(f'SELECT * FROM "{table}"')), key=repr)
@@ -104,7 +104,7 @@ def test_schema20_upgrade_preserves_rows_and_revokes_legacy_claims(tmp_path: Pat
         assert attempt["budget_policy_json"] is None
         assert json.loads(attempt["target_json"]) == (
             {"provider_profile_id": "provider", "model_id": "model"} if identifier != "orphan" else {})
-    backups = list(tmp_path.glob("upgrade.db.pre-schema25-*.bak"))
+    backups = list(tmp_path.glob("upgrade.db.pre-schema30-*.bak"))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as connection:
         assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 20
@@ -118,5 +118,5 @@ def test_new_database_needs_no_upgrade_backup(tmp_path: Path):
     path = tmp_path / "new.db"
     repository = CoreRepository(path)
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 25
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 30
     assert list(tmp_path.glob("*.bak")) == []

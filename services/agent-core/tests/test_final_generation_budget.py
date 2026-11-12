@@ -109,7 +109,14 @@ def test_final_allowance_reaches_http_and_matches_every_snapshot_and_frozen_spec
                 specs = list(connection.execute(
                     "SELECT generation_json,status FROM invocation_specs WHERE plan_id=? ORDER BY round_no",
                     (run["execution_plan_id"],)))
-            assert [row[0] for row in snapshots] == [max(512, allowance)] * rounds
+            # The assembled base remains immutable. A known-window request now
+            # records its complete compiled budget before the first dispatch too.
+            expected_snapshots = rounds + int(window is not None)
+            assert [row[0] for row in snapshots] == [max(512, allowance)] * expected_snapshots
+            if window is not None:
+                snapshot = service.context.context_repository.preview(run_id)
+                assert snapshot['input_scope'] == 'compiled_request'
+                assert snapshot['input_hard_limit'] == max(1, int(window * 0.85) - max(512, allowance))
             assert [json.loads(row[0])["max_output_tokens"] for row in specs] == [allowance] * rounds
             assert [row[1] for row in specs] == ["completed", "completed", status] + (["failed"] if status == "failed" else [])
             if status == "failed":

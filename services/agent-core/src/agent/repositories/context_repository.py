@@ -11,7 +11,7 @@ from dataclasses import asdict
 from typing import Any
 
 from agent.context_engine.domain import CompactionClaim, CompactionTarget, PackedContext
-from agent.context_engine.policy import DEFAULT_POLICY
+from agent.context_engine.policy import DEFAULT_POLICY, estimate_tokens
 from agent.context_engine.retrieval import query_units
 from agent.context_engine.attachment_references import validate_saved_selection
 from agent.storage import CoreDataError, CoreRepository, _open_database, _utc_now
@@ -331,6 +331,7 @@ class ContextRepository:
 
     def save_tool_round_snapshot(
         self, run_id: str, round_no: int, prompt_messages: list[dict[str, Any]],
+        *, request_budget: dict[str, int] | None = None,
     ) -> str:
         """Record a later provider call without duplicating source bodies.
 
@@ -344,7 +345,7 @@ class ContextRepository:
             prompt_messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
         )
         dynamic_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        estimated_tokens = max(1, (len(canonical) + 2) // 3)
+        estimated_tokens = estimate_tokens(prompt_messages)
         snapshot_id, now = str(uuid.uuid4()), _utc_now()
         with self._connect() as connection:
             previous = connection.execute(
@@ -353,6 +354,11 @@ class ContextRepository:
             ).fetchone()
             if previous is None:
                 raise CoreDataError("context_source_unavailable", "The base context snapshot is unavailable.")
+            policy = json.loads(previous['policy_json'] or '{}')
+            policy.pop('input_budget', None)
+            if request_budget is not None:
+                policy['input_budget'] = request_budget
+                estimated_tokens = request_budget['request_tokens']
             connection.execute(
                 """INSERT INTO context_snapshots(
                        id, run_id, round_no, assembler_version, policy_version, policy_json,
@@ -362,10 +368,10 @@ class ContextRepository:
                        content_hash, retrieval_confidence, compression_applied, omitted_items, created_at
                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (snapshot_id, run_id, round_no, previous["assembler_version"],
-                 previous["policy_version"], previous["policy_json"],
+                 previous["policy_version"], json.dumps(policy, sort_keys=True),
                  previous["context_generation"], previous["global_instruction_revision"],
-                 previous["global_instruction_hash"], previous["context_window"],
-                 previous["input_target"], previous["output_reserve"],
+                 previous["global_instruction_hash"], (request_budget or {}).get('context_window', previous["context_window"]),
+                 previous["input_target"], (request_budget or {}).get('output_reserve', previous["output_reserve"]),
                  previous["token_method"], estimated_tokens, previous["stable_prefix_hash"],
                  dynamic_hash, dynamic_hash, previous["retrieval_confidence"],
                  previous["compression_applied"], previous["omitted_items"], now),
@@ -424,6 +430,14 @@ class ContextRepository:
                 (run_id,),
             ).fetchone()
         result = dict(snapshot)
+        policy = json.loads(result.get("policy_json") or "{}")
+        budget = policy.get('input_budget') or {}
+        full_limit = max(1, int(result['context_window'] * policy.get('hard_limit_ratio', DEFAULT_POLICY.hard_limit_ratio)) - result['output_reserve'])
+        result['input_hard_limit'] = budget.get('input_hard_limit', full_limit)
+        result['body_input_limit'] = policy.get('body_input_limit', policy.get('input_hard_limit'))
+        result['input_scope'] = 'compiled_request' if budget else 'assembled_context'
+        result['request_constraint_tokens'] = max(0, budget.get('request_tokens', 0) - budget.get('message_tokens', 0)) if budget else None
+        result['remaining_input_tokens'] = result['input_hard_limit'] - result['estimated_tokens']
         result["compaction"] = dict(compaction) if compaction else None
         result["run_usage"] = dict(usage) if usage else None
         result["items"] = []
@@ -745,6 +759,17 @@ class ContextRepository:
         return {"id": checkpoint_id, "conversation_id": conversation_id,
                 "through_sequence": through_sequence, "through_offset": through_offset,
                 "source_hash": source_hash, "content": content, "created_at": now}
+
+    def record_compaction_diagnostic(self, claim, diagnostic: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            row = connection.execute('SELECT budget_policy_json FROM context_compaction_attempts WHERE id=? AND claim_token=?',
+                                     (claim.attempt_id, claim.claim_token)).fetchone()
+            if row is None:
+                return
+            policy = json.loads(row['budget_policy_json'] or '{}')
+            policy['diagnostic'] = diagnostic
+            connection.execute('UPDATE context_compaction_attempts SET budget_policy_json=? WHERE id=? AND claim_token=?',
+                               (json.dumps(policy, sort_keys=True), claim.attempt_id, claim.claim_token))
 
     def pause_compaction(self, conversation_id: str, code: str = "cancelled_by_user") -> dict[str, Any] | None:
         now = _utc_now()

@@ -38,7 +38,8 @@ test("context inspector toggles, closes with Escape, and survives page navigatio
   await expect(details).toBeVisible();
   await details.click();
   await expect(page.getByRole("dialog", { name: "Context details" })).toBeVisible();
-  await expect(page.getByText("Estimated context: 42 / 8000 tokens")).toBeVisible();
+  await expect(page.getByText("Input estimate 42 tokens")).toBeVisible();
+  await expect(page.getByText("Capacity unconfirmed")).toBeVisible();
   await page.getByRole("button", { name: "View source" }).click();
   await expect(page.getByRole("dialog", { name: "Context details" }).getByText("hello", { exact: true })).toBeVisible();
   await details.click();

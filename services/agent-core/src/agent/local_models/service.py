@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager, nullcontext
 
@@ -24,6 +25,9 @@ class LocalModelService:
         self._operation = None
         self._permit = asyncio.Lock()
         self._closed = False
+        self._preparations = {}
+        self._run_pins = {}
+        self._auto_load_job = None
 
     @property
     def root(self):
@@ -67,11 +71,12 @@ class LocalModelService:
         if self._runtime is None:
             from .runtime import ManagedRuntime
             self._runtime = ManagedRuntime(self.catalog, runtime_root=self.runtime_root,
-                load_timeout=self.load_timeout, idle_timeout=self.idle_timeout, permit=self._permit)
+                load_timeout=self.load_timeout, idle_timeout=self.idle_timeout, permit=self._permit,
+                pinned=self.pinned)
         return self._runtime
 
     def _ensure_mutable(self, *, unloaded=False):
-        if self._operation or self._permit.locked():
+        if self._operation or self._permit.locked() or self.pinned():
             raise CoreDataError("model_busy", "A managed model operation or invocation is active.")
         if unloaded and self.provider_profiles():
             raise CoreDataError("model_busy", "Unload the resident model before changing storage.")
@@ -84,6 +89,11 @@ class LocalModelService:
         if action == "model.list":
             return {"models": self.catalog.models(), "root": str(self.root),
                     "storage_migration": self.catalog.storage_migration()}
+        if action == "runtime.prepare":
+            return self.prepare(self._required(params, "model_id"), params.get("preparation_id"))
+        if action == "runtime.release":
+            self.release_preparation(self._required(params, "preparation_id"))
+            return {"released": True}
         if action == "job.list":
             return {"jobs": self.catalog.jobs()}
         if action == "model.inspect":
@@ -101,7 +111,9 @@ class LocalModelService:
                 raise CoreDataError("invalid_params", "verify must be a boolean.")
             return await asyncio.to_thread(self._backend().capabilities, verify=verify)
         if action == "runtime.status":
-            return self._backend().status()
+            self.pinned()
+            return {**self._backend().status(), "active_run_count": len(self._run_pins),
+                    "preparation_count": len(self._preparations), "operation": self._operation}
         if action == "runtime.unload":
             self._ensure_mutable()
             async with self._permit:
@@ -113,6 +125,11 @@ class LocalModelService:
             model_id = self._required(params, "model_id")
             self.catalog.get(model_id)
             return self._schedule(action, model_id=model_id)
+        if action == "model.configure_load":
+            self._ensure_mutable()
+            model_id = self._required(params, "model_id")
+            configuration = self.catalog.validate_configuration(model_id, params)
+            return self._schedule("runtime.configure_load", model_id=model_id, configuration=configuration)
         if action == "model.import":
             self._ensure_mutable()
             return self._schedule(action, path=self._required(params, "path"))
@@ -141,25 +158,88 @@ class LocalModelService:
             raise CoreDataError("invalid_params", f"{key} must be a non-empty string.")
         return value
 
-    def _schedule(self, kind, *, path=None, model_id=None):
+    def pinned(self, model_id=None):
+        now_time = time.monotonic()
+        self._preparations = {key: value for key, value in self._preparations.items()
+                              if value[1] > now_time}
+        models = [value[0] for value in self._preparations.values()] + list(self._run_pins.values())
+        return any(model_id is None or identity == model_id for identity in models)
+
+    def pin_run(self, run_id, provider_id):
+        if self.owns_profile(provider_id):
+            self.get_profile(provider_id)
+            self._run_pins[run_id] = provider_id.removeprefix("managed:")
+
+    def prepare(self, model_id, preparation_id=None):
+        self.catalog.get(model_id)
+        self.pinned()
+        if preparation_id is not None and (
+            preparation_id not in self._preparations or self._preparations[preparation_id][0] != model_id
+        ):
+            raise CoreDataError("model_preparation_expired", "模型加载预约已失效，请重新发送。")
+        existing_waiter = preparation_id is not None
+        preparation_id = preparation_id or uuid.uuid4().hex
+        # Polling renews this lease. Abandoned windows cannot pin a model forever.
+        self._preparations[preparation_id] = (model_id, time.monotonic() + 30)
+        if self._operation == "runtime.configure_load":
+            return {"preparation_id": preparation_id, "state": "waiting"}
+        if self._runtime and self._runtime.matches("managed:" + model_id):
+            self._preparations[preparation_id] = (model_id, time.monotonic() + self.load_timeout + 60)
+            self._runtime.touch()
+            return {"preparation_id": preparation_id, "state": "ready"}
+        if self._operation:
+            job = next((job for job in self.catalog.jobs()
+                        if job["id"] == self._auto_load_job), None)
+            if job and job.get("model_id") == model_id:
+                return {"preparation_id": preparation_id, "state": "loading", "job": job}
+            return {"preparation_id": preparation_id, "state": "waiting"}
+        job = next((job for job in self.catalog.jobs()
+                    if job["id"] == self._auto_load_job and job.get("model_id") == model_id), None)
+        if job and job["status"] in {"failed", "cancelled"} and existing_waiter:
+            # Existing waiters observe the original failure, rather than looping loads.
+            if job["status"] == "cancelled":
+                job = {**job, "error": {"code": "model_loading_cancelled", "message": "模型加载已取消，输入和附件已保留。"}}
+            return {"preparation_id": preparation_id, "state": "failed", "job": job}
+        result = self._schedule("runtime.load", model_id=model_id)
+        self._auto_load_job = result["job"]["id"]
+        return {"preparation_id": preparation_id, "state": "loading", **result}
+
+    def release_preparation(self, preparation_id):
+        value = self._preparations.pop(preparation_id, None)
+        if value and not self.pinned(value[0]) and self._auto_load_job:
+            job = next((job for job in self.catalog.jobs() if job["id"] == self._auto_load_job), None)
+            if job and job.get("model_id") == value[0]:
+                self._request_cancel(self._auto_load_job)
+
+    def _schedule(self, kind, *, path=None, model_id=None, configuration=None):
         job_id = uuid.uuid4().hex
         with self.repository._connect() as connection:
             connection.execute("INSERT INTO local_model_jobs(id,kind,model_id,status,progress,created_at,updated_at) VALUES (?,?,?,'queued',0,?,?)",
                                (job_id, kind, model_id, now(), now()))
         self._operation = kind
         event = threading.Event()
-        task = asyncio.create_task(self._run_job(job_id, kind, event, path=path, model_id=model_id))
+        task = asyncio.create_task(self._run_job(job_id, kind, event, path=path, model_id=model_id, configuration=configuration))
         self._jobs[job_id] = (task, event)
         return {"job": next(job for job in self.catalog.jobs() if job["id"] == job_id)}
 
-    async def _run_job(self, job_id, kind, event, *, path, model_id):
+    async def _run_job(self, job_id, kind, event, *, path, model_id, configuration=None):
         worker = None
         try:
             self.catalog.update_job(job_id, "running")
             if event.is_set():
                 raise CancelledOperation()
-            if kind == "runtime.load":
+            if kind in {"runtime.load", "runtime.configure_load"}:
+                while self._run_pins or kind == "runtime.load" and any(
+                    self._runtime and self._runtime.matches("managed:" + value[0])
+                    for value in self._preparations.values() if value[1] > time.monotonic()
+                ):
+                    if event.is_set():
+                        raise CancelledOperation()
+                    await asyncio.sleep(0.1)
                 async with self._permit:
+                    if kind == "runtime.configure_load":
+                        await self._backend().unload()
+                        self.catalog.configure(model_id, configuration)
                     guard = self.load_guard(self.catalog.get(model_id)) if self.load_guard else nullcontext()
                     async with guard:
                         await self._backend().load(model_id, event)
@@ -221,7 +301,7 @@ class LocalModelService:
         session = self._runtime.session_id
         async with self._permit:
             current = self.get_profile(provider_id)
-            if self._operation or self._runtime.session_id != session \
+            if self._runtime.session_id != session \
                     or (current.base_url, current.api_key) != (profile.base_url, profile.api_key):
                 raise CoreDataError("model_not_loaded", "The managed model session changed before invocation.")
             self._runtime.touch()

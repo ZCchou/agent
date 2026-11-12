@@ -35,6 +35,7 @@ export interface AttachmentReference {
 }
 
 export interface MessageAttachment {
+  purpose?: "reference" | "template";
   id: string;
   message_id?: string;
   kind: "image" | "text";
@@ -59,7 +60,7 @@ export interface MessageAttachment {
 
 export interface AttachmentArtifact {
   artifact_id: string;
-  kind: "text.utf8" | "image.normalized" | "document.text" | "document.page_image" | "audio.transcript" | "archive.manifest";
+  kind: "document.source" | "text.utf8" | "image.normalized" | "document.text" | "document.page_image" | "audio.transcript" | "archive.manifest";
   processor_id: string;
   processor_version: string;
   media_type: string;
@@ -144,6 +145,7 @@ export interface ChatMessage {
 }
 
 export interface Conversation {
+  rag_mode?: "auto" | "required";
   id: string;
   kind: ConversationKind;
   title: string;
@@ -266,6 +268,8 @@ export interface InvocationSpecSummary {
   error_code: string | null;
 }
 export interface ModelRun {
+  rag_requested_mode?: "auto" | "required";
+  rag_decision?: { required: boolean; reason: string; task_type: string; reuse_evidence: boolean };
   id: string;
   conversation_id: string;
   user_message_id: string;
@@ -339,7 +343,7 @@ export interface ProjectModelScope {
 export interface ModelRunEvent {
   run_id: string;
   sequence: number;
-  event_type: "run.progress_recorded" | "run.state_changed" | "run.chunk" | "run.draft_checkpoint" | "run.completed" | "run.failed" | "run.cancelled" | "run.tool_requested" | "run.tool_status_changed" | "run.change_set_ready" | "run.waiting_approval" | "run.tool_completed" | "run.web_search_started" | "run.web_search_completed" | "run.web_search_failed" | "run.web_evidence_evaluated" | "run.grounding_fallback_started" | "run.grounding_fallback_completed" | "run.intent_follow_up_pending" | "run.context_compaction_started" | "run.context_compaction_completed" | "run.context_compaction_failed" | "run.waiting_context" | "run.planning_started" | "run.plan_ready" | "run.waiting_permission" | "run.waiting_budget" | "run.step_started" | "run.step_completed" | "run.step_failed" | "run.synthesis_started" | "run.invocation_prepared" | "run.invocation_dispatched" | "run.invocation_retrying" | "run.response_recovering" | "run.invocation_completed" | "run.invocation_failed";
+  event_type: "run.document_processing" | "run.progress_recorded" | "run.state_changed" | "run.chunk" | "run.draft_checkpoint" | "run.completed" | "run.failed" | "run.cancelled" | "run.tool_requested" | "run.tool_status_changed" | "run.change_set_ready" | "run.waiting_approval" | "run.tool_completed" | "run.web_search_started" | "run.web_search_completed" | "run.web_search_failed" | "run.web_evidence_evaluated" | "run.grounding_fallback_started" | "run.grounding_fallback_completed" | "run.intent_follow_up_pending" | "run.context_compaction_started" | "run.context_compaction_completed" | "run.context_compaction_failed" | "run.waiting_context" | "run.planning_started" | "run.plan_ready" | "run.waiting_permission" | "run.waiting_budget" | "run.step_started" | "run.step_completed" | "run.step_failed" | "run.synthesis_started" | "run.invocation_prepared" | "run.invocation_dispatched" | "run.invocation_retrying" | "run.response_recovering" | "run.invocation_completed" | "run.invocation_failed";
   timestamp: string;
   data: Record<string, unknown>;
 }
@@ -353,6 +357,11 @@ export interface ContextSnapshot {
   global_instruction_hash: string | null;
   context_window: number;
   input_target: number;
+  input_hard_limit?: number | null;
+  body_input_limit?: number | null;
+  input_scope?: "assembled_context" | "compiled_request";
+  request_constraint_tokens?: number | null;
+  remaining_input_tokens?: number;
   output_reserve: number;
   token_method: string;
   estimated_tokens: number;
@@ -403,6 +412,8 @@ export interface CompactionTargetRequest {
   model_id: string;
 }
 export interface ContextCompactionState {
+  background?: boolean;
+  blocks_send?: boolean;
   id: string;
   conversation_id: string;
   run_id: string | null;
@@ -516,7 +527,7 @@ export interface ToolOperation {
   id: string;
   run_id: string;
   sequence: number;
-  tool_name: "fs.list" | "fs.search" | "fs.read" | "fs.propose_changes" | "terminal.run";
+  tool_name: "fs.list" | "fs.search" | "fs.read" | "fs.propose_changes" | "terminal.run" | "skills.load" | "skills.read_resource" | "skills.save" | "rag.search" | "rag.read" | "document.inspect_template" | "document.fill_template" | "document.export";
   arguments?: Record<string, unknown>;
   result_summary?: string | null;
   status: "requested" | "validating" | "reviewing" | "waiting_user" | "executing" | "completed" | "rejected" | "failed" | "cancelled" | "interrupted";

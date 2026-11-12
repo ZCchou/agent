@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "agent",
   "version": "../package.json",
-  "identifier": "io.github.zcchou.agent",
+  "identifier": "io.github.zcchou.agent.airworthiness",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -16,8 +16,8 @@
         "title": "agent",
         "width": 1000,
         "height": 720,
-        "minWidth": 1000,
-        "minHeight": 680,
+        "minWidth": 900,
+        "minHeight": 500,
         "center": true,
         "resizable": true,
         "maximizable": true,
@@ -73,7 +73,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgxMUE4NjU3OTk3QjU5RUMKUldUc1dYdVpWNFlhZ1o1TTduMFhmLzRJb2tjOCtXNVhDd1JDRkp4OFloMHlxbXdCR0IvUldQNGsK"
     }
   }
 }

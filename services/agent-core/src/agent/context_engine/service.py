@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -17,9 +18,9 @@ from weakref import WeakKeyDictionary
 from agent.behavior import BehaviorPolicyResolver
 from agent.context_engine.domain import CompactionClaim, CompactionTarget, PackedContext
 from agent.context_engine.compaction_lifecycle import error_code, log_failure
-from agent.context_engine.compaction import parse_checkpoint
+from agent.context_engine.compaction import parse_checkpoint, checkpoint_schema
 from agent.context_engine.domain import ContextEngineError
-from agent.context_engine.history import reconstruct_turns, source_hash
+from agent.context_engine.history import reconstruct_turns, source_hash, history_requirements
 from agent.context_engine.packer import pack_context
 from agent.context_engine.attachment_references import text_range
 from agent.context_engine.policy import (
@@ -165,6 +166,9 @@ class ContextEngineService:
             replay_ids = {message["id"] for message in replay}
             history = replay + [message for message in history if message["id"] not in replay_ids]
         turns = reconstruct_turns(history, sources["runs"])
+        from agent.document_attachments import is_document
+        evidence_task = bool(self.rag_context and self.rag_context(run['id'])) or any(is_document(item) for item in current.get('attachments', []))
+        allow_omission, protected_ids = history_requirements(current, turns, evidence_task=evidence_task)
         profile = self.behavior.resolve(conversation["resolved_category"])
         global_instruction_state = sources.get("global_instructions")
         include_global_instruction = self._uses_user_global_instructions(serialization_identity)
@@ -179,6 +183,11 @@ class ContextEngineService:
             policy=DEFAULT_POLICY, expanded=run.get("context_strategy") == "expanded_retry",
             strict=strict,
         )
+        full_input_limit = hard_limit
+        request_overhead = (serialization_identity or {}).get('input_overhead_tokens', 0)
+        if type(request_overhead) is int and request_overhead > 0:
+            hard_limit = max(1, hard_limit - request_overhead)
+            target = min(target, hard_limit)
         system_message = self._system_message(
             conversation, profile, global_instructions=global_instructions,
         )
@@ -212,11 +221,14 @@ class ContextEngineService:
             retrieval_confidence=confidence,
             task_state=self._task_state(run, sources["operations"]), current_message=current,
             context_generation=sources["context_generation"], context_window=window,
-            input_target=target, hard_limit=hard_limit, output_reserve=reserve,
+            input_target=target, hard_limit=min(hard_limit, target) if strict else hard_limit, output_reserve=reserve,
             serialization_identity=serialization_identity,
             rag_evidence=self.rag_context(run["id"]) if self.rag_context else None,
+            allow_history_omission=allow_omission,
+            protected_history_ids=protected_ids if allow_omission else None,
         )
-        return packed, conversation["id"]
+        return replace(packed, input_hard_limit=full_input_limit, body_input_limit=packed.input_hard_limit,
+                       request_overhead_tokens=request_overhead if type(request_overhead) is int else 0), conversation["id"]
 
     def post_run_compaction_decision(self, run: dict[str, Any]) -> PostRunCompactionDecision | None:
         snapshot = self.context_repository.preview(run["id"])
@@ -301,9 +313,12 @@ class ContextEngineService:
                 raise ContextEngineError(code, "Context changed while it was being prepared.") from error
             raise
         correction: str | None = None
-        json_mode = True
+        response_format = 'json_schema' if target.protocol_id in {'openai_chat', 'ollama', 'ollama_chat'} else 'json_object'
+        aliases = {f's{index + 1}': entry['source_id'] for index, entry in enumerate(selected)}
         calls = 0
-        deadline = time.monotonic() + 120
+        local = bool(getattr(getattr(provider, 'profile', None), 'is_local', False))
+        total_timeout, first_timeout, idle_timeout = (900, 300, 60) if local else (120, 60, 30)
+        deadline = time.monotonic() + total_timeout
         input_tokens: int | None = None
         output_tokens: int | None = None
         try:
@@ -320,7 +335,7 @@ class ContextEngineService:
                 call_input: int | None = None
                 call_output: int | None = None
                 finish_reason: str | None = None
-                first_deadline = min(deadline, time.monotonic() + 60)
+                first_deadline = min(deadline, time.monotonic() + first_timeout)
                 try:
                     async with asyncio.timeout(remaining):
                         self._guard_compaction_dispatch(claim, generation, dispatch_guard)
@@ -330,13 +345,14 @@ class ContextEngineService:
                             options=GenerationOptions(
                                 purpose="context_compaction",
                                 max_output_tokens=request.output_budget.initial_tokens,
-                                response_format="json_object" if json_mode else None,
+                                response_format=response_format,
+                                response_schema=checkpoint_schema(selected) if response_format == 'json_schema' else None,
                             ),
                         ).__aiter__()
                         while True:
                             try:
                                 remaining = deadline - time.monotonic()
-                                timeout = min(30, remaining) if saw_output else min(first_deadline - time.monotonic(), remaining)
+                                timeout = min(idle_timeout, remaining) if saw_output else min(first_deadline - time.monotonic(), remaining)
                                 if timeout <= 0:
                                     raise TimeoutError
                                 async with asyncio.timeout(timeout):
@@ -356,8 +372,8 @@ class ContextEngineService:
                     code = "stream_stalled" if saw_output else "request_timeout"
                     raise ProviderError(code, "Context organization stopped receiving data.") from error
                 except ProviderError as error:
-                    if error.code == "response_format_unsupported" and json_mode and not saw_activity:
-                        json_mode = False
+                    if error.code == "response_format_unsupported" and response_format and not saw_activity:
+                        response_format = 'json_object' if response_format == 'json_schema' else None
                         continue
                     if error.code == "provider_request_not_sent" and not saw_activity and calls < 3:
                         continue
@@ -387,15 +403,19 @@ class ContextEngineService:
                         "The provider returned no checkpoint output; the outcome cannot be safely replayed.",
                     )
                 try:
-                    parsed = parse_checkpoint(content, {entry["source_id"]: entry["trust"] for entry in selected})
+                    parsed = parse_checkpoint(content, {entry["source_id"]: entry["trust"] for entry in selected}, source_aliases=aliases)
                     break
                 except ContextEngineError as error:
+                    self.context_repository.record_compaction_diagnostic(claim, {
+                        'validation': error.details, 'response_format': response_format or 'text',
+                        'calls': calls, 'elapsed_seconds': round(total_timeout - (deadline - time.monotonic()), 3),
+                    })
                     if correction is not None:
                         raise ContextEngineError(
                             "context_compaction_unreliable",
                             "The selected model could not produce a valid context checkpoint.",
                         ) from error
-                    correction = content
+                    correction = content + '\n' + json.dumps({'validation_error': error.details}, sort_keys=True)
             self._guard_compaction_dispatch(claim, generation, dispatch_guard)
             result = self.context_repository.commit_checkpoint(
                 attempt_id=claim.attempt_id, claim_token=claim.claim_token,
@@ -467,6 +487,11 @@ class ContextEngineService:
             "segmenter_version": DEFAULT_POLICY.segmenter_version,
             "compaction_output_limit": DEFAULT_POLICY.compaction_output_limit,
             "minimum_compaction_reclaim": DEFAULT_POLICY.minimum_compaction_reclaim,
+            "input_hard_limit": packed.input_hard_limit,
+            "body_input_limit": packed.body_input_limit,
+            "body_input_tokens": packed.estimated_tokens,
+            "request_overhead_tokens": packed.request_overhead_tokens,
+            "history_omission_allowed": packed.history_omission_allowed,
         }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         return self.context_repository.save_snapshot(run_id, round_no, packed, policy_json)
 
@@ -600,11 +625,24 @@ class ContextEngineService:
                     if item.get("kind") == "text.utf8"
                 ), None)
                 content = self._read_attachment(attachment, text=True, artifact=artifact)
+                if artifact and artifact.get("processor_id") == "builtin.document" and "source_start" not in attachment:
+                    from agent.document_attachments import document_excerpt, document_excerpt_locator
+                    count = max(1, len(message.get("attachments", [])))
+                    excerpt, start, end = document_excerpt(content, message["content"], max(200, 1600 // count))
+                    if len(excerpt) < len(content):
+                        extra_text.append('<system-observation>Document attachment ' + html.escape(attachment["name"])
+                            + f' is partially included: characters {start} to {end} of {len(content)}. '
+                            + 'Do not claim to have read the full document. Ask for a narrower section or an explicit attachment range when needed.</system-observation>')
+                        attachment = {**attachment, "source_start": start, "source_end": end}
+                    attachment = {**attachment, 'document_locator': document_excerpt_locator(content, start)}
                 content, start, end = text_range(attachment, content)
                 attachment = {**attachment, "source_start": start, "source_end": end}
                 name = html.escape(attachment["name"], quote=True)
                 rendered_attachment = f'<external-untrusted source="attachment:{attachment["id"]}" ' \
                     f'name="{name}">\n{content}\n</external-untrusted>'
+                if attachment.get('document_locator'):
+                    location = html.escape(json.dumps(attachment['document_locator'], ensure_ascii=False))
+                    rendered_attachment = rendered_attachment.replace('>\n', '>\n[SOURCE ' + location + ']\n', 1)
                 extra_text.append(rendered_attachment)
                 cost = estimate_tokens(rendered_attachment)
             else:

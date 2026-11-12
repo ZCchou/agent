@@ -48,10 +48,22 @@ impl SettingsManager {
     ///
     /// 第一次运行时会创建默认 settings.json；
     /// 已存在设置则验证 schema 后直接返回。
+    #[cfg(test)]
     pub fn ensure_initialized(&self) -> Result<AppSettings, SettingsError> {
+        self.initialize_for_startup(false)
+    }
+
+    pub(crate) fn initialize_for_startup(
+        &self,
+        migration_pending: bool,
+    ) -> Result<AppSettings, SettingsError> {
         let _guard = self.operation_lock.lock().map_err(|_| {
             SettingsError::Storage("settings manager lock was poisoned".to_string())
         })?;
+
+        if migration_pending {
+            return Ok(self.repository.load()?.unwrap_or_default());
+        }
 
         let mut settings = self.load_or_create()?;
         settings.models.remove_demo_provider();
@@ -61,6 +73,14 @@ impl SettingsManager {
         self.repository.save(&settings)?;
 
         Ok(settings)
+    }
+
+    pub(crate) fn wait_for_pending_operations(&self) -> Result<(), SettingsError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SettingsError::Storage("settings manager lock was poisoned".into()))?;
+        Ok(())
     }
 
     pub fn get_settings(&self) -> Result<AppSettings, SettingsError> {
@@ -1034,6 +1054,9 @@ impl SettingsManager {
     }
 
     fn load_or_create(&self) -> Result<AppSettings, SettingsError> {
+        if crate::profile_migration::blocks_core() {
+            return Ok(self.repository.load()?.unwrap_or_default());
+        }
         match self.repository.load()? {
             Some(mut settings) => {
                 if settings.schema_version == 1 {
@@ -1734,6 +1757,16 @@ mod tests {
         assert!(settings.models.default_provider_profile_id.is_empty());
         assert!(settings.models.default_model_id.is_empty());
         assert_eq!(repository.snapshot(), Some(settings));
+    }
+
+    #[test]
+    fn pending_migration_initialization_reads_without_normalizing_or_saving() {
+        let original = AppSettings::default();
+        let repository = Arc::new(FailingSettingsRepository {
+            settings: Mutex::new(Some(original.clone())),
+        });
+        let manager = SettingsManager::new(repository);
+        assert_eq!(manager.initialize_for_startup(true).unwrap(), original);
     }
 
     #[test]

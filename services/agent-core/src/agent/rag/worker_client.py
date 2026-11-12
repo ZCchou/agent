@@ -12,9 +12,10 @@ from agent.infrastructure.processes import WindowsJob
 
 
 class WorkerClient:
-    def __init__(self, command: list[str], timeout: float = 300):
+    def __init__(self, command: list[str], timeout: float = 300, memory_limit: int | None = None):
         self.command = command
         self.timeout = timeout
+        self.memory_limit = memory_limit
         self.process: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
         self._sequence = 0
@@ -45,7 +46,7 @@ class WorkerClient:
         )
         if os.name == "nt":
             try:
-                self._job = WindowsJob(self.process.pid)
+                self._job = WindowsJob(self.process.pid, self.memory_limit)
             except BaseException:
                 await self._stop()
                 raise
@@ -62,6 +63,10 @@ class WorkerClient:
                 raise CoreDataError("rag_model_error", "Inference worker timed out and was stopped") from exc
             except asyncio.CancelledError:
                 await self._stop()
+                raise
+            except CoreDataError as exc:
+                if exc.code == 'rag_resource_exhausted':
+                    await self._stop()
                 raise
             except (OSError, ValueError, EOFError, ConnectionError) as exc:
                 await self._stop()
@@ -82,7 +87,16 @@ class WorkerClient:
         if response.get("id") != request_id:
             raise ValueError("Worker response id mismatch")
         if response.get("error"):
-            raise CoreDataError("rag_model_error", str(response["error"]))
+            message = str(response['error'])
+            if any(marker in message.casefold() for marker in (
+                'failed to allocate memory', 'out of memory', 'bad allocation', 'bad_alloc',
+                'cudaerrormemoryallocation', 'not enough memory',
+            )):
+                raise CoreDataError('rag_resource_exhausted', '辅助检索模型内存不足。请释放内存或调整辅助模型设备后重试。', {
+                    'device': params.get('device'), 'batch_size': len(params.get('texts', [])),
+                    'action': action,
+                })
+            raise CoreDataError("rag_model_error", message)
         return response["result"]
 
     async def _stop(self):

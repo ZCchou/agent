@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    attachment_processor::{AttachmentProcessorRegistry, MAX_IMAGE_BYTES},
+    attachment_processor::{AttachmentProcessorRegistry, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES},
     image_normalizer,
 };
 
 const MAX_ATTACHMENTS: usize = 8;
 const MAX_TOTAL_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_DOCUMENT_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentArtifactManifest {
@@ -121,6 +122,7 @@ impl AttachmentStore {
         let mut accepted = Vec::with_capacity(paths.len().min(MAX_ATTACHMENTS));
         let mut rejected = Vec::new();
         let mut total = 0_u64;
+        let max_total = batch_total_limit(paths);
         for (index, path) in paths.iter().enumerate() {
             if index >= MAX_ATTACHMENTS {
                 let item = self.stage_rejection(
@@ -132,7 +134,7 @@ impl AttachmentStore {
                 rejected.push(item);
                 continue;
             }
-            match self.import_one(path, total) {
+            match self.import_one(path, total, max_total) {
                 Ok(manifest) => {
                     total = total.saturating_add(manifest.byte_size);
                     self.staged.insert(manifest.id.clone(), manifest.clone());
@@ -148,6 +150,30 @@ impl AttachmentStore {
                     rejected.push(item);
                 }
             }
+        }
+        if max_total == MAX_DOCUMENT_TOTAL_BYTES
+            && !accepted.iter().any(|manifest| {
+                manifest
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "document.source")
+            })
+        {
+            total = 0;
+            accepted.retain(|manifest| {
+                if total.saturating_add(manifest.byte_size) <= MAX_TOTAL_BYTES {
+                    total += manifest.byte_size;
+                    return true;
+                }
+                let _ = self.discard(&manifest.id);
+                rejected.push(self.stage_rejection(
+                    Path::new(&manifest.name),
+                    Some(&manifest.media_type),
+                    "attachments_too_large",
+                    Some("reduce_attachment_count"),
+                ));
+                false
+            });
         }
         AttachmentImportBatchResult { accepted, rejected }
     }
@@ -243,7 +269,7 @@ impl AttachmentStore {
         let written = file.write_all(&bytes);
         drop(file);
         let result = if written.is_ok() {
-            self.import_one(&temporary, 0)
+            self.import_one(&temporary, 0, MAX_TOTAL_BYTES)
         } else {
             Err(ImportFailure::new(
                 "attachment_store_failed",
@@ -262,6 +288,7 @@ impl AttachmentStore {
         &self,
         path: &Path,
         current_total: u64,
+        max_total: u64,
     ) -> Result<AttachmentManifest, ImportFailure> {
         let metadata = fs::metadata(path).map_err(|_| {
             ImportFailure::new("attachment_unavailable", None, Some("select_file_again"))
@@ -280,7 +307,7 @@ impl AttachmentStore {
                 Some("select_file_again"),
             ));
         }
-        if metadata.len() > MAX_IMAGE_BYTES {
+        if metadata.len() > MAX_DOCUMENT_BYTES {
             return Err(ImportFailure::new(
                 "attachment_too_large",
                 None,
@@ -293,14 +320,19 @@ impl AttachmentStore {
         let probe = AttachmentProcessorRegistry::probe(path, &bytes).map_err(|error| {
             ImportFailure::new(error.code, error.detected_media_type, error.processor_hint)
         })?;
-        if metadata.len() > probe.max_bytes {
+        if bytes.len() as u64 > probe.max_bytes {
             return Err(ImportFailure::new(
                 "attachment_too_large",
                 Some(probe.media_type),
                 Some("reduce_file_size"),
             ));
         }
-        if current_total.saturating_add(metadata.len()) > MAX_TOTAL_BYTES {
+        let max_total = if probe.artifact_kind == "document.source" {
+            MAX_DOCUMENT_TOTAL_BYTES
+        } else {
+            max_total
+        };
+        if current_total.saturating_add(bytes.len() as u64) > max_total {
             return Err(ImportFailure::new(
                 "attachments_too_large",
                 Some(probe.media_type),
@@ -385,7 +417,7 @@ impl AttachmentStore {
             kind: probe.kind.to_string(),
             name: safe_name,
             media_type: probe.media_type.to_string(),
-            byte_size: metadata.len(),
+            byte_size: bytes.len() as u64,
             sha256: format!("{:x}", Sha256::digest(&bytes)),
             storage_key: format!("message-attachments/{storage_name}"),
             width: dimensions.map(|value| value.0),
@@ -645,7 +677,9 @@ impl AttachmentStore {
         let bytes = fs::read(self.safe_path(&manifest.storage_key)?).map_err(|_| {
             "attachment_unavailable: Attachment snapshot is unavailable.".to_string()
         })?;
-        if format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256 {
+        if bytes.len() as u64 != manifest.byte_size
+            || format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256
+        {
             return Err(
                 "attachment_changed: Attachment snapshot failed integrity validation.".to_string(),
             );
@@ -659,6 +693,36 @@ impl AttachmentStore {
                 )),
                 None,
             )
+        } else if manifest
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "document.source")
+        {
+            let content = if let Some(artifact) = manifest
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "text.utf8")
+            {
+                let text_bytes =
+                    fs::read(self.safe_path(&artifact.storage_key)?).map_err(|_| {
+                        "attachment_unavailable: Extracted document text is unavailable."
+                            .to_string()
+                    })?;
+                if text_bytes.len() as u64 != artifact.byte_size
+                    || format!("{:x}", Sha256::digest(&text_bytes)) != artifact.sha256
+                {
+                    return Err(
+                        "attachment_changed: Extracted document text failed integrity validation."
+                            .to_string(),
+                    );
+                }
+                String::from_utf8(text_bytes).map_err(|_| {
+                    "invalid_attachment_encoding: Extracted document text is not UTF-8.".to_string()
+                })?
+            } else {
+                "Document pending extraction.".to_string()
+            };
+            (None, Some(content))
         } else {
             (
                 None,
@@ -740,6 +804,31 @@ impl AttachmentStore {
     }
 }
 
+fn batch_total_limit(paths: &[PathBuf]) -> u64 {
+    let has_document = paths.iter().take(MAX_ATTACHMENTS).any(|path| {
+        let Ok(mut file) = fs::File::open(path) else {
+            return false;
+        };
+        if !file
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_DOCUMENT_BYTES)
+        {
+            return false;
+        }
+        let mut header = [0_u8; 12];
+        let Ok(count) = file.read(&mut header) else {
+            return false;
+        };
+        AttachmentProcessorRegistry::probe(path, &header[..count])
+            .is_ok_and(|probe| probe.artifact_kind == "document.source")
+    });
+    if has_document {
+        MAX_DOCUMENT_TOTAL_BYTES
+    } else {
+        MAX_TOTAL_BYTES
+    }
+}
+
 #[derive(Debug)]
 struct ImportFailure {
     code: String,
@@ -786,6 +875,152 @@ fn safe_file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_source_preview_retention_and_discard_preserve_binary_snapshot() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("report.docx");
+        let bytes = b"PK\x03\x04\xff\xfe";
+        fs::write(&source, bytes).unwrap();
+        let mut store = AttachmentStore::new(root.clone()).unwrap();
+        let result = store.import_paths(&[source]);
+        assert!(result.rejected.is_empty());
+        let manifest = result.accepted[0].clone();
+        assert_eq!(manifest.artifacts[0].kind, "document.source");
+        assert_eq!(fs::read(root.join(&manifest.storage_key)).unwrap(), bytes);
+        assert_eq!(
+            store.preview(&manifest.id).unwrap().content.as_deref(),
+            Some("Document pending extraction.")
+        );
+        let (restored, _, missing) = store.restore_update_staging(vec![manifest.clone()], vec![]);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(missing, 0);
+        store.discard(&manifest.id).unwrap();
+        assert!(!root.join(&manifest.storage_key).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn document_preview_checks_original_and_extracted_text_integrity() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("report.docx");
+        let original = b"PK\x03\x04\xff";
+        fs::write(&source, original).unwrap();
+        let mut store = AttachmentStore::new(root.clone()).unwrap();
+        let mut manifest = store.import_paths(&[source]).accepted.remove(0);
+        let content = "Document paragraph";
+        let storage_key = "message-attachments/extracted.txt";
+        fs::write(root.join(storage_key), content).unwrap();
+        let mut artifact = manifest.artifacts[0].clone();
+        artifact.kind = "text.utf8".to_string();
+        artifact.media_type = "text/plain".to_string();
+        artifact.storage_key = storage_key.to_string();
+        artifact.byte_size = content.len() as u64;
+        artifact.sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+        manifest.artifacts.push(artifact);
+        assert_eq!(
+            store
+                .preview_manifest(&manifest)
+                .unwrap()
+                .content
+                .as_deref(),
+            Some(content)
+        );
+        fs::write(root.join(storage_key), "tampered").unwrap();
+        assert!(store
+            .preview_manifest(&manifest)
+            .unwrap_err()
+            .starts_with("attachment_changed"));
+        fs::write(root.join(storage_key), content).unwrap();
+        manifest.artifacts[1].byte_size += 1;
+        assert!(store
+            .preview_manifest(&manifest)
+            .unwrap_err()
+            .starts_with("attachment_changed"));
+        manifest.artifacts[1].byte_size -= 1;
+        fs::write(root.join(&manifest.storage_key), b"changed original").unwrap();
+        assert!(store
+            .preview_manifest(&manifest)
+            .unwrap_err()
+            .starts_with("attachment_changed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_total_limit_detects_valid_documents_in_any_position() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let text = root.join("notes.txt");
+        let document = root.join("paper.pdf");
+        let invalid = root.join("invalid.docx");
+        fs::write(&text, b"notes").unwrap();
+        fs::write(&document, b"%PDF-1.7").unwrap();
+        fs::write(&invalid, b"binary").unwrap();
+        assert_eq!(batch_total_limit(&[text.clone(), invalid]), MAX_TOTAL_BYTES);
+        assert_eq!(
+            batch_total_limit(&[text.clone(), document.clone()]),
+            MAX_DOCUMENT_TOTAL_BYTES
+        );
+        assert_eq!(
+            batch_total_limit(&[document.clone(), text.clone()]),
+            MAX_DOCUMENT_TOTAL_BYTES
+        );
+        let mut overflow = vec![text; MAX_ATTACHMENTS];
+        overflow.push(document);
+        assert_eq!(batch_total_limit(&overflow), MAX_TOTAL_BYTES);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_files_retain_the_twenty_five_mib_total_limit() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("small.txt");
+        fs::write(&source, b"ordinary").unwrap();
+        let store = AttachmentStore::new(root.clone()).unwrap();
+        assert_eq!(
+            store
+                .import_one(&source, 25 * 1024 * 1024 - 7, MAX_TOTAL_BYTES)
+                .unwrap_err()
+                .code,
+            "attachments_too_large"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn document_limits_preflight_oversized_files_and_enforce_total_without_large_payloads() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let oversized = root.join("large.pdf");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_DOCUMENT_BYTES + 1)
+            .unwrap();
+        let source = root.join("small.pdf");
+        fs::write(&source, b"%PDF-1.7").unwrap();
+        let store = AttachmentStore::new(root.clone()).unwrap();
+        assert_eq!(
+            store
+                .import_one(&oversized, 0, MAX_TOTAL_BYTES)
+                .unwrap_err()
+                .code,
+            "attachment_too_large"
+        );
+        assert!(store
+            .import_one(&source, MAX_DOCUMENT_TOTAL_BYTES - 8, MAX_TOTAL_BYTES)
+            .is_ok());
+        assert_eq!(
+            store
+                .import_one(&source, MAX_DOCUMENT_TOTAL_BYTES - 7, MAX_TOTAL_BYTES)
+                .unwrap_err()
+                .code,
+            "attachments_too_large"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn clipboard_png_uses_normal_staging_preview_and_cleanup() {
@@ -993,7 +1228,7 @@ mod tests {
         let root = test_root();
         fs::create_dir_all(&root).unwrap();
         let valid = root.join("notes.txt");
-        let invalid = root.join("paper.pdf");
+        let invalid = root.join("paper.bin");
         fs::write(&valid, "safe text").unwrap();
         fs::write(&invalid, b"%PDF-1.7").unwrap();
         let mut store = AttachmentStore::new(root.clone()).unwrap();

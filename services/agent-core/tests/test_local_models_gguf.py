@@ -7,12 +7,14 @@ from agent.storage import CoreDataError
 
 def gguf_file(path, *, architecture="qwen3", template="{{ messages }}", split=None,
               tensor_name="weight", version=3, offset=0, tensor_type=12,
-              shape=(256,), metadata_extra=None):
+              shape=(256,), metadata_extra=None, metadata_remove=()):
     metadata = {"general.architecture": architecture, "general.name": "小模型", "general.file_type": 15,
                 "tokenizer.chat_template": template, f"{architecture}.context_length": 32768}
     if split:
         metadata.update({"split.no": split[0], "split.count": split[1], "split.tensors.count": split[1]})
     metadata.update(metadata_extra or {})
+    for key in metadata_remove:
+        metadata.pop(key, None)
 
     def string(value):
         raw = value.encode("utf-8")
@@ -43,6 +45,15 @@ def test_inspect_unicode_gguf_preserves_architecture_and_template(tmp_path):
     assert result["chat_template"] == "{{ messages }}"
     assert result["context_length"] == 32768
     assert result["size_bytes"] == path.stat().st_size
+
+
+@pytest.mark.parametrize('declared', [True, False])
+def test_inspection_distinguishes_declared_context_from_fallback(tmp_path, declared):
+    from agent.local_models.gguf import inspect_gguf
+    path = gguf_file(tmp_path / 'context.gguf', metadata_remove=() if declared else ('qwen3.context_length',))
+    inspection = inspect_gguf(path)
+    assert inspection['declared_context_length'] == (32768 if declared else None)
+    assert inspection['context_length'] == (32768 if declared else 8192)
 
 
 def test_inspection_exposes_fp16_kv_estimate_from_attention_metadata(tmp_path):

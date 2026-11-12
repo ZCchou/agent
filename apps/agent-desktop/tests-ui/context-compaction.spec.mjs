@@ -1,6 +1,36 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./tauri-mock.mjs";
 
+test("background organization keeps the next message available", async ({ page }) => {
+  const { work } = await installTauriMock(page, { get_context_compaction_status: { compaction: {
+    id: "background", conversation_id: "work-1", run_id: "old-run", status: "running",
+    background: true, blocks_send: false, error_code: null, created_at: "2026-11-11T00:00:00Z",
+  } } });
+  await page.goto("http://127.0.0.1:5173");
+  await page.getByRole("button", { name: work.title, exact: true }).click();
+  await page.getByRole("textbox", { name: "Ask agent..." }).fill("Use the current project evidence to answer a new question");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await expect(page.getByText("Organizing history in the background; you can send a message.")).toBeVisible();
+});
+
+test("context timeout shows the actual reason without claiming an exhausted allowance", async ({ page }) => {
+  const now = "2026-11-10T00:00:00+00:00";
+  const user = { id: "pending-user", conversation_id: "pending-chat", role: "user", content: "Read the template",
+    event_type: null, source_message_id: null, created_at: now, attachments: [] };
+  const chat = { id: "pending-chat", kind: "standard_chat", title: "Local context timeout", category: "research",
+    resolved_category: "research", project_id: null, chat_group_id: null, sort_order: 0,
+    created_at: now, updated_at: now, deleted_at: null, messages: [user] };
+  const run = { id: "pending-run", conversation_id: chat.id, status: "waiting_context", user_message_id: user.id,
+    provider: "fake", provider_profile_id: "builtin-demo", model_id: "demo", error_code: "request_timeout", draft: null };
+  await installTauriMock(page, { list_conversations: [chat], get_conversation: chat,
+    get_conversation_model_run: { run }, get_model_run: { run }, get_context_compaction_status: { compaction: null } });
+  await page.goto("http://127.0.0.1:5173");
+  await page.getByRole("button", { name: chat.title, exact: true }).click();
+  await expect(page.getByText("The model did not start organizing in time.")).toBeVisible();
+  await expect(page.getByText(/used its automatic compaction allowance|may incur/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Continue organizing and send" })).toBeVisible();
+});
+
 test("active context organization blocks send but keeps the draft editable", async ({ page }) => {
   const now = "2026-09-16T00:00:00+00:00";
   const { work } = await installTauriMock(page, {
@@ -150,7 +180,7 @@ test("expanded image retry presents the returned child budget plan even without 
     estimated_extra_online_cost_usd: null,
     steps: [{ id: "vision-step", phase: "specialist", step_type: "vision_analysis", model_id: "vision-model" }] };
   const { work } = await installTauriMock(page, {
-    get_conversation_model_run: { run: parent }, retry_model_run: { run: child }, get_model_run_plan: { plan },
+    get_conversation_model_run: { run: parent }, get_model_run: { run: parent }, retry_model_run: { run: child }, get_model_run_plan: { plan },
     resolve_model_run_budget: { run: { ...child, status: "queued" } },
     get_run_context: { snapshot: { id: "parent-snapshot", run_id: parent.id, round_no: 1, policy_version: "v1",
       context_generation: 1, global_instruction_revision: 0, global_instruction_hash: null,

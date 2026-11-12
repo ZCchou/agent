@@ -16,7 +16,7 @@ TIMEOUT = 125
 MARKER = '.agent-parser-owned'
 RESULT = 'result.ndjson'
 STAGE_NAME = re.compile(r'parser-[0-9a-f]{32}')
-ORIGINAL_NAME = re.compile(r'([0-9a-f]{64})(\.(?:txt|md|markdown|pdf|docx))')
+ORIGINAL_NAME = re.compile(r'([0-9a-f]{64})(\.(?:txt|md|markdown|pdf|docx|docm|dotx|dotm|doc|dot|rtf|wps|wpt|xlsx|xlsm|xltx|xltm|xls|xlt|xlsb|et|ett|pptx|pptm|potx|potm|ppsx|ppsm|ppt|pot|pps|dps|dpt))')
 
 
 def invalid(message='The document worker returned an invalid result.'):
@@ -36,10 +36,15 @@ def plain_path(path):
 def managed_original(data_dir, original):
     try:
         original = Path(original)
-        if not original.is_absolute() or original != original.resolve(strict=True):
-            raise ValueError('Noncanonical original')
+        if not original.is_absolute():
+            raise ValueError('Original must be absolute')
+        # Check the supplied paths before resolving OS-managed AppData aliases.
+        # Resolving first would hide a user-created junction from plain_path.
+        plain_path(data_dir)
         plain_path(original)
-        relative = original.relative_to(Path(data_dir) / 'originals')
+        original = original.resolve(strict=True)
+        plain_path(original)
+        relative = original.relative_to(Path(data_dir).resolve(strict=True) / 'originals')
         match = ORIGINAL_NAME.fullmatch(original.name)
         info = original.stat()
         if len(relative.parts) != 2 or not match or relative.parts[0] != match[1][:2]:
@@ -52,7 +57,7 @@ def managed_original(data_dir, original):
     except (OSError, ValueError, CoreDataError) as error:
         if isinstance(error, CoreDataError) and error.code == 'rag_document_too_large':
             raise
-        raise CoreDataError('rag_document_unavailable', 'Select a managed repository original without links.') from error
+        raise CoreDataError('rag_document_unavailable', '文档原件不可用或路径校验失败，请重新添加附件或导入资料。') from error
 
 
 def stage_marker(stage):
@@ -126,7 +131,7 @@ def write_result(path, request_id, parsed, result_limit):
 
 
 def validate_locator(locator, text_length):
-    if locator.get('kind') not in {'docx', 'pdf', 'text', 'markdown'}:
+    if locator.get('kind') not in {'docx', 'pdf', 'text', 'markdown', 'xlsx', 'pptx'}:
         raise invalid()
     for field in ('block_id', 'clause_parent_id', 'splitting_version'):
         if not isinstance(locator.get(field), str) or not locator[field]:
@@ -148,6 +153,10 @@ def validate_locator(locator, text_length):
         if field in locator and (type(locator[field]) is not int or locator[field] < 1):
             raise invalid()
     if locator['kind'] == 'pdf' and 'page' not in locator:
+        raise invalid()
+    if locator['kind'] == 'xlsx' and (not isinstance(locator.get('sheet'), str) or not locator['sheet']):
+        raise invalid()
+    if locator['kind'] == 'pptx' and (type(locator.get('slide')) is not int or locator['slide'] < 1):
         raise invalid()
     if locator['kind'] in {'text', 'markdown'}:
         if not {'paragraph', 'line_start', 'line_end'}.issubset(locator) or locator['line_start'] > locator['line_end']:

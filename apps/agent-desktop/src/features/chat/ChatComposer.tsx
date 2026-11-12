@@ -3,6 +3,8 @@ import { useRef, type ClipboardEvent, type FormEvent, type KeyboardEvent, type R
 import { useTranslation } from "react-i18next";
 import type { AttachmentPreview, MessageAttachment, RejectedAttachment } from "../../types/domain";
 import { SkillPicker } from "../abilities/SkillPicker";
+import { defaultAttachmentPurpose } from './attachmentDraft';
+import { IconButton } from '../../components/ui/Button';
 
 interface Props {
   value: string;
@@ -24,11 +26,14 @@ interface Props {
   onRemoveAttachment(id: string): void;
   onRemoveRejectedAttachment(id: string): void;
   webSearchControl?: ReactNode;
+  ragControl?: ReactNode;
+  attachmentPurposes?: Record<string, "template" | "reference">;
+  onAttachmentPurpose?(id: string, purpose: "template" | "reference"): void;
 }
 
 export function ChatComposer({
   value, disabled, sendDisabled, generating = false, stopping = false, onStop, referenceCount = 0, onChange, onSend, attachments, rejectedAttachments, previews, attachmentBusy,
-  attachmentError, onAttach, onPasteImages, onRemoveAttachment, onRemoveRejectedAttachment, webSearchControl,
+  attachmentError, onAttach, onPasteImages, onRemoveAttachment, onRemoveRejectedAttachment, webSearchControl, ragControl, attachmentPurposes, onAttachmentPurpose,
 }: Props) {
   const { t } = useTranslation("chat");
   const composing = useRef(false);
@@ -75,6 +80,12 @@ export function ChatComposer({
             ? `${attachment.model_width} × ${attachment.model_height} · ${formatBytes(attachment.model_byte_size ?? attachment.byte_size)}`
             : formatBytes(attachment.byte_size)}</small>
           {attachment.media_type === "image/gif" ? <small>{t("attachments.gifFirstFrame")}</small> : null}
+          {/\.docx$/i.test(attachment.name) && onAttachmentPurpose ? <select aria-label={t('attachments.purposeLabel', { name: attachment.name })}
+            disabled={disabled || generating} value={attachmentPurposes?.[attachment.id] ?? defaultAttachmentPurpose(attachment.name)}
+            onChange={(event) => onAttachmentPurpose(attachment.id, event.target.value as 'template' | 'reference')}>
+            <option value="reference">{t('attachments.referencePurpose')}</option>
+            <option value="template">{t('attachments.templatePurpose')}</option>
+          </select> : null}
         </span>
         <button type="button" aria-label={t("attachments.remove", { name: attachment.name })}
           disabled={generating} onClick={() => onRemoveAttachment(attachment.id)}><X size={13} /></button>
@@ -95,20 +106,21 @@ export function ChatComposer({
     {attachmentError ? <p className="attachment-tray__error">{t(`attachments.rejection.${attachmentError}`, {
       defaultValue: attachmentError,
     })}</p> : null}
-    <div className="chat-composer__tools"><button type="button" aria-label={t("composer.attach")} title={t("composer.pasteImageHint")} className="chat-composer__icon"
+    <div className="chat-composer__tools"><IconButton size="composer" variant="ghost" label={t("composer.attach")} title={t("composer.pasteImageHint")} className="chat-composer__icon"
       disabled={disabled || generating || attachmentBusy || attachments.length >= 8} onClick={onAttach}>
       <Paperclip size={19} />
-    </button>
+    </IconButton>
     {webSearchControl}
+    {ragControl}
     <SkillPicker disabled={disabled || generating} value={value} onChange={onChange} /></div>
     <textarea value={value} maxLength={20000} rows={1} placeholder={t("composer.placeholder")} disabled={disabled}
       onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
       onKeyDown={keyDown} onPaste={paste} onChange={(event) => onChange(event.target.value)} />
-    {generating ? <button type="button" aria-label={t(stopping ? "status.stopping" : "status.stop")}
+    {generating ? <IconButton size="composer" label={t(stopping ? "status.stopping" : "status.stop")}
       title={t(stopping ? "status.stopping" : "status.stop")} className="chat-composer__send chat-composer__stop"
-      disabled={stopping || !onStop} onClick={(event) => { event.preventDefault(); onStop?.(); }}><Square size={16} fill="currentColor" /></button>
-      : <button type="submit" aria-label={t("composer.send")} title={t("composer.send")} className="chat-composer__send"
-        disabled={!canSend}><ArrowUp size={20} /></button>}
+      disabled={stopping || !onStop} onClick={(event) => { event.preventDefault(); onStop?.(); }}><Square size={16} fill="currentColor" /></IconButton>
+      : <IconButton size="composer" variant="primary" type="submit" label={t("composer.send")} title={t("composer.send")} className="chat-composer__send"
+        disabled={!canSend}><ArrowUp size={20} /></IconButton>}
   </form>;
 }
 

@@ -25,6 +25,7 @@ export interface ReorderConversationsInput {
 }
 
 export interface ConversationRepository {
+  updateRag(id: string, mode: "auto" | "required"): Promise<Conversation>;
   list(filter?: ConversationFilter): Promise<Conversation[]>;
   get(id: string): Promise<Conversation>;
   create(input: CreateConversationInput): Promise<Conversation>;

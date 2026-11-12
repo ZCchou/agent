@@ -105,6 +105,7 @@ fn accept_run_event(sequences: &mut HashMap<String, u64>, response: &Value) -> b
     if !matches!(
         event_type,
         "run.state_changed"
+            | "run.document_processing"
             | "run.chunk"
             | "run.draft_checkpoint"
             | "run.completed"
@@ -261,6 +262,9 @@ impl CoreProcessManager {
 
     /// 启动长期运行的 Python Agent Core。
     pub fn start(&mut self, app: &AppHandle) -> Result<(), String> {
+        if crate::profile_migration::blocks_core() {
+            return Err("migration_restart_required".into());
+        }
         self.ensure_can_start()?;
 
         // 全局 AppLogger 已经在 lib.rs 初始化完成。
@@ -976,12 +980,12 @@ mod tests {
         let mut sequences = HashMap::new();
         assert!(accept_run_event(
             &mut sequences,
-            &json!({"v":18,"event":{
+            &json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{
             "run_id":"r1","sequence":1,"event_type":"run.chunk","timestamp":"now","data":{}}})
         ));
         assert!(!accept_run_event(
             &mut sequences,
-            &json!({"v":18,"event":{
+            &json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{
             "run_id":"r1","sequence":1,"event_type":"run.chunk","timestamp":"now","data":{}}})
         ));
         assert!(!accept_run_event(
@@ -991,7 +995,7 @@ mod tests {
         ));
         assert!(accept_run_event(
             &mut sequences,
-            &json!({"v":18,"event":{
+            &json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{
             "run_id":"r2","sequence":1,"event_type":"run.failed","timestamp":"now","data":{}}})
         ));
         assert!(!accept_run_event(
@@ -1001,7 +1005,7 @@ mod tests {
         ));
         assert!(accept_run_event(
             &mut sequences,
-            &json!({"v":18,"event":{
+            &json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{
             "run_id":"r4","sequence":1,"event_type":"run.invocation_dispatched",
             "timestamp":"now","data":{"spec_id":"spec-1"}}})
         ));
@@ -1010,11 +1014,15 @@ mod tests {
     #[test]
     fn runtime_capability_and_recovery_events_reach_the_host_once() {
         let mut sequences = HashMap::new();
-        for (index, event_type) in ["run.capabilities_requested", "run.response_recovering"]
-            .iter()
-            .enumerate()
+        for (index, event_type) in [
+            "run.capabilities_requested",
+            "run.response_recovering",
+            "run.document_processing",
+        ]
+        .iter()
+        .enumerate()
         {
-            let response = json!({"v":18,"event":{"run_id":"cap-run","sequence":index+1,
+            let response = json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{"run_id":"cap-run","sequence":index+1,
                 "event_type":event_type,"timestamp":"now","data":{"request_id":"observation"}}});
             assert!(accept_run_event(&mut sequences, &response));
             assert!(!accept_run_event(&mut sequences, &response));
@@ -1023,14 +1031,14 @@ mod tests {
 
     #[test]
     fn terminal_events_identify_sequence_state_to_release() {
-        let response = json!({"v":18,"event":{
+        let response = json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{
             "run_id":"r1","sequence":3,"event_type":"run.completed",
             "timestamp":"now","data":{}
         }});
 
         assert_eq!(terminal_event_run_id(&response), Some("r1"));
         assert_eq!(
-            terminal_event_run_id(&json!({"v":18,"event":{
+            terminal_event_run_id(&json!({"v":crate::core_bridge::PROTOCOL_VERSION,"event":{
                 "run_id":"r1","sequence":2,"event_type":"run.chunk",
                 "timestamp":"now","data":{}
             }})),

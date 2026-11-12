@@ -8,6 +8,22 @@ from test_tool_continuation_retry import configuration, fixture, install_http, l
 from test_tool_budget import budget, recorded, proposal
 
 
+def test_text_only_observation_keeps_host_context_without_unused_tool_payload():
+    from agent.execution.runtime_capabilities import render_snapshot, MARKER
+    host = {'status': 'observed', 'workspace': {'status': 'available', 'root_generation': 2},
+            'approval_mode': 'human', 'tools': {'fs.list': {'status': 'available'},
+                                               'terminal.run': {'status': 'available'}}}
+    content = render_snapshot(budgets={'calls': {'remaining': 20}, 'reads': {'remaining': 20}},
+        host=host, allowed_tools=(), signature=('text',), max_output_tokens=2048,
+        web_used=False, evidence_status='grounded', response_only=False)
+    payload = json.loads(content.removeprefix(MARKER).split('\n</runtime-capabilities>')[0])
+    assert payload['host']['workspace']['root_generation'] == 2
+    assert payload['host']['approval_mode'] == 'human'
+    assert payload['host']['tools'] == {}
+    assert set(payload['budgets']) == {'calls'}
+    assert host['tools']['fs.list']['status'] == 'available'
+
+
 def test_budget_snapshot_is_live_and_matches_admission(budget, monkeypatch):
     _, _, service, run, attempt = budget
     monkeypatch.setattr(service, "MAX_ROUNDS", 9)
@@ -174,7 +190,7 @@ def test_runtime_configuration_updates_real_policy_and_model_snapshot(tmp_path,m
     requests=install_http(monkeypatch,[(list_reply("one"),"tool_calls"),({"content":"Work finished."},"stop")])
     async def scenario():
         async def configure(limits):
-            return await handle_async_message({"v":18,"id":"config","type":"runtime.capabilities.configure",
+            return await handle_async_message({"v":23,"id":"config","type":"runtime.capabilities.configure",
                 "params":{"host_reporting":False,"tool_budget_limits":limits}},service)
         async def sink(event):
             if event["event_type"] == "run.tool_requested":

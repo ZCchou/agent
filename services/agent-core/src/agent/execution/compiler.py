@@ -127,6 +127,7 @@ class PreparedRequest:
     tool_schema_hash: str
     options: GenerationOptions
     request_fingerprint: str
+    input_budget: dict[str, int] | None = None
 
 
 class InvocationCompiler:
@@ -134,6 +135,7 @@ class InvocationCompiler:
 
     def compile_model(
         self, spec: InvocationSpec, messages: list[dict[str, Any]],
+        *, context_window: int | None = None,
     ) -> PreparedRequest:
         if spec.kind != "model" or not spec.model_id:
             raise CoreDataError("invocation_spec_invalid", "A model invocation requires a model.")
@@ -201,13 +203,33 @@ class InvocationCompiler:
             max_output_tokens=spec.max_output_tokens,
             reasoning_effort=spec.reasoning_effort,
             response_format=(
-                "json_object" if spec.response_format == "json_object" else None
+                spec.response_format if spec.response_format in {"json_object", "json_schema"} else None
             ),
+            response_schema=json.loads(spec.response_schema_json) if spec.response_schema_json else None,
             allowed_tools=spec.allowed_tool_names,
             invocation_adapter_id=spec.adapter_id,
             capability_signature=signature,
             native_search_mode=spec.native_search_mode,
         )
+        input_budget = None
+        if context_window and all(message.get('content') is None or isinstance(message.get('content'), str) for message in compiled_messages):
+            from agent.context_engine.policy import estimate_tokens, resolve_budget
+            window, _, reserve, input_limit = resolve_budget(context_window=context_window, max_output_tokens=spec.max_output_tokens)
+            envelope = {'model': spec.model_id, 'messages': compiled_messages,
+                        'response_schema': options.response_schema,
+                        'tools': ToolContractRegistry.definitions(spec.allowed_tool_names) if has_function_tools else []}
+            request_tokens = estimate_tokens(envelope)
+            message_tokens = estimate_tokens(compiled_messages)
+            input_budget = {'context_window': window, 'output_reserve': reserve, 'input_hard_limit': input_limit,
+                            'request_tokens': request_tokens, 'message_tokens': message_tokens,
+                            'input_overhead_tokens': max(0, request_tokens - estimate_tokens(messages)),
+                            'remaining_input_tokens': input_limit - request_tokens}
+            if request_tokens > input_limit:
+                raise CoreDataError('provider_context_limit_exceeded', 'The compiled request exceeds its input capacity.', {
+                    'input_overhead_tokens': max(0, request_tokens - estimate_tokens(messages)),
+                    'request_tokens': request_tokens, 'input_limit': input_limit,
+                    'input_budget': input_budget,
+                })
         fingerprint_payload = {
             "spec_hash": spec.spec_hash,
             "adapter": spec.adapter_id,
@@ -224,6 +246,7 @@ class InvocationCompiler:
             json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         return PreparedRequest(
+            input_budget=input_budget,
             spec_id=spec.spec_id,
             adapter_id=spec.adapter_id,
             protocol_id=spec.protocol_id,

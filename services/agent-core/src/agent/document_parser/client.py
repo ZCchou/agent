@@ -28,6 +28,8 @@ class ParserService:
         self.data_dir = Path(data_dir).absolute()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         plain_path(self.data_dir)
+        self.data_dir = self.data_dir.resolve(strict=True)
+        plain_path(self.data_dir)
         self.staging = self.data_dir / 'parser-staging'
         self.staging.mkdir(exist_ok=True)
         plain_path(self.staging)
