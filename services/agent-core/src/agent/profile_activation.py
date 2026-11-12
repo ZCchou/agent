@@ -4,6 +4,8 @@ import hashlib
 import os
 from pathlib import Path
 import uuid
+import sqlite3
+from contextlib import closing
 
 from agent.local_models.paths import checked_path, file_hash
 from agent.profile_files import copy_managed_file
@@ -39,6 +41,31 @@ def _replace(source, destination, digest, size):
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _checkpoint_stopped_database(target):
+    sidecars = [target / ('agent.db' + suffix) for suffix in ('-wal', '-shm', '-journal')]
+    if not any(path.exists() for path in sidecars):
+        return
+    database = checked_path(target / 'agent.db', file=True)
+    for path in sidecars:
+        if path.exists():
+            checked_path(path, file=True)
+    busy_message = '数据库仍被占用，无法启用迁移结果。请关闭额外的 agent 实例后重试。'
+    try:
+        # Read-only fingerprinting can leave WAL/SHM files after its connection
+        # closes. Let SQLite recover/checkpoint committed frames and remove its
+        # own sidecars on the last read-write close before backing up the DB.
+        with closing(sqlite3.connect(database.as_uri() + '?mode=rw', uri=True, timeout=0)) as connection:
+            busy, _, _ = connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+            if busy:
+                raise CoreDataError('migration_application_busy', busy_message)
+    except sqlite3.Error as error:
+        if getattr(error, 'sqlite_errorcode', 0) & 0xff in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            raise CoreDataError('migration_application_busy', busy_message) from error
+        raise CoreDataError('migration_database_invalid', '迁移前数据库恢复检查失败，请保留原资料并查看诊断记录。') from error
+    if any(path.exists() for path in sidecars):
+        raise CoreDataError('migration_application_busy', busy_message)
 
 
 def rollback_activation(workspace):
@@ -92,8 +119,7 @@ def activate_candidate(candidate, target, workspace, *, health_check, check_canc
     if journal.exists():
         raise CoreDataError('migration_recovery_required', '已有激活记录，请先完成或回退该次迁移。')
     check_cancel()
-    if any((target / ('agent.db' + suffix)).exists() for suffix in ('-wal', '-shm', '-journal')):
-        raise CoreDataError('migration_application_busy', '请先关闭目标应用，等待数据库写入结束后再迁移。')
+    _checkpoint_stopped_database(target)
     state = {'application_id': _APPLICATION, 'target_root': str(target), 'status': 'preparing', 'files': []}
     for source in sorted(candidate.rglob('*')):
         check_cancel()
