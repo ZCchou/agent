@@ -12,7 +12,7 @@
 
 下载地址与主模型、辅助模型下载步骤见 README。联网电脑可先备齐文件，再复制至离线电脑。[发行下载](https://github.com/ZCchou/agent/releases/tag/v0.16.0-preview.2) · [模型下载](../README.md#下载主模型)
 
-运行组件包括 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR、Office 解析及其依赖。目标电脑提供显卡驱动。Python、CUDA Toolkit 及运行组件由交付包和应用管理。
+运行组件包括 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR、Office 解析及其依赖。目标电脑提供显卡驱动。所需 Python、CUDA 运行库及推理运行组件随包提供，应用管理其加载与调用。
 
 下载目录与安装目录分别需要可用空间。安装过程还需要完整组件暂存空间，升级时需要保留旧组件以便恢复。安装器执行实际空间检查。
 
