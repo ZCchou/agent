@@ -243,7 +243,7 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
     groups = [] if reuse else plan_volumes(records, limit=UNIFIED_ASSET_LIMIT if unified else ASSET_LIMIT)
     for n, group in enumerate(groups, 1):
         archive = output / f'agent-{version}-offline.part{n:02d}.zip'
-        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as package:
+        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as package:
             for record in group:
                 package.write(record['path'], record['name'])
         if archive.stat().st_size >= (1536 * 1024 ** 2 if unified else 2 * 1024 ** 3):

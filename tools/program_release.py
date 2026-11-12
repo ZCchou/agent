@@ -27,7 +27,43 @@ def check_version(version, channel):
         raise ValueError('Invalid independent release channel or version')
 
 
-def build_archive(source, destination):
+def compatible_runtime_manifests(source, manifest, runtime_source):
+    """Allow existing installations to retain the pre-deduplication DLL layout."""
+    runtime_source = Path(runtime_source)
+    previous = json.loads((runtime_source / 'application.json').read_text(encoding='utf-8-sig'))
+    current = manifest['runtime_manifests']
+    retained = previous.get('runtime_manifests', {})
+    if previous.get('application_id') != APPLICATION_ID or set(current) != set(retained):
+        raise ValueError('Incompatible retained runtime identity')
+    for name, expected in retained.items():
+        path = runtime_source / name
+        if path.is_symlink() or identity(path) != expected:
+            raise ValueError('Retained runtime descriptor identity mismatch')
+        if expected == current[name]:
+            continue
+        if name != 'rag-runtime/runtime.json':
+            raise ValueError('Only the deduplicated RAG runtime may differ')
+        old = json.loads(path.read_text(encoding='utf-8-sig'))
+        new = json.loads((source / name).read_text(encoding='utf-8-sig'))
+        if not new.get('build_identity') or {k: v for k, v in new.items() if k != 'files'} != {
+                k: v for k, v in old.items() if k != 'files'}:
+            raise ValueError('RAG runtime build identity changed')
+        old_files, new_files = old.get('files', {}), new.get('files', {})
+        if not new_files or set(new_files) - set(old_files):
+            raise ValueError('RAG runtime contains added payload files')
+        for file, digest in new_files.items():
+            if file != 'build-assets.json' and old_files[file] != digest:
+                raise ValueError('RAG runtime payload identity changed')
+        for file in set(old_files) - set(new_files):
+            relative = Path(file)
+            canonical = '_internal/torch/lib/' + relative.name
+            if (relative.parent.as_posix() != '_internal' or relative.suffix.lower() != '.dll'
+                    or new_files.get(canonical) != old_files[file]):
+                raise ValueError('RAG runtime removed a nonduplicate payload file')
+    return retained
+
+
+def build_archive(source, destination, runtime_source=None):
     source, destination = Path(source), Path(destination)
     if destination.exists():
         raise ValueError('Choose a new program archive path')
@@ -49,6 +85,8 @@ def build_archive(source, destination):
             raise ValueError('File identity mismatch')
         if not 0 < expected['bytes'] <= 256 * 1024 ** 2:
             raise ValueError('File identity exceeds the program update limit')
+    if runtime_source is not None:
+        manifest['runtime_manifests'] = compatible_runtime_manifests(source, manifest, runtime_source)
     temporary = destination.with_name(destination.name + '.partial')
     try:
         with zipfile.ZipFile(temporary, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
@@ -98,13 +136,18 @@ def main():
     parser.add_argument('--private-key', required=True, type=Path)
     parser.add_argument('--channel', default='preview', choices=('preview', 'stable'))
     parser.add_argument('--notes-file', required=True, type=Path)
+    parser.add_argument('--runtime-source', type=Path,
+                        help='Retain a verified compatible pre-deduplication runtime for program updates')
     args = parser.parse_args()
     owner = json.loads((args.source / 'application.json').read_text(encoding='utf-8-sig'))
     version = owner['version']
     check_version(version, args.channel)
     args.output.mkdir(parents=True, exist_ok=True)
     archive = args.output / f'agent-{version}-windows-x86_64-program.zip'
-    build_archive(args.source, archive)
+    if args.runtime_source is None:
+        build_archive(args.source, archive)
+    else:
+        build_archive(args.source, archive, runtime_source=args.runtime_source)
     signature = sign(archive, args.private_key)
     record = feed(version, signature, args.channel, args.notes_file.read_text(encoding='utf8'))
     destination = args.output / f'airworthiness-{args.channel}.json'

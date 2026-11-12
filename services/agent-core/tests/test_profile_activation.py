@@ -42,6 +42,49 @@ def test_activation_health_failure_restores_old_database_and_settings(tmp_path):
     assert json.loads((tmp_path / 'job/activation.json').read_text())['status'] == 'rolled_back'
 
 
+def test_activation_accepts_sidecars_created_by_readonly_source_verification(tmp_path):
+    from agent.profile_activation import activate_candidate
+    from agent.profile_fingerprint import profile_state
+    target = candidate(tmp_path / 'target')
+    selected = candidate(tmp_path / 'candidate')
+    profile_state(target)
+    assert (target / 'agent.db-wal').exists()
+    activate_candidate(selected, target, tmp_path / 'job', health_check=lambda: None)
+    assert json.loads((tmp_path / 'job/activation.json').read_text())['status'] == 'completed'
+
+
+def test_activation_rejects_an_open_wal_connection_without_publishing(tmp_path):
+    from agent.profile_activation import activate_candidate
+    target = candidate(tmp_path / 'target')
+    selected = candidate(tmp_path / 'candidate')
+    with closing(sqlite3.connect(target / 'agent.db')) as connection:
+        connection.execute('SELECT count(*) FROM projects').fetchone()
+        with pytest.raises(CoreDataError) as error:
+            activate_candidate(selected, target, tmp_path / 'job', health_check=lambda: None)
+        assert error.value.code == 'migration_application_busy'
+        assert not (tmp_path / 'job/activation.json').exists()
+
+
+def test_activation_checkpoint_preserves_crashed_commits_in_rollback_backup(tmp_path):
+    import subprocess
+    import sys
+    from agent.profile_activation import activate_candidate
+    target = candidate(tmp_path / 'target')
+    selected = candidate(tmp_path / 'candidate')
+    subprocess.run([sys.executable, '-c',
+        'import sqlite3,sys,os; c=sqlite3.connect(sys.argv[1]); '
+        'c.execute("CREATE TABLE committed_before_crash (value TEXT)"); '
+        'c.execute("INSERT INTO committed_before_crash VALUES (\'preserve\')"); c.commit(); os._exit(0)',
+        str(target / 'agent.db')], check=True)
+    assert (target / 'agent.db-wal').stat().st_size > 0
+    def failed_health():
+        raise RuntimeError('health failed')
+    with pytest.raises(RuntimeError, match='health failed'):
+        activate_candidate(selected, target, tmp_path / 'job', health_check=failed_health)
+    with closing(sqlite3.connect(target / 'agent.db')) as connection:
+        assert connection.execute('SELECT value FROM committed_before_crash').fetchone()[0] == 'preserve'
+
+
 def test_success_preserves_shared_model_root_and_requires_explicit_rollback(tmp_path):
     from agent.profile_activation import activate_candidate, rollback_activation
     target = tmp_path / 'target'
