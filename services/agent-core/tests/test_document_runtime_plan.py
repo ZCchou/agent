@@ -163,8 +163,11 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
         task = json.loads(payload['messages'][-1]['content'])['task']
         supplied = json.loads(payload['messages'][-1]['content'])['source_context']
         if equipment_value not in json.dumps(supplied, ensure_ascii=False):
-            result = {'read_requests': [{'attachment_id': 'equipment', 'offset': 0, 'limit': 1}]}
+            result = {'read_requests': [{'attachment_id': 'equipment', 'offset': 0, 'limit': 1},
+                                        {'attachment_id': 'doc', 'offset': 0, 'limit': 1}]}
         elif task['stage'] == 'plan':
+            if not retry_mode:
+                assert any(item['attachment_id'] == 'doc' for item in supplied['read_results'])
             result = {'targets': [{'target_id': field['id'], 'field_type': 'placeholder', 'parameter_keys': []}
                 for field in task['fields'] if field['original_content'] == '待填写']}
         else:

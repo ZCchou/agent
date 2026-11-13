@@ -5009,7 +5009,7 @@ class ChatRunService:
         budget = max(128, task['token_budget'] // 3)
         for entry in reversed(decision.get('document_reads', [])):
             attachment = attachments.get(entry['request']['attachment_id'])
-            if attachment is None or decision.get('attachment_roles', {}).get(attachment['id']) == 'template':
+            if attachment is None:
                 continue
             self.document_attachments._original(attachment)
             if entry['result']['source_sha256'] != attachment['sha256']:
