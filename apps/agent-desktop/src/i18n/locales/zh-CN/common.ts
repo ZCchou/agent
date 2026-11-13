@@ -1,5 +1,6 @@
 import rag from "./rag";
 const common = {
+  routingDuration: { timeout: "意图识别超时（秒）", budget: "最多尝试 3 次，总识别预算 {{seconds}} 秒。", main: "主模型空闲驻留", auxiliary: "辅助模型空闲驻留", manual: "手动卸载", custom: "自定义", customMinutes: "自定义分钟数（1–1440）", minutes: "{{count}} 分钟", residenceHint: "修改立即生效，并重新计算空闲时间。使用中或已固定的模型保持加载；辅助模型可能因内存压力提前回收。" },
   rag,
   buttonAudit: {
     actionFailed: "操作失败，请重试。",

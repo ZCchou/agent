@@ -223,7 +223,7 @@ from agent.document_contracts import DOCUMENT_DEFINITIONS, DOCUMENT_TOOLS, valid
 TOOL_DEFINITIONS.extend(DOCUMENT_DEFINITIONS)
 TOOL_NAMES: Final[set[str]] = {item["function"]["name"] for item in TOOL_DEFINITIONS}
 
-TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v4"
+TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v5"
 
 
 class ToolContractRegistry:

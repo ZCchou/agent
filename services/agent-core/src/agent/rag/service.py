@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from contextlib import closing
 import inspect
 import json
@@ -20,6 +21,8 @@ from agent.rag.retrieval import candidates, load_vector_extension, vector_blob, 
 from agent.storage import CoreDataError, _utc_now
 
 DOCUMENT_PARSE_TIMEOUT = 125
+RERANK_TIMEOUT = 90
+SEARCH_QUERY_MAX_CHARS = 2000
 MEDIA_TYPES = {'.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown'}
 LEGACY_SPLITTING_WARNING = 'Reimport the original documents and rebuild their indexes to refresh section and clause metadata from the updated parser.'
@@ -38,6 +41,7 @@ class RagService:
         from agent.ocr.pipeline import OcrPipeline
         self.ocr = OcrPipeline(self.repository, parser=self.parser)
         self._index_locks = {}
+        self._rerank_attempts = OrderedDict()
         from agent.rag.workflow import ImportWorkflow
         self.workflow = ImportWorkflow(self)
 
@@ -85,6 +89,9 @@ class RagService:
                 if used:
                     raise CoreDataError('rag_model_in_use', 'A library or active index still uses this model.')
         method, args, kwargs = methods[action]
+        if action in {'model.root', 'model.device', 'model.remove'} and hasattr(self.models, 'invalidate'):
+            await self.models.invalidate(None if action == 'model.root' else params.get('model_id'))
+            self._rerank_attempts.clear()
         target = getattr(self.models, method)
         if inspect.iscoroutinefunction(target):
             result = await target(*args, **kwargs)
@@ -210,7 +217,7 @@ class RagService:
             self._start(job, self._manual_index(job, versions))
             return {'job': job}
         if action == 'search':
-            return await self.search(params.get('project_id'), params.get('query'), params.get('run_id'), params.get('library_ids'), params.get('version_ids'), params.get('limit', 8))
+            return await self.search(params.get('project_id'), params.get('query'), params.get('run_id'), params.get('library_ids'), params.get('version_ids'), params.get('limit', 8), retrieval_scope=params.get('retrieval_scope'))
         if action == 'evidence.preview':
             return self.read_evidence(params.get('project_id'), params.get('evidence_id'), params.get('offset', 0), params.get('length', 8000))
         raise CoreDataError('rag_action_unsupported', 'The RAG action is unsupported.')
@@ -360,10 +367,10 @@ class RagService:
         return {'evidence': evidence, 'generation': state['generation'], 'index_ids': state['index_ids'],
                 'external_untrusted': True, 'search_id': search_id, 'aliases': aliases}
 
-    async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None):
+    async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None, retrieval_scope=None):
         if self._closed:
             raise CoreDataError('rag_closed', 'The RAG service is closed.')
-        query = required_text(query, 'Search query', 2000)
+        query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)
         if not isinstance(limit, int) or not 1 <= limit <= 8:
             raise CoreDataError('rag_invalid_request', 'The evidence limit must be between 1 and 8.')
         for selection in (library_ids, version_ids):
@@ -389,7 +396,9 @@ class RagService:
                     raise CoreDataError('rag_version_forbidden', 'A selected version is outside the authorized active indexes.')
         if not indexes:
             raise CoreDataError('rag_no_index', 'Build an authorized library index before searching.')
-        chosen, index_by_chunk = await self._retrieve_indexes(indexes, query, version_ids, limit, progress=progress)
+        chosen, index_by_chunk = await self._retrieve_indexes(indexes, query, version_ids, limit, progress=progress,
+                                                             retrieval_scope=retrieval_scope,
+                                                             cache_context=(project_id, state['generation']))
         evidence = []
         search_id = identifier()
         if self._closed:
@@ -423,6 +432,7 @@ class RagService:
 
     async def close(self):
         self._closed = True
+        self._rerank_attempts.clear()
         tasks = list(self._tasks.values())
         for job_id, task in list(self._tasks.items()):
             self.repository.terminate_task(job_id, 'app_exit', interrupted=True)
@@ -435,7 +445,10 @@ class RagService:
         if inspect.isawaitable(result):
             await result
 
-    async def _retrieve_indexes(self, indexes, query, version_ids=None, limit=8, progress=None):
+    async def _retrieve_indexes(self, indexes, query, version_ids=None, limit=8, progress=None, retrieval_scope=None, cache_context=None):
+        if retrieval_scope not in (None, 'focused', 'broad'):
+            raise CoreDataError('rag_invalid_request', 'Retrieval scope must be focused or broad.')
+        candidate_count = 20 if retrieval_scope == 'focused' else 40
         subject = explicit_subject(query)
         retrieval_query = subject or query
         retrieved = []
@@ -455,7 +468,7 @@ class RagService:
                 await progress("retrieving")
             blob = vector_blob(query_vectors[0], index['dimension'])
             with closing(self.repository.connect()) as connection:
-                ids, scores = candidates(connection, index['id'], blob, retrieval_query, version_ids)
+                ids, scores = candidates(connection, index['id'], blob, retrieval_query, version_ids, count=candidate_count)
                 if not ids:
                     continue
                 placeholders = ','.join('?' for _ in ids)
@@ -472,26 +485,52 @@ class RagService:
                 retrieved.append(row)
                 index_by_chunk[row['id']] = index
         retrieved.sort(key=lambda row: (-row['fusion_score'], row['id']))
-        shortlisted = retrieved[:40]
+        shortlisted = retrieved[:candidate_count]
+        cache_key = (cache_context, retrieval_query, tuple(version_ids or ()), candidate_count,
+                     tuple((index['id'], index['embedding_digest'], index['reranker_digest']) for index in indexes),
+                     tuple((row['id'], row['text_hash'], row['text']) for row in shortlisted))
+        attempt = self._rerank_attempts.setdefault(cache_key, shortlisted)
+        self._rerank_attempts.move_to_end(cache_key)
+        while len(self._rerank_attempts) > 8:
+            self._rerank_attempts.popitem(last=False)
+        shortlisted = attempt
         reranker_groups = {}
         for row in shortlisted:
             model_id = index_by_chunk[row['id']]['reranker_model_id']
             reranker_groups.setdefault(model_id, []).append(row)
         ranked = []
-        for model_id, rows in reranker_groups.items():
+        completed = 0
+        stage_started = time.perf_counter()
+        async def scoring_progress(event):
+            nonlocal completed
+            completed = len(ranked) + event.get('completed', 0)
             if progress:
-                await progress("reranking")
-            stage_started = time.perf_counter()
-            reranked = await self.models.rerank(model_id, retrieval_query, [row['text'] for row in rows])
-            log_event(logging.getLogger(__name__), logging.INFO, "rag_stage_completed", "RAG stage completed",
-                      stage="reranking", duration_ms=round((time.perf_counter()-stage_started)*1000), count=len(rows))
-            if len(reranked) != len(rows):
-                raise CoreDataError('rag_invalid_rerank', 'The reranker returned an invalid batch.')
-            for row, score in zip(rows, reranked):
-                if not isinstance(score, (int, float)) or not math.isfinite(score):
-                    raise CoreDataError('rag_invalid_rerank', 'The reranker returned a nonfinite score.')
-                row['score'] = float(score)
-                ranked.append(row)
+                await progress({**event, 'completed': completed, 'total': len(shortlisted),
+                                'elapsed_ms': round((time.perf_counter() - stage_started) * 1000)})
+        try:
+            async with asyncio.timeout(RERANK_TIMEOUT):
+                for model_id, rows in reranker_groups.items():
+                    await scoring_progress({'stage': 'model_loading', 'completed': 0})
+                    options = {'progress': scoring_progress, 'cache_key': cache_key, 'token_budget': 2048}
+                    signature = inspect.signature(self.models.rerank)
+                    if not any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()):
+                        options = {key: value for key, value in options.items() if key in signature.parameters}
+                    reranked = await self.models.rerank(model_id, retrieval_query, [row['text'] for row in rows], **options)
+                    if len(reranked) != len(rows):
+                        raise CoreDataError('rag_invalid_rerank', 'The reranker returned an invalid batch.')
+                    for row, score in zip(rows, reranked):
+                        if not isinstance(score, (int, float)) or not math.isfinite(score):
+                            raise CoreDataError('rag_invalid_rerank', 'The reranker returned a nonfinite score.')
+                        row['score'] = float(score)
+                        ranked.append(row)
+                    completed = len(ranked)
+            log_event(logging.getLogger(__name__), logging.INFO, 'rag_stage_completed', 'RAG stage completed',
+                      stage='reranking', duration_ms=round((time.perf_counter() - stage_started)*1000), count=completed)
+        except TimeoutError as exc:
+            raise CoreDataError('rag_rerank_timeout', '辅助检索重排超过 90 秒，可重试继续。',
+                                {'completed': completed, 'total': len(shortlisted), 'timeout_seconds': RERANK_TIMEOUT,
+                                 'retryable': True}) from exc
+        self._rerank_attempts.pop(cache_key, None)
         ranked.sort(key=lambda row: (-row['score'], -row['fusion_score'], row['id']))
         chosen = ranked[:limit]
         if not chosen:
@@ -499,7 +538,7 @@ class RagService:
         return chosen, index_by_chunk
 
     async def search_library(self, library_id, query):
-        query = required_text(query, 'Search query', 2000)
+        query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)
         with closing(self.repository.connect()) as c:
             library = self.repository.library(c, library_id)
             index = c.execute('SELECT * FROM rag_indexes WHERE id=?', (library['active_index_id'],)).fetchone()

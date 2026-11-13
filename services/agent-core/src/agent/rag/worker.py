@@ -143,6 +143,17 @@ def _load(params, cache):
     return loaded
 
 
+def _token_limit(params, metadata=None):
+    profile = PROFILES[params['profile']]
+    ceiling = min(profile.max_length, (metadata or {}).get('max_length', profile.max_length))
+    if profile.role != 'reranker':
+        return ceiling
+    budget = params.get('token_budget', 2048)
+    if type(budget) is not int or budget < 64:
+        raise ValueError('Reranking token budget must be an integer of at least 64')
+    return min(ceiling, budget)
+
+
 def _torch_batch(params, tokenizer, model, texts):
     import torch
     import torch.nn.functional as functional
@@ -150,13 +161,13 @@ def _torch_batch(params, tokenizer, model, texts):
     if profile.pooling == "yes_no":
         prefix = tokenizer.encode(RERANK_PREFIX, add_special_tokens=False)
         suffix = tokenizer.encode(RERANK_SUFFIX, add_special_tokens=False)
-        inputs = tokenizer(texts, padding=False, truncation=True, max_length=profile.max_length - len(prefix) - len(suffix), add_special_tokens=False)
+        inputs = tokenizer(texts, padding=False, truncation=True, max_length=_token_limit(params) - len(prefix) - len(suffix), add_special_tokens=False)
         inputs["input_ids"] = [prefix + row + suffix for row in inputs["input_ids"]]
         inputs.pop("attention_mask", None)
         inputs = tokenizer.pad(inputs, padding=True, return_tensors="pt")
         model_options = {"logits_to_keep": 1}
     else:
-        inputs = tokenizer(texts, padding=True, truncation=True, max_length=profile.max_length, return_tensors="pt")
+        inputs = tokenizer(texts, padding=True, truncation=True, max_length=_token_limit(params), return_tensors="pt")
         model_options = {}
     inputs = {name: tensor.to(params["device"]) for name, tensor in inputs.items()}
     with torch.inference_mode():
@@ -180,9 +191,9 @@ def _onnx_batch(params, tokenizer, model, metadata, texts):
     import numpy as np
     profile = PROFILES[params["profile"]]
     if profile.role == "reranker":
-        inputs = tokenizer([params["query"]] * len(texts), texts, padding=True, truncation=True, max_length=metadata["max_length"], return_tensors="np")
+        inputs = tokenizer([params["query"]] * len(texts), texts, padding=True, truncation=True, max_length=_token_limit(params, metadata), return_tensors="np")
     else:
-        inputs = tokenizer(texts, padding=True, truncation=True, max_length=metadata["max_length"], return_tensors="np")
+        inputs = tokenizer(texts, padding=True, truncation=True, max_length=_token_limit(params, metadata), return_tensors="np")
     feed = {}
     for item in model.get_inputs():
         value = inputs.get(item.name)
@@ -204,7 +215,7 @@ def _onnx_batch(params, tokenizer, model, metadata, texts):
 
 def dispatch(request, cache):
     action = request.get("action")
-    if action not in {"probe", "embed", "rerank"}:
+    if action not in {"probe", "embed", "rerank", "rerank_lengths"}:
         raise ValueError("Unsupported worker action")
     params = request["params"]
     if params.get("profile") not in PROFILES:
@@ -212,12 +223,19 @@ def dispatch(request, cache):
     if params.get("backend") not in {"transformers", "onnx"}:
         raise ValueError("Unsupported inference backend")
     availability = _engine(params["backend"], params["device"])
+    progress = request.get('_progress')
+    load_key = (params.get('path'), params['profile'], params['backend'], params['device'], params.get('digest'))
+    if progress and cache.get('key') != load_key:
+        progress({'stage': 'model_loading', 'completed': 0, 'total': len(params.get('texts', []))})
     tokenizer, model, metadata = _load(params, cache)
     if action == "probe":
         return {"available": True, **availability}
     profile = PROFILES[params["profile"]]
     if (action == "embed") != (profile.role == "embedding"):
         raise ValueError("Requested action does not match model role")
+    if progress and action != 'rerank_lengths':
+        progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
+                  'completed': 0, 'total': len(params.get('texts', []))})
     texts = params["texts"]
     if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
         raise ValueError("texts must be a list of strings")
@@ -225,20 +243,30 @@ def dispatch(request, cache):
         texts = [f"Instruct: {QUERY_INSTRUCTION}\nQuery: {text}" for text in texts]
     if params["profile"] == "qwen3-reranker-0.6b":
         texts = [f"<Instruct>: {QUERY_INSTRUCTION}\n<Query>: {params['query']}\n<Document>: {text}" for text in texts]
-    results = []
-    for start in range(0, len(texts), 8):
-        batch = texts[start:start + 8]
+    # Tokenize with the actual model tokenizer before grouping lengths. All
+    # scoring truncation applies only to these worker-local inputs.
+    lengths = tokenizer(texts, padding=False, truncation=True,
+                        max_length=_token_limit(params, metadata))['input_ids'] if texts else []
+    if action == 'rerank_lengths':
+        return [len(row) for row in lengths]
+    ordered = sorted(range(len(texts)), key=lambda index: len(lengths[index]))
+    batch_size = 2 if params['backend'] == 'onnx' else 8
+    results = [None] * len(texts)
+    for start in range(0, len(texts), batch_size):
+        indices = ordered[start:start + batch_size]
+        batch = [texts[index] for index in indices]
         if params["backend"] == "onnx":
             result = _onnx_batch(params, tokenizer, model, metadata, batch)
         elif profile.role == "reranker" and profile.pooling != "yes_no":
             import torch
-            inputs = tokenizer([params["query"]] * len(batch), batch, padding=True, truncation=True, max_length=profile.max_length, return_tensors="pt")
+            inputs = tokenizer([params["query"]] * len(batch), batch, padding=True, truncation=True, max_length=_token_limit(params), return_tensors="pt")
             inputs = {name: tensor.to(params["device"]) for name, tensor in inputs.items()}
             with torch.inference_mode():
                 result = model(**inputs).logits.float().reshape(-1).sigmoid().cpu().tolist()
         else:
             result = _torch_batch(params, tokenizer, model, batch)
-        results.extend(result)
+        for index, value in zip(indices, result):
+            results[index] = value
     return results
 
 
@@ -250,13 +278,40 @@ def main():
         try:
             request = json.loads(line)
             request_id = request.get("id")
+            if request.get('params', {}).get('report_progress'):
+                def emit_progress(event):
+                    frame = {'id': request_id, 'progress': event}
+                    output.write(json.dumps(frame, ensure_ascii=True, allow_nan=False) + '\n')
+                    output.flush()
+                output = sys.stdout
+                request['_progress'] = emit_progress
             with contextlib.redirect_stdout(sys.stderr):
                 result = dispatch(request, cache)
-            response = {"id": request_id, "result": result}
+            response = {"id": request_id, "result": result, 'peak_memory_bytes': _peak_memory_bytes()}
         except Exception as exc:
             response = {"id": request_id, "error": f"{type(exc).__name__}: {exc}"}
         sys.stdout.write(json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n")
         sys.stdout.flush()
+
+
+def _peak_memory_bytes():
+    if os.name == 'nt':
+        import ctypes
+        class Counters(ctypes.Structure):
+            _fields_ = [('cb', ctypes.c_uint32), ('faults', ctypes.c_uint32)] + [
+                (name, ctypes.c_size_t) for name in ('peak_working_set', 'working_set', 'peak_paged_pool',
+                    'paged_pool', 'peak_nonpaged_pool', 'nonpaged_pool', 'pagefile', 'peak_pagefile')]
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        query = ctypes.WinDLL('psapi').GetProcessMemoryInfo
+        query.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+        query.restype = ctypes.c_int
+        if query(ctypes.c_void_p(-1), ctypes.byref(counters), counters.cb):
+            return max(counters.peak_working_set, counters.peak_pagefile)
+        return 0
+    import resource
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == 'darwin' else peak * 1024
 
 
 if __name__ == "__main__":

@@ -103,6 +103,7 @@ pub struct AttachmentStore {
     root: PathBuf,
     staged: HashMap<String, AttachmentManifest>,
     rejected: HashMap<String, RejectedAttachmentDescriptor>,
+    intent_authorizations: HashMap<String, serde_json::Value>,
 }
 
 impl AttachmentStore {
@@ -110,12 +111,30 @@ impl AttachmentStore {
         let root = app_data_dir.join("message-attachments");
         fs::create_dir_all(&root)
             .map_err(|_| "Could not initialize attachment storage".to_string())?;
-        Ok(Self {
+        let mut store = Self {
             app_data_dir,
-            root,
+            root: root.clone(),
             staged: HashMap::new(),
             rejected: HashMap::new(),
-        })
+            intent_authorizations: fs::read(root.join("intent-authorizations.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default(),
+        };
+        let pending: Vec<_> = store
+            .intent_authorizations
+            .values()
+            .filter(|request| request["__intent_pending"] == true)
+            .cloned()
+            .collect();
+        for request in pending {
+            let manifests =
+                serde_json::from_value(request["attachments"].clone()).unwrap_or_default();
+            let rejections = serde_json::from_value(request["attachment_rejections"].clone())
+                .unwrap_or_default();
+            store.restore_update_staging(manifests, rejections);
+        }
+        Ok(store)
     }
 
     pub fn import_paths(&mut self, paths: &[PathBuf]) -> AttachmentImportBatchResult {
@@ -604,6 +623,87 @@ impl AttachmentStore {
         Ok(updated)
     }
 
+    pub fn authorize_intent(
+        &mut self,
+        task_id: &str,
+        mut request: serde_json::Value,
+    ) -> Result<(), String> {
+        request["__intent_pending"] = serde_json::json!(true);
+        self.intent_authorizations
+            .insert(task_id.to_string(), request);
+        self.persist_intent_authorizations()
+    }
+
+    fn persist_intent_authorizations(&self) -> Result<(), String> {
+        let bytes =
+            serde_json::to_vec(&self.intent_authorizations).map_err(|error| error.to_string())?;
+        let temporary = self.root.join("intent-authorizations.pending");
+        fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+        fs::rename(temporary, self.root.join("intent-authorizations.json"))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn reconcile_intent(&mut self, task: &serde_json::Value) -> Result<(), String> {
+        let id = task
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("intent_task_invalid")?;
+        let request = &task["request"];
+        let request_key = format!(
+            "request:{}",
+            request["idempotency_key"].as_str().unwrap_or("")
+        );
+        let authorized = self
+            .intent_authorizations
+            .get(id)
+            .or_else(|| self.intent_authorizations.get(&request_key))
+            .ok_or("intent_authorization_missing")?
+            .clone();
+        for field in [
+            "idempotency_key",
+            "attachments",
+            "attachment_rejections",
+            "attachment_staging_ids",
+            "attachment_rejection_staging_ids",
+            "provider_profile_id",
+            "model_id",
+            "selection",
+            "project_id",
+            "conversation_id",
+        ] {
+            if authorized.get(field) != request.get(field) {
+                return Err("intent_authorization_mismatch".into());
+            }
+        }
+        self.intent_authorizations.remove(&request_key);
+        self.intent_authorizations
+            .insert(id.to_string(), authorized.clone());
+        let accepted = task["status"] == "completed"
+            && matches!(
+                task["result"]["status"].as_str(),
+                Some("accepted" | "waiting_permission" | "waiting_budget")
+            )
+            && task["result"]["run"]["id"].is_string()
+            && task["result"]["conversation"]["id"].is_string();
+        if matches!(task["status"].as_str(), Some("completed" | "cancelled")) {
+            if let Some(saved) = self.intent_authorizations.get_mut(id) {
+                saved["__intent_pending"] = serde_json::json!(false);
+            }
+            self.persist_intent_authorizations()?;
+        }
+        if accepted {
+            let ids: Vec<String> =
+                serde_json::from_value(authorized["attachment_staging_ids"].clone())
+                    .unwrap_or_default();
+            let rejected: Vec<String> =
+                serde_json::from_value(authorized["attachment_rejection_staging_ids"].clone())
+                    .unwrap_or_default();
+            self.mark_committed(&ids);
+            self.mark_rejections_committed(&rejected);
+        }
+        Ok(())
+    }
+
     pub fn mark_committed(&mut self, ids: &[String]) {
         for id in ids {
             self.staged.remove(id);
@@ -617,6 +717,18 @@ impl AttachmentStore {
     }
 
     pub fn discard(&mut self, id: &str) -> Result<(), String> {
+        if self.intent_authorizations.values().any(|request| {
+            request["__intent_pending"] == true
+                && ["attachment_staging_ids", "attachment_rejection_staging_ids"]
+                    .iter()
+                    .any(|field| {
+                        request[*field]
+                            .as_array()
+                            .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+                    })
+        }) {
+            return Ok(());
+        }
         if self.rejected.remove(id).is_some() {
             return Ok(());
         }
@@ -875,6 +987,38 @@ fn safe_file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_intent_pins_staging_and_restores_authorization_after_restart() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("notes.txt");
+        fs::write(&source, "Keep the original attachment.").unwrap();
+        let mut store = AttachmentStore::new(root.clone()).unwrap();
+        let manifest = store.import_paths(&[source]).accepted.remove(0);
+        let request = serde_json::json!({"idempotency_key": "once", "provider_profile_id": "local", "model_id": "text",
+            "attachment_staging_ids": [manifest.id], "attachment_rejection_staging_ids": [],
+            "attachments": [manifest], "attachment_rejections": []});
+        store.authorize_intent("intent1", request.clone()).unwrap();
+        store.discard(&manifest.id).unwrap();
+        assert!(root.join(&manifest.storage_key).exists());
+        drop(store);
+        let mut store = AttachmentStore::new(root.clone()).unwrap();
+        assert_eq!(
+            store.resolve(std::slice::from_ref(&manifest.id)).unwrap()[0].id,
+            manifest.id
+        );
+        let mut task =
+            serde_json::json!({"id": "intent1", "status": "waiting_user", "request": request});
+        task["request"]["model_id"] = serde_json::json!("forged");
+        assert!(store.reconcile_intent(&task).is_err());
+        task["request"]["model_id"] = serde_json::json!("text");
+        task["status"] = serde_json::json!("cancelled");
+        store.reconcile_intent(&task).unwrap();
+        store.discard(&manifest.id).unwrap();
+        assert!(!root.join(&manifest.storage_key).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn document_source_preview_retention_and_discard_preserve_binary_snapshot() {

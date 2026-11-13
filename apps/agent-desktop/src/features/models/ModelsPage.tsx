@@ -381,6 +381,7 @@ export function ModelsPage() {
     new_conversation_mode: "automatic" as const, default_preset: "balanced" as const,
     max_model_calls_per_message: 3, max_specialist_steps: 2,
     max_extra_online_cost_usd: "0.20", allow_unknown_price_automatic: false,
+    intent_timeout_seconds: 90, main_model_idle_seconds: 1800, auxiliary_model_idle_seconds: 1800,
   };
   const updateRouting = async (next: Partial<RoutingPreferences>) => {
     try { setSettings(await settingsRepository.updateRoutingPreferences(next)); setError(null); }

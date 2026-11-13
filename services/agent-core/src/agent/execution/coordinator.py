@@ -70,6 +70,7 @@ class ExecutionCoordinator:
         allowed_fields = {
             "files", "tools", "web", "web_evidence", "reasoning",
             "task_kinds", "explanation_code", "follow_up", "rag_requirement",
+            "read_attachment_ids", "read_requests", "task_scope", "retrieval_scope", "allow_simulated_data", "clarification",
         }
         if set(value) - allowed_fields:
             raise ValueError("routing intent contains unsupported fields")
@@ -87,7 +88,7 @@ class ExecutionCoordinator:
         task_kinds = value.get("task_kinds")
         explanation = value.get("explanation_code")
         follow_up = value.get("follow_up", "none")
-        allowed_kinds = {"vision", "research", "file_work", "reasoning", "general", "airworthiness", "document_export", "attachment_summary"}
+        allowed_kinds = {"vision", "research", "file_work", "reasoning", "general", "airworthiness", "document_export", "attachment_summary", "attachment_extract"}
         rag_requirement = value.get("rag_requirement", "uncertain")
         if not isinstance(rag_requirement, str) or rag_requirement not in {"required", "not_needed", "uncertain"}:
             raise ValueError("routing intent evidence requirement is invalid")
@@ -103,6 +104,36 @@ class ExecutionCoordinator:
             raise ValueError("routing intent fields are invalid")
         if follow_up not in {"none", "confirm", "reject"}:
             raise ValueError("routing intent follow-up is invalid")
+        read_ids = value.get('read_attachment_ids', [])
+        read_requests = value.get('read_requests', [])
+        from agent.document_contracts import validate_document_call
+        if not isinstance(read_requests, list) or len(read_requests) > 8:
+            raise ValueError('routing intent attachment read requests are invalid')
+        try:
+            for request in read_requests:
+                if not isinstance(request, dict):
+                    raise ValueError('invalid read request')
+                validate_document_call('document.read_attachment', request)
+        except Exception as error:
+            raise ValueError('routing intent attachment read requests are invalid') from error
+        scope = value.get('task_scope', 'unspecified')
+        retrieval_scope = value.get('retrieval_scope', 'broad')
+        simulated = value.get('allow_simulated_data', False)
+        if (not isinstance(read_ids, list) or len(read_ids) > 8
+                or any(not isinstance(identity, str) or not 1 <= len(identity) <= 200 for identity in read_ids)
+                or len(set(read_ids)) != len(read_ids)
+                or scope not in {'unspecified', 'full', 'section'}
+                or retrieval_scope not in {'focused', 'broad'} or type(simulated) is not bool):
+            raise ValueError('routing intent attachment plan is invalid')
+        clarification = value.get('clarification')
+        if clarification is not None:
+            from agent.execution.intent_session import IntentClarification
+            try:
+                if not isinstance(clarification, dict) or set(clarification) != {'summary', 'questions'}:
+                    raise ValueError('invalid clarification')
+                clarification = IntentClarification(clarification['summary'], clarification['questions']).value
+            except Exception as error:
+                raise ValueError('routing intent clarification is invalid') from error
         return {
             "files": files,
             "tools": tools,
@@ -113,6 +144,9 @@ class ExecutionCoordinator:
             "explanation_code": explanation,
             "follow_up": follow_up,
             "rag_requirement": rag_requirement,
+            'read_attachment_ids': list(dict.fromkeys([*read_ids, *(item['attachment_id'] for item in read_requests)])),
+            'read_requests': read_requests, 'task_scope': scope, 'retrieval_scope': retrieval_scope,
+            'allow_simulated_data': simulated, 'clarification': clarification,
         }
 
     @staticmethod

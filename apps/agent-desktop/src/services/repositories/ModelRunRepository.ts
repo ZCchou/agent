@@ -1,6 +1,7 @@
 import type { AttachmentReference, ContextSnapshot, Conversation, ExecutionPlan, ModelRun, ModelRunEvent, ModelSelectionDecision, ModelSelectionRequest, ProjectKnowledge } from "../../types/domain";
 
 export interface StartModelRunInput {
+  intentScope?: string;
   ragMode?: "auto" | "required";
   attachmentPurposes?: Record<string, "template" | "reference">;
   conversationId?: string;

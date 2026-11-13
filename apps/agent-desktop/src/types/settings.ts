@@ -231,6 +231,9 @@ export interface RoutingPreferences {
   max_specialist_steps: number;
   max_extra_online_cost_usd: string;
   allow_unknown_price_automatic: boolean;
+  intent_timeout_seconds: number;
+  main_model_idle_seconds: number;
+  auxiliary_model_idle_seconds: number;
 }
 export interface ModelSettings {
   providers: ProviderProfileSettings[];

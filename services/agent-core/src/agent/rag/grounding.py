@@ -109,7 +109,8 @@ class RagGrounding:
             if recent:
                 conversation = {**conversation, 'messages': [*recent, current]}
         project_id = conversation.get("project_id")
-        if not project_id or not self.service.project_state(project_id).get("enabled"):
+        project_state = self.service.project_state(project_id) if project_id else {}
+        if not project_id or not project_state.get("enabled"):
             raise CoreDataError('rag_library_required', '请为当前项目启用资料库，或关闭强制 RAG 后进行普通交流。')
         if progress:
             await progress("retrieving")
@@ -117,17 +118,23 @@ class RagGrounding:
         if decision.get('query_context') and not prior_ids:
             query = decision['query_context'] + '\n' + query
         aliases = {}
-        if prior_ids:
+        if run.get('_template_fill_task'):
+            # Each planned chapter retrieves its own relevant clauses.
+            result = {'evidence': [], 'generation': project_state['generation']}
+        elif prior_ids:
             result = self.service.reauthorize_evidence(project_id, prior_ids, run_id=run["id"])
             aliases = result.get('aliases', {})
         else:
-            result = await self.service.search(project_id, query, run_id=run["id"], **({"progress": progress} if progress else {}))
-        if not result["evidence"]:
+            result = await self.service.search(project_id, query, run_id=run["id"],
+                **({"retrieval_scope": decision['retrieval_scope']} if decision.get('retrieval_scope') else {}),
+                **({"progress": progress} if progress else {}))
+        if not result["evidence"] and not run.get('_template_fill_task'):
             raise CoreDataError("rag_evidence_missing", "当前资料库未检索到可用于回答的证据。")
         self.runs[run["id"]] = {"project_id": project_id, "generation": result["generation"],
                                  "evidence": {item["id"]: item for item in result["evidence"]}, "admitted": {},
                                  "aliases": aliases, "quote_options": {}, "query": query,
                                  "subject": explicit_subject(query), "budget": 6000, "used_tokens": 0}
+        self.runs[run['id']]['retrieval_scope'] = decision.get('retrieval_scope')
 
     def evidence(self, run_id: str) -> list[dict]:
         return [evidence_with_quotes(item) for item in self.runs.get(run_id, {}).get("evidence", {}).values()]
@@ -160,7 +167,8 @@ class RagGrounding:
         if name == "rag.search":
             result = await self.service.search(state["project_id"], arguments["query"], run_id=run_id,
                                                library_ids=arguments.get("library_ids"),
-                                               version_ids=arguments.get("version_ids"), limit=arguments.get("limit", 8))
+                                               version_ids=arguments.get("version_ids"), limit=arguments.get("limit", 8),
+                                               **({'retrieval_scope': state['retrieval_scope']} if state.get('retrieval_scope') else {}))
             selected = []
             for item in result["evidence"]:
                 item = evidence_with_quotes(item)
@@ -200,7 +208,7 @@ class RagGrounding:
         state["used_tokens"] += estimate_tokens(json.dumps(output, ensure_ascii=False))
         return json.dumps(output, ensure_ascii=False)
 
-    def answer_schema(self, run_id: str) -> dict:
+    def answer_schema(self, run_id: str, *, read_attachment_ids=()) -> dict:
         citation = {"type": "object", "additionalProperties": False,
                     "required": ["id", "quote_id"], "properties": {
                         "id": {"type": "string", "enum": list(self.runs[run_id]["admitted"])},
@@ -211,8 +219,22 @@ class RagGrounding:
                  "required": ["text", "evidence"], "properties": {
                      "text": {"type": "string", "minLength": 1, "maxLength": 8000},
                      "evidence": {"type": "array", "minItems": 1, "maxItems": 8, "items": citation}}}
-        return {"type": "object", "additionalProperties": False, "required": ["claims"],
-                "properties": {"claims": {"type": "array", "minItems": 1, "maxItems": 32, "items": claim}}}
+        answer = {"type": "object", "additionalProperties": False, "required": ["claims"],
+                  "properties": {"claims": {"type": "array", "minItems": 1, "maxItems": 32, "items": claim}}}
+        if not read_attachment_ids:
+            return answer
+        request = {'type': 'object', 'additionalProperties': False,
+                   'required': ['attachment_id', 'offset', 'limit', 'physical_page', 'section'], 'properties': {
+                       'attachment_id': {'type': 'string', 'enum': list(dict.fromkeys(read_attachment_ids))},
+                       'offset': {'type': 'integer', 'minimum': 0},
+                       'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+                       'physical_page': {'type': ['integer', 'null'], 'minimum': 1},
+                       'section': {'type': ['string', 'null'], 'minLength': 1, 'maxLength': 1024}}}
+        read = {'type': 'object', 'additionalProperties': False, 'required': ['read_requests'],
+                'properties': {'read_requests': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': request}}}
+        # Keep the root an object for strict endpoints that reject root-level unions.
+        return {'type': 'object', 'additionalProperties': False, 'required': ['response'],
+                'properties': {'response': {'anyOf': [answer, read]}}}
 
     def finalize(self, run_id: str, content: str, *, check_subject=True) -> str:
         state = self.runs[run_id]

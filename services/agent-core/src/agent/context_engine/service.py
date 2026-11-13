@@ -140,6 +140,7 @@ class ContextEngineService:
         for message in conversation["messages"]:
             if message["id"] == current_id:
                 message["_reference_manifest"] = sources["reference_manifest"]
+                message['_document_reads'] = (self.repository.get_model_run(run['id']).get('rag_decision') or {}).get('document_reads', [])
         protocol = (serialization_identity or {}).get("protocol")
         signature = (serialization_identity or {}).get("capability_signature")
         allow_images = signature is None or "vision" in signature
@@ -609,6 +610,20 @@ class ContextEngineService:
         media_cost = 0
         attachment_items: list[dict[str, Any]] = []
         for attachment in message.get("attachments", []):
+            from agent.document_attachments import is_document
+            if is_document(attachment) and 'source_start' not in attachment:
+                reads = [item['result'] for item in message.get('_document_reads', [])
+                         if item['request']['attachment_id'] == attachment['id']]
+                if any(item['source_sha256'] != attachment['sha256'] for item in reads):
+                    raise CoreDataError('attachment_changed', '已读取的文档身份与当前附件不一致。')
+                observation = {'attachment_id': attachment['id'], 'name': attachment['name'],
+                               'sha256': attachment['sha256'], 'read_results': reads,
+                               'body_status': 'read_ranges' if reads else 'not_read'}
+                rendered = '<external-untrusted source="document-attachment">\n' + html.escape(json.dumps(observation, ensure_ascii=False)) + '\n</external-untrusted>'
+                extra_text.append(rendered)
+                attachment_items.append({'attachment': attachment, 'estimated_tokens': estimate_tokens(rendered),
+                                         'artifact': None, 'receiving_route': receiving_route or protocol})
+                continue
             if attachment["kind"] == "image" and not allow_images:
                 reason = image_exclusion or "model_vision_unsupported"
                 notice = '<external-untrusted source="attachment-reference" reason="' + html.escape(reason, quote=True) + '">' + html.escape(attachment["name"]) + '</external-untrusted>'

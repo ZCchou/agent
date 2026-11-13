@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import zipfile
 
@@ -59,10 +60,197 @@ def nsis_path(path):
     return str(Path(path).resolve()).replace('$', '$$').replace('"', '$\\"')
 
 
-def write_installer(source, output, payload_manifest, parts_manifest, compiler, version='0.15.0-ocr-preview.1', *, unified=False):
+def native_manifest(directory, payload, archives, application):
+    """Bind each runtime entry to one trusted ZIP without inflating the payload."""
+    files = {name: {**record, 'volume': 'embedded'} for name, record in application.items()}
+    seen = set()
+    for archive in archives:
+        validate_relative(archive['name'])
+        with zipfile.ZipFile(Path(directory) / archive['name']) as package:
+            for entry in package.infolist():
+                name = entry.filename
+                validate_relative(name)
+                if name.casefold() in seen or name not in payload['files']:
+                    raise ValueError('Duplicate or unexpected mapped payload file')
+                record = payload['files'][name]
+                if record['bytes'] != entry.file_size:
+                    raise ValueError('Mapped payload size mismatch')
+                seen.add(name.casefold())
+                files[name] = {**record, 'volume': archive['name']}
+    if seen != {name.casefold() for name in payload['files']}:
+        raise ValueError('Mapped payload is missing files')
+    return {'schema_version': 2, 'application_id': 'io.github.zcchou.agent.airworthiness',
+            'release_id': payload['release_id'], 'files': files, 'archives': archives,
+            'prerequisites': payload.get('prerequisites', {})}
+
+
+def write_native_installer(source, output, payload_manifest, parts_manifest, compiler, version, helper=None):
+    original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
+    application = verify_application(source, original, unified=True)
+    helper = Path(helper) if helper else source / 'agent-installer.exe'
+    if not helper.is_file():
+        raise ValueError('Build agent-installer.exe and pass --installer-helper or place it beside the application source')
+    payload = json.loads(payload_manifest.read_text(encoding='utf-8'))
+    archives = json.loads(parts_manifest.read_text(encoding='utf-8'))['archives']
+    manifest = native_manifest(output, payload, archives, application)
+    # These small installer-owned files participate in the same native transaction.
+    extras = {'LICENSE.txt': ROOT / 'LICENSE', '使用说明.md': output / '安装与使用说明.md'}
+    for name, path in extras.items():
+        manifest['files'][name] = {'bytes': path.stat().st_size, 'sha256': sha256(path), 'volume': 'embedded'}
+    native = output / 'build/native-manifest.json'
+    write_json(native, manifest)
+    setup = output / f'agent-{version}-windows-x64-setup.exe'
+    app_files = '\n'.join(f'  File /oname={name} "{nsis_path(source / name)}"' for name in application)
+    app_files += '\n' + '\n'.join(f'  File /oname={name} "{nsis_path(path)}"' for name, path in extras.items())
+    helper_file = f'  File /oname=agent-installer.exe "{nsis_path(helper)}"'
+    script = f'''Unicode true
+ManifestDPIAware true
+!include MUI2.nsh
+!include LogicLib.nsh
+!include FileFunc.nsh
+Name "agent Airworthiness"
+OutFile "{nsis_path(setup)}"
+InstallDir "$LOCALAPPDATA\\Programs\\agent Airworthiness"
+InstallDirRegKey HKCU "Software\\agentAirworthiness" "InstallDir"
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+ShowInstDetails show
+ShowUninstDetails show
+Icon "{nsis_path(ROOT / 'apps/agent-desktop/src-tauri/icons/icon.ico')}"
+VIProductVersion "0.16.0.{version.rsplit('.', 1)[1]}"
+VIAddVersionKey /LANG=1033 "ProductName" "agent Airworthiness"
+VIAddVersionKey /LANG=1033 "FileVersion" "{version}"
+VIAddVersionKey /LANG=1033 "FileDescription" "Differential full offline installer"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "agent contributors"
+Var LifecycleMutex
+Var NativeProgress
+Var NativeStatus
+Var NativeUiArgs
+!define MUI_FINISHPAGE_RUN "$INSTDIR\\agent-desktop.exe"
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW SetupProgressUi
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.SetupProgressUi
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "SimpChinese"
+!insertmacro MUI_LANGUAGE "English"
+!macro AcquireLifecycle
+  SetRegView 64
+  SetShellVarContext current
+  System::Call 'kernel32::CreateMutexW(p 0, i 1, w "Global\\io.github.zcchou.agent.airworthiness.offline-installer-v1") p.r0 ?e'
+  Pop $1
+  StrCpy $LifecycleMutex $0
+  ${{If}} $0 == 0
+  ${{OrIf}} $1 == 183
+    SetErrorLevel 1
+    Quit
+  ${{EndIf}}
+!macroend
+Function .onInit
+  !insertmacro AcquireLifecycle
+FunctionEnd
+Function un.onInit
+  !insertmacro AcquireLifecycle
+FunctionEnd
+!macro NativeProgressUi PREFIX
+Function ${{PREFIX}}SetupProgressUi
+  GetDlgItem $NativeProgress $mui.InstFilesPage 1004
+  SendMessage $NativeProgress 0x406 0 100
+  GetDlgItem $0 $mui.InstFilesPage 1016
+  System::Alloc 16
+  Pop $1
+  System::Call 'user32::GetWindowRect(p r0, p r1)'
+  System::Call 'user32::MapWindowPoints(p 0, p $mui.InstFilesPage, p r1, i 2)'
+  System::Call '*$1(i .r2, i .r3, i .r4, i .r5)'
+  IntOp $4 $4 - $2
+  IntOp $5 $5 - $3
+  System::Call '*$1(i 0, i 0, i 0, i 32)'
+  System::Call 'user32::MapDialogRect(p $mui.InstFilesPage, p r1)'
+  System::Call '*$1(i, i, i, i .r6)'
+  System::Free $1
+  System::Call 'user32::CreateWindowExW(i 0, w "STATIC", w "", i 0x50000000, i r2, i r3, i r4, i r6, p $mui.InstFilesPage, p 0, p 0, p 0) p .r7'
+  StrCpy $NativeStatus $7
+  SendMessage $0 0x31 0 0 $8
+  SendMessage $NativeStatus 0x30 $8 1
+  IntOp $3 $3 + $6
+  IntOp $5 $5 - $6
+  System::Call 'user32::SetWindowPos(p r0, p 0, i r2, i r3, i r4, i r5, i 0x14)'
+  StrCpy $NativeUiArgs '--ui-parent $HWNDPARENT --progress-hwnd $NativeProgress --status-hwnd $NativeStatus'
+FunctionEnd
+!macroend
+!insertmacro NativeProgressUi ""
+!insertmacro NativeProgressUi "un."
+Section Install
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+{helper_file}
+  File /oname=postflight.ps1 "{nsis_path(ROOT / 'tools/installer/postflight-airworthiness.ps1')}"
+  File /oname=payload.json "{nsis_path(native)}"
+  DetailPrint "Preflight / difference: verifying installed identities and required volumes..."
+  SetOutPath "$PLUGINSDIR\\app"
+{app_files}
+  WriteUninstaller "$PLUGINSDIR\\app\\uninstall.exe"
+  SetOutPath "$PLUGINSDIR"
+  nsExec::ExecToLog '"$PLUGINSDIR\\agent-installer.exe" --action install --root "$INSTDIR" --manifest "$PLUGINSDIR\\payload.json" --sha256 {sha256(native)} --archives "$EXEDIR" --embedded "$PLUGINSDIR\\app" --uninstaller "$PLUGINSDIR\\app\\uninstall.exe" --postflight "$PLUGINSDIR\\postflight.ps1" $NativeUiArgs'
+  Pop $0
+  ${{If}} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Installation could not finish. See details for missing volumes, busy processes or preserved recovery state. Retry this installer after resolving the reported condition." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${{EndIf}}
+  WriteRegStr HKCU "Software\\agentAirworthiness" "InstallDir" "$INSTDIR"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentAirworthiness" "DisplayName" "agent Airworthiness"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentAirworthiness" "DisplayVersion" "{version}"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentAirworthiness" "UninstallString" '"$INSTDIR\\uninstall.exe"'
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentAirworthiness" "DisplayIcon" "$INSTDIR\\agent-desktop.exe"
+  CreateDirectory "$SMPROGRAMS\\agent Airworthiness"
+  CreateShortcut "$SMPROGRAMS\\agent Airworthiness\\agent Airworthiness.lnk" "$INSTDIR\\agent-desktop.exe"
+  CreateShortcut "$DESKTOP\\agent Airworthiness.lnk" "$INSTDIR\\agent-desktop.exe"
+  DetailPrint "Completed: application and runtimes committed."
+SectionEnd
+Section Uninstall
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+{helper_file}
+  nsExec::ExecToLog '"$PLUGINSDIR\\agent-installer.exe" --action uninstall --root "$INSTDIR" $NativeUiArgs'
+  Pop $0
+  ${{If}} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Uninstall cleanup did not complete. Close application and workers, inspect the details, and retry." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${{EndIf}}
+  Delete "$DESKTOP\\agent Airworthiness.lnk"
+  Delete "$SMPROGRAMS\\agent Airworthiness\\agent Airworthiness.lnk"
+  RMDir "$SMPROGRAMS\\agent Airworthiness"
+  DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentAirworthiness"
+  DeleteRegKey HKCU "Software\\agentAirworthiness"
+  ClearErrors
+  Delete "$INSTDIR\\uninstall.exe"
+  ${{If}} ${{Errors}}
+    MessageBox MB_OK|MB_ICONSTOP "The uninstall retry executable is still in use. Close it and retry; owned recovery state was retained." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${{EndIf}}
+  Delete "$INSTDIR\\.airworthiness-uninstall.json"
+  RMDir "$INSTDIR"
+SectionEnd
+'''
+    nsi = output / 'build/setup.nsi'
+    nsi.write_text(script, encoding='utf-8-sig')
+    subprocess.run([str(compiler), '/V3', str(nsi)], check=True)
+    verify_application(source, original, unified=True)
+    return setup
+
+
+def write_installer(source, output, payload_manifest, parts_manifest, compiler, version='0.15.0-ocr-preview.1', *, unified=False, helper=None):
     pattern = r'0\.16\.0-preview\.[1-9][0-9]*' if unified else r'0\.15\.0-ocr-preview\.[1-9][0-9]*'
     if not re.fullmatch(pattern, version):
         raise ValueError('Unsupported preview version')
+    if unified:
+        return write_native_installer(source, output, payload_manifest, parts_manifest, compiler, version, helper)
     build = output / 'build'
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
     application = verify_application(source, original, unified=unified)
@@ -215,7 +403,41 @@ def reuse_archives(previous, output, manifest, version):
     return archives
 
 
-def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1', reuse=None, *, unified=False):
+def reuse_runtime_volumes(previous, output, records, version):
+    """Reuse immutable volumes independently when their complete inventory matches."""
+    previous, output = Path(previous), Path(output)
+    old = json.loads((previous / 'build/payload-manifest.json').read_text(encoding='utf-8'))['files']
+    parts = json.loads((previous / 'build/parts.json').read_text(encoding='utf-8'))['archives']
+    current = {record['name']: {key: record[key] for key in ('bytes', 'sha256')} for record in records}
+    consumed, reused = set(), []
+    for entry in parts:
+        validate_relative(entry['name'])
+        original = previous / entry['name']
+        with zipfile.ZipFile(original) as archive:
+            names = [item.filename for item in archive.infolist()]
+            for name in names:
+                validate_relative(name)
+            if not names or len(names) != len(set(names)) or any(name in consumed for name in names):
+                raise ValueError('Previous volume inventory is invalid')
+            if any(name not in old or current.get(name) != old[name] for name in names):
+                continue
+            if entry['bytes'] >= 1536 * 1024 ** 2 or sum(old[name]['bytes'] for name in names) > UNIFIED_ASSET_LIMIT:
+                continue
+        check_file(original, entry)
+        name = f'agent-{version}-offline.part{len(reused) + 1:02d}.zip'
+        destination = output / name
+        try:
+            os.link(original, destination)
+        except OSError:
+            shutil.copyfile(original, destination)
+            check_file(destination, entry)
+        consumed.update(names)
+        reused.append({**entry, 'name': name})
+        print(f'REUSED {name} {entry["bytes"]}', flush=True)
+    return reused, [record for record in records if record['name'] not in consumed]
+
+
+def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1', reuse=None, *, unified=False, helper=None):
     source, prerequisites, output = map(Path, (source, prerequisites, output))
     if output.exists():
         raise ValueError('Choose a new release output directory')
@@ -240,8 +462,12 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
     payload_manifest = output / 'build/payload-manifest.json'
     write_json(payload_manifest, manifest)
     archives = []
-    groups = [] if reuse else plan_volumes(records, limit=UNIFIED_ASSET_LIMIT if unified else ASSET_LIMIT)
-    for n, group in enumerate(groups, 1):
+    if unified and reuse:
+        archives, pending = reuse_runtime_volumes(reuse, output, records, version)
+        groups = plan_volumes(pending, limit=UNIFIED_ASSET_LIMIT)
+    else:
+        groups = [] if reuse else plan_volumes(records, limit=UNIFIED_ASSET_LIMIT if unified else ASSET_LIMIT)
+    for n, group in enumerate(groups, len(archives) + 1):
         archive = output / f'agent-{version}-offline.part{n:02d}.zip'
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as package:
             for record in group:
@@ -250,7 +476,7 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
             raise ValueError('A release asset exceeds the GitHub size limit')
         archives.append({'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': sha256(archive)})
         print(f'PACKED {archive.name} {archive.stat().st_size}', flush=True)
-    if reuse:
+    if reuse and not unified:
         archives = reuse_archives(reuse, output, manifest, version)
     parts_manifest = output / 'build/parts.json'
     write_json(parts_manifest, {'schema_version': 1, 'archives': archives})
@@ -276,11 +502,11 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
 
 版本 {version}，Windows 11 x64 单用户预览版。
 
-1. 下载 setup.exe 和全部 offline.partNN.zip，放在同一目录，运行安装器。
+1. 下载 setup.exe 和全部 offline.partNN.zip，放在同一目录，运行安装器。完整包同时用于首次安装、升级和受管文件修复；升级保留已校验且未变化的文件，仅解压新增或变化的文件。相同内容的旧版分卷可直接复用，文件名不同也会按大小和 SHA256 识别。
 2. 安装目录独立使用 agent Airworthiness。运行后在设置中迁入 Document Preview 和 OCR Preview 数据，并选择独立模型库。
 3. 新用户需自行导入本地 GGUF 对话模型、嵌入和重排序模型。下载方式见仓库 README。OCR 模型已在离线包内提供。
-4. 在资料库导入文档，处理完成后在项目设置中启用资料库。主模型必须加载后才能问答。
-5. 程序更新采用设置中的手动检查。签名程序包仅更新主程序、Core、DLL 和更新辅助程序。运行组件变化需安装完整离线包。
+4. 在资料库导入文档，处理完成后在项目设置中启用资料库。本地模型选定后，发送时由应用加载。
+5. 程序更新采用设置中的手动检查。签名程序包仅更新主程序、Core、DLL 和更新辅助程序。运行组件变化需安装完整离线包。安装或卸载前关闭程序及后台工作进程；详情显示校验、解压、发布和清理的实际数量、字节数与耗时。
 
 完整组件包含 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR、Office 解析、WebView2 和微软运行库。显卡驱动由电脑提供。
 
@@ -288,7 +514,7 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
 安装包包含机器识别组件，适航内容仍需专业人员复核。实际验收范围见发行说明。
 '''
     (output / '安装与使用说明.md').write_text(instructions, encoding='utf-8')
-    setup = write_installer(source, output, payload_manifest, parts_manifest, compiler, version=version, unified=unified)
+    setup = write_installer(source, output, payload_manifest, parts_manifest, compiler, version=version, unified=unified, helper=helper)
     release = {'version': version, 'application_id': 'io.github.zcchou.agent.airworthiness' if unified else 'io.github.zcchou.agent.ocrpreview',
                'distribution': 'offline-preview-multipart-installer', 'application_build': 'release' if unified else 'debug-portable-tested',
                'authenticode_signed': False, 'updater_enabled': unified,
@@ -310,5 +536,6 @@ if __name__ == '__main__':
     parser.add_argument('--version', default='0.15.0-ocr-preview.1')
     parser.add_argument('--reuse-runtime-archives')
     parser.add_argument('--unified', action='store_true')
+    parser.add_argument('--installer-helper', type=Path)
     args = parser.parse_args()
-    build(args.source, args.prerequisites, args.output, args.nsis, args.version, args.reuse_runtime_archives, unified=args.unified)
+    build(args.source, args.prerequisites, args.output, args.nsis, args.version, args.reuse_runtime_archives, unified=args.unified, helper=args.installer_helper)

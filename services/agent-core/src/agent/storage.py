@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -440,6 +440,21 @@ class CoreRepository:
                 except Exception:
                     connection.rollback()
                     raise
+                version = 30
+            if version == 30:
+                from agent.migrations.v31_intent_tasks import migrate as migrate_intent_tasks
+                connection.execute('PRAGMA foreign_keys = OFF')
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_intent_tasks(connection)
+                    connection.execute('UPDATE schema_info SET version = 31')
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.execute('PRAGMA foreign_keys = ON')
             self._create_indexes(connection)
             self._reconcile_terminal_web_operations(connection)
             self._validate_database(connection)

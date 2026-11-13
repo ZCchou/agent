@@ -1469,6 +1469,8 @@ def _internal_tool_name(name: Any) -> str:
     candidate = name.replace("fs_", "fs.", 1) if name.startswith("fs_") else name
     candidate = candidate.replace("web_", "web.", 1) if candidate.startswith("web_") else candidate
     candidate = candidate.replace("skills_", "skills.", 1) if candidate.startswith("skills_") else candidate
+    candidate = candidate.replace("document_", "document.", 1) if candidate.startswith("document_") else candidate
+    candidate = candidate.replace("rag_", "rag.", 1) if candidate.startswith("rag_") else candidate
     return candidate
 
 

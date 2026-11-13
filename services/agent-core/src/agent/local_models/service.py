@@ -13,7 +13,7 @@ from .gguf import inspect_gguf
 
 
 class LocalModelService:
-    def __init__(self, core_repository, *, runtime_root=None, idle_timeout=600, load_timeout=300, load_guard=None):
+    def __init__(self, core_repository, *, runtime_root=None, idle_timeout=1800, load_timeout=300, load_guard=None):
         self.repository = core_repository
         self.catalog = Catalog(core_repository)
         self.runtime_root = runtime_root
@@ -32,6 +32,14 @@ class LocalModelService:
     @property
     def root(self):
         return self.catalog.root
+
+    def set_idle_timeout(self, seconds):
+        if type(seconds) is not int or seconds != 0 and not 60 <= seconds <= 86400:
+            raise CoreDataError('invalid_settings', '模型驻留时间须为 1 至 1440 分钟，或选择手动卸载。')
+        self.idle_timeout = seconds
+        if self._runtime is not None:
+            self._runtime.idle_timeout = seconds
+            self._runtime.touch()
 
     def owns_profile(self, provider_id):
         return isinstance(provider_id, str) and provider_id.startswith("managed:")

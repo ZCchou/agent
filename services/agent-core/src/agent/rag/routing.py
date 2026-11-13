@@ -73,6 +73,36 @@ def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evide
             'task_type': 'document_export' if export else 'evidence_answer' if required else 'chat'}
 
 
+def explicit_document_scope(text):
+    """Retain literal user range declarations while leaving other intent to the model."""
+    original, separator, supplement = text.partition('\n\n补充信息\n')
+    if separator:
+        try:
+            answers = json.loads(supplement)
+        except (ValueError, TypeError):
+            answers = dict(line.split(' ', 1) for line in supplement.splitlines() if ' ' in line)
+        choices = {'整份模板': 'full', '整份': 'full', '指定章节': 'section', '具体章节': 'section'}
+        scope_keys = {'scope', 'task_scope', 'document_scope', 'fill_scope', 'template_scope'}
+        scope_answers = [value.strip() for key, value in answers.items()
+                         if key.casefold() in scope_keys and isinstance(value, str)] \
+            if isinstance(answers, dict) else []
+        if scope_answers:
+            selected = {choices.get(value) for value in scope_answers}
+            return next(iter(selected)) if len(selected) == 1 else None
+    patterns = [
+        (r'(?:填写|回填|填好)\s*(?:此|该|这个|这份|本|整份|整个|完整的?)?(?:附件|模板|文档|《[^》\r\n]{1,100}》)'
+         r'\s*(?:中|内)[^\r\n]{0,160}[”"」』]\s*一[章节]', 'section'),
+        (r'(?:填写|回填|填好|完成)\s*(?:(?:整份|整个|完整的?)\s*(?:模板|文档|试验大纲)|所有章节|全部章节)', 'full'),
+    ]
+    matches = []
+    for pattern, scope in patterns:
+        for match in re.finditer(pattern, original):
+            prefix = original[max(0, match.start() - 4):match.start()].strip()
+            if not prefix.endswith(('不要', '无需', '禁止', '不必', '不是', '不需要')):
+                matches.append((match.start(), scope))
+    return min(matches, key=lambda item: item[0])[1] if matches else None
+
+
 def merge_evidence_intent(decision, intent, *, error_code=None):
     """Apply descriptive model intent while retaining executor evidence obligations."""
     result = {**decision, 'source': 'rules'}
@@ -93,47 +123,119 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
             result['reuse_evidence'] = bool(result['required'] and decision.get('reuse_evidence'))
     if 'document_export' in intent.get('task_kinds', []):
         result['task_type'] = 'document_export'
+    elif 'attachment_extract' in intent.get('task_kinds', []):
+        result['task_type'] = 'attachment_extract'
     elif decision['task_type'] != 'document_export':
         result['task_type'] = 'evidence_answer' if result['required'] else 'chat'
+    for key in ('read_attachment_ids', 'read_requests', 'task_scope', 'retrieval_scope', 'allow_simulated_data', 'clarification'):
+        if key in intent:
+            result[key] = intent[key]
+    if intent.get('task_scope_source') == 'user_explicit':
+        result['task_scope_source'] = 'user_explicit'
     return result
 
 
-def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes, pending_task=None):
+def routing_intent_schema(attachment_ids, *, pending_action=False):
+    """The existing classifier contract, constrained to this request's authority."""
+    from agent.document_contracts import DOCUMENT_DEFINITIONS
+    def choice(values):
+        return {'type': 'string', 'enum': list(values)}
+    def object_schema(properties):
+        return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
+    identity = {'type': 'string', 'minLength': 1, 'maxLength': 200}
+    if attachment_ids:
+        identity['enum'] = list(attachment_ids)
+    read = next(item['function']['parameters'] for item in DOCUMENT_DEFINITIONS
+                if item['function']['name'] == 'document.read_attachment')
+    read_properties = {key: {**value, 'type': [value['type'], 'null']}
+                       for key, value in read['properties'].items() if key != 'attachment_id'}
+    read_properties = {'attachment_id': identity, **read_properties}
+    question = object_schema({'id': {'type': 'string', 'minLength': 1, 'maxLength': 80},
+        'question': {'type': 'string', 'minLength': 1, 'maxLength': 160},
+        'options': {'type': 'array', 'maxItems': 4, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 100}}})
+    clarification = object_schema({'summary': {'type': 'string', 'minLength': 1, 'maxLength': 200},
+        'questions': {'type': 'array', 'minItems': 1, 'maxItems': 3, 'items': question}})
+    return object_schema({
+        'files': choice(('none', 'read', 'write', 'available')),
+        'tools': choice(('none', 'preferred', 'required', 'available')),
+        'web': choice(('off', 'optional', 'required')), 'web_evidence': choice(('optional', 'required')),
+        'reasoning': choice(('standard', 'preferred')),
+        'task_kinds': {'type': 'array', 'minItems': 1, 'maxItems': 4, 'items': choice((
+            'vision', 'research', 'file_work', 'reasoning', 'general', 'airworthiness',
+            'document_export', 'attachment_summary', 'attachment_extract'))},
+        'explanation_code': {'type': 'string', 'minLength': 1, 'maxLength': 80, 'pattern': '^[a-z0-9_.-]{1,80}$'},
+        'follow_up': choice(('none', 'confirm', 'reject') if pending_action else ('none',)),
+        'rag_requirement': choice(('required', 'not_needed', 'uncertain')),
+        'read_attachment_ids': {'type': 'array', 'maxItems': min(8, len(attachment_ids)), 'items': identity},
+        'read_requests': {'type': 'array', 'maxItems': min(8, len(attachment_ids)), 'items': object_schema(read_properties)},
+        'task_scope': choice(('full', 'section', 'unspecified')), 'retrieval_scope': choice(('focused', 'broad')),
+        'allow_simulated_data': {'type': 'boolean'},
+        'clarification': {'anyOf': [{'type': 'null'}, clarification]},
+    })
+
+
+def intent_tokens(value):
+    """Conservative mixed-language estimate when no provider tokenizer is exposed."""
+    from agent.context_engine.policy import estimate_tokens
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    return max(estimate_tokens(text), (len(text.encode('utf8')) + 2) // 3)
+
+
+def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes=None,
+                   budget_tokens=None, pending_task=None):
     """Bound classifier data independently from attachment bodies and generation history."""
     def clip(text, limit):
         return str(text).encode('utf8')[:limit].decode('utf8', errors='ignore')
 
+    measure = intent_tokens if budget_tokens is not None else lambda text: len(text.encode('utf8'))
+    budget = budget_tokens if budget_tokens is not None else budget_bytes
     value = {'request': '', 'request_truncated': False, 'attachments': [],
              'work_kind': conversation_kind, 'recent_conversation': []}
+    scope = explicit_document_scope(content)
+    if scope:
+        value['task_scope_constraint'] = scope
     if pending_task:
         value['pending_task'] = {'task_type': pending_task.get('task_type'), 'required': bool(pending_task.get('required')),
-                                 'request': clip(pending_task.get('request', ''), min(256, budget_bytes // 4))}
+                                 'request': clip(pending_task.get('request', ''), 256)}
     def render():
         return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
     if pending_task:
-        while len(render().encode('utf8')) > budget_bytes - 32 and value['pending_task']['request']:
+        while measure(render()) > budget - 32 and value['pending_task']['request']:
             value['pending_task']['request'] = value['pending_task']['request'][:-16]
 
-    for attachment in attachments[:8]:
-        entry = {'name': clip(attachment.get('name', 'attachment'), 100),
+    for attachment in attachments:
+        entry = {'id': attachment.get('id', ''),
+                 'name': attachment.get('name', 'attachment'),
                  'purpose': attachment.get('purpose', 'reference')}
+        for key in ('media_type', 'byte_size'):
+            if key in attachment:
+                entry[key] = attachment[key]
         value['attachments'].append(entry)
-        if len(render().encode('utf8')) > budget_bytes // 3:
-            value['attachments'].pop()
-            break
-    request_budget = max(0, budget_bytes - len(render().encode('utf8')) - 64)
-    value['request'] = clip(content, request_budget)
-    value['request_truncated'] = value['request'] != content
-    # JSON escaping can expand control characters. Remove tails until the
-    # serialized payload fits, retaining the beginning of the user request.
-    while len(render().encode('utf8')) > budget_bytes and value['request']:
-        value['request'] = value['request'][:-32]
+    # Complete authorized metadata and appended clarification answers precede history.
+    request, separator, answers = content.partition('\n\n补充信息\n')
+    essential_tail = separator + answers
+    minimum = request[:128] + essential_tail
+    value['request'] = minimum
+    if measure(render()) > budget:
+        raise CoreDataError('routing_intent_context_too_small',
+            '当前模型上下文不足以保留附件标识与补充回答，请扩大上下文、减少附件或缩短补充信息后重试。')
+    value['request'] = content
+    retained = len(request)
+    while measure(render()) > budget:
+        retained = max(min(len(request), 128), retained - max(32, retained // 10))
+        if essential_tail:
+            value['request'] = request[:retained] + '\n[request middle truncated]\n' + essential_tail
+        else:
+            value['request'] = request[:retained // 2] + '\n[request middle truncated]\n' + request[-(retained - retained // 2):]
         value['request_truncated'] = True
+        if retained <= min(len(request), 128) and measure(render()) > budget:
+            value['request'] = minimum
+            break
     for message in reversed(recent_messages[-6:]):
         entry = {'role': message['role'], 'content': clip(message.get('content', ''), 256)}
         value['recent_conversation'].insert(0, entry)
-        if len(render().encode('utf8')) > budget_bytes:
+        if measure(render()) > budget:
             value['recent_conversation'].pop(0)
             break
     return render()

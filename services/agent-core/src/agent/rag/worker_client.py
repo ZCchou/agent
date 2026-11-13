@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -21,8 +22,11 @@ class WorkerClient:
         self._sequence = 0
         self._closed = False
         self._job = None
+        self._loop = None
+        self.peak_memory_bytes = 0
 
     async def _start(self):
+        self._loop = asyncio.get_running_loop()
         if self._closed:
             raise CoreDataError("rag_model_error", "Inference worker is closed")
         if self.process is not None and self.process.returncode is None:
@@ -54,10 +58,10 @@ class WorkerClient:
             await self._stop()
             raise CoreDataError("rag_model_error", "Inference worker is closed")
 
-    async def request(self, action: str, params: dict):
+    async def request(self, action: str, params: dict, progress=None):
         async with self._lock:
             try:
-                return await asyncio.wait_for(self._exchange(action, params), timeout=self.timeout)
+                return await asyncio.wait_for(self._exchange(action, params, progress), timeout=self.timeout)
             except asyncio.TimeoutError as exc:
                 await self._stop()
                 raise CoreDataError("rag_model_error", "Inference worker timed out and was stopped") from exc
@@ -70,9 +74,10 @@ class WorkerClient:
                 raise
             except (OSError, ValueError, EOFError, ConnectionError) as exc:
                 await self._stop()
-                raise CoreDataError("rag_model_error", f"Inference worker failed: {exc}") from exc
+                raise CoreDataError("rag_worker_crash", f"Inference worker failed: {exc}",
+                                    {"device": params.get("device"), "resource": "worker_crash"}) from exc
 
-    async def _exchange(self, action, params):
+    async def _exchange(self, action, params, progress=None):
         await self._start()
         process = self.process
         self._sequence += 1
@@ -80,12 +85,19 @@ class WorkerClient:
         payload = {"id": request_id, "action": action, "params": params}
         process.stdin.write((json.dumps(payload, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8"))
         await process.stdin.drain()
-        line = await process.stdout.readline()
-        if not line:
-            raise EOFError("Worker exited before returning a response")
-        response = json.loads(line)
-        if response.get("id") != request_id:
-            raise ValueError("Worker response id mismatch")
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                raise EOFError("Worker exited before returning a response")
+            response = json.loads(line)
+            if response.get("id") != request_id:
+                raise ValueError("Worker response id mismatch")
+            if "progress" not in response:
+                break
+            if progress:
+                result = progress(response["progress"])
+                if inspect.isawaitable(result):
+                    await result
         if response.get("error"):
             message = str(response['error'])
             if any(marker in message.casefold() for marker in (
@@ -95,9 +107,26 @@ class WorkerClient:
                 raise CoreDataError('rag_resource_exhausted', '辅助检索模型内存不足。请释放内存或调整辅助模型设备后重试。', {
                     'device': params.get('device'), 'batch_size': len(params.get('texts', [])),
                     'action': action,
+                    'resource': 'cuda_vram' if params.get('device') == 'cuda' else 'cpu_memory',
                 })
             raise CoreDataError("rag_model_error", message)
+        self.peak_memory_bytes = max(self.peak_memory_bytes, response.get('peak_memory_bytes', 0))
         return response["result"]
+
+    def invalidate(self):
+        """Synchronous registry mutations can revoke a worker from any thread."""
+        self._closed = True
+        if self._job is not None:
+            self._job.close()
+        process = self.process
+        if process is not None and process.returncode is None and self._loop and not self._loop.is_closed():
+            def stop():
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+            self._loop.call_soon_threadsafe(stop)
 
     async def _stop(self):
         process, self.process = self.process, None

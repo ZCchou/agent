@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 23
-CORE_VERSION = "0.16.0-preview.2"
-BUILD_ID = "schema30-agent-unified-v1"
+PROTOCOL_VERSION = 24
+CORE_VERSION = "0.16.0-preview.3"
+BUILD_ID = "schema31-agent-unified-v1"
 _LOGGER = logging.getLogger("agent.core")
 
 
@@ -386,6 +386,7 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
 
 
 ASYNC_MESSAGE_TYPES = {
+    "intent.request",
     "rag.request",
     "local_model.request",
     "document.artifact.get",
@@ -439,6 +440,8 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
     try:
         if message_type == "rag.request":
             result = await service.rag.handle(_required_string(params, "action"), params.get("params", {}))
+        elif message_type == 'intent.request':
+            result = await service.intent_sessions.handle(_required_string(params, 'action'), params.get('params', {}))
         elif message_type == "local_model.request":
             result = await service.handle_local_model(_required_string(params, "action"), params.get("params", {}))
         elif message_type == 'document.artifact.get':

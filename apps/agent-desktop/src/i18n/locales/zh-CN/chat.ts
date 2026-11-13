@@ -1,4 +1,5 @@
 const chat = {
+  intent: { title: "需要补充信息", timeoutTitle: "意图识别等待较久", timeoutDescription: "请查看当前尝试的进度，再选择后续操作。", resumeInput: "继续补充信息", review: "查看意图识别任务", freeText: "您的回答", close: "关闭", cancel: "取消请求", confirm: "确认并继续", extend: "继续等待", retry: "重试", technicalError: "技术详情", modelSettings: "模型设置", timing: "已用 {{elapsed}} 秒 · 第 {{attempts}}/3 次尝试 · 本次剩余 {{remaining}} 秒 · 总预算剩余 {{budget}} 秒" },
   ragMode: { button: '强制 RAG', required: '强制 RAG · 已开启', hint: '在当前对话持续使用项目资料，直到手动关闭。关闭后自动判断是否检索。', chooseProject: '选择项目并配置资料', projectRequired: 'rag_library_required 当前对话尚未关联项目，请选择项目并启用资料库，或关闭强制 RAG。输入和附件已保留。' },
   process: { title: "工作过程" },
   messages: { edit: "编辑消息", editQuestion: "编辑问题", cancelEdit: "取消编辑", saveEdit: "保存并重新生成",
@@ -192,7 +193,7 @@ const chat = {
     purposeLabel: '{{name}} 的用途',
     referencePurpose: '参考资料',
     templatePurpose: '待填写模板',
-    processing: { parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
+    processing: { templatePlanning: "正在规划模板 {{completed}}/{{total}}", templateFilling: "正在填充模板 {{completed}}/{{total}}", modelLoading: "正在加载文档模型 {{completed}}/{{total}}", reranking: "正在重排文档证据 {{completed}}/{{total}}", parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
     referenceSelection: "引用所选文本",
     reference: "引用此附件", referenceNamed: "引用 {{name}}",
     references: "本轮引用的附件", fromHistory: "来自当前会话",

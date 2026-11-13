@@ -274,3 +274,23 @@ def test_qwen_reranker_computes_only_the_last_position_logits(tmp_path, monkeypa
     scores = dispatch({'action': 'rerank', 'params': params}, cache)
     assert calls == [1]
     assert len(scores) == 2 and all(0 <= score <= 1 for score in scores)
+
+
+@pytest.mark.parametrize('profile', ['bge-reranker-v2-m3', 'qwen3-reranker-0.6b'])
+def test_reranker_actual_tokenizer_enforces_budget_without_modifying_sources(tmp_path, monkeypatch, profile):
+    path = tmp_path / 'native'
+    tokenizer, model = native_model(path, profile)
+    original_forward = model.forward
+    lengths = []
+    def bounded_forward(*args, **kwargs):
+        lengths.append(kwargs['input_ids'].shape[1])
+        return original_forward(*args, **kwargs)
+    monkeypatch.setattr(model, 'forward', bounded_forward)
+    source = 'document relevant ' * 150
+    params = {'path': str(path), 'profile': profile, 'backend': 'transformers', 'device': 'cpu',
+              'query': 'query', 'texts': [source], 'token_budget': 96}
+    cache = {'key': (str(path), profile, 'transformers', 'cpu', None), 'loaded': (tokenizer, model, None)}
+    scores = dispatch({'action': 'rerank', 'params': params}, cache)
+    assert len(scores) == 1
+    assert lengths == [96]
+    assert params['texts'] == [source]

@@ -10,11 +10,12 @@ import re
 from pathlib import Path
 import uuid
 import zipfile
-from copy import deepcopy
 
 from docx import Document
 from agent.storage import CoreDataError, _utc_now
 from agent.rag.support import review_issues
+from agent.document_plan import (checkpoint_identity, document_structure, fill_planned,
+                                 inherit_plan, load_checkpoint, replace_target_text)
 
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 MAX_EXPANDED_BYTES = 200 * 1024 * 1024
@@ -124,6 +125,14 @@ class DocumentWorkflow:
             raise CoreDataError('document_template_invalid', '首期回填支持 20 MiB 以内的 DOCX 模板。')
         load_docx(payload)
         document = load_docx(payload)
+        with self.repository._connect() as connection:
+            existing = connection.execute("SELECT id FROM document_artifacts WHERE run_id=? AND kind='template' AND sha256=? ORDER BY created_at",
+                                          (run_id, digest(payload))).fetchall()
+        for item in existing:
+            artifact = self.get(run_id, item['id'])
+            if artifact['manifest'].get('name') == name:
+                self.path_for(run_id, artifact['id'])
+                return {**artifact, 'template_id': artifact['id']}
         standards = sorted(set(re.findall(r'DO[-－ ]?160[FG]', '\n'.join(target.text for _, target, _ in targets(document)), re.I)))
         result = self._save(run_id, payload, 'template', {'name': name, 'referenced_standards': standards})
         return {**result, 'template_id': result['id']}
@@ -133,8 +142,9 @@ class DocumentWorkflow:
         if template['kind'] not in {'template', 'docx'}:
             raise CoreDataError('document_template_invalid', '请选择已读取的模板。')
         document = load_docx(self.path_for(run_id, template_id).read_bytes())
-        fields = [{'id': key, 'kind': kind, 'text': target.text[:4000]}
-                  for key, target, kind in targets(document)]
+        structure, _ = document_structure(document, targets)
+        fields = [{**field, 'text': field['text'][:4000], 'original_content': field['original_content'][:4000]}
+                  for field in structure]
         result = {'template_id': template_id, 'sha256': template['sha256'], 'total': len(fields),
                 'trust': 'external_untrusted', 'instruction_policy': '模板文字用于分析与回填，工具和文件权限由当前运行授权决定。',
                 'fields': fields[offset:offset+limit], 'next_offset': offset+limit if offset+limit < len(fields) else None}
@@ -146,34 +156,71 @@ class DocumentWorkflow:
                 raise CoreDataError('document_context_too_small', '当前上下文不足以读取模板位置，请减少输入或缩小读取范围。')
         return result
 
-    def select_section(self, run_id, template_id, request):
+    def inspect_structure(self, run_id, template_id, offset=0, limit=100):
+        template = self.get(run_id, template_id)
+        if template['kind'] not in {'template', 'docx'}:
+            raise CoreDataError('document_template_invalid', '请选择 DOCX 模板。')
+        document = load_docx(self.path_for(run_id, template_id).read_bytes())
+        fields, sections = document_structure(document, targets)
+        end = len(fields) if limit is None else offset + limit
+        return {'template_id': template_id, 'sha256': template['sha256'], 'fields': fields[offset:end],
+                'total': len(fields), 'next_offset': end if end < len(fields) else None,
+                'sections': sections, 'trust': 'external_untrusted'}
+
+    def read_plan(self, run_id, template_id, request, *, scope='full', section_id=None, revision='1'):
+        template = self.get(run_id, template_id)
+        self.path_for(run_id, template_id)
+        key, identity = checkpoint_identity(run_id, template, request, scope, section_id, revision)
+        return load_checkpoint(self.root / (key + '.plan.json'), identity)
+
+    async def fill_planned(self, run_id, template_id, request, generate, evidence_resolver=None,
+                           progress=None, **options):
+        return await fill_planned(self, run_id, template_id, request, generate, evidence_resolver,
+                                  progress, **options)
+
+    def inherit_plan(self, run_id, template_id, request, parent_run_id, parent_template_id, **options):
+        return inherit_plan(self, run_id, template_id, request, parent_run_id, parent_template_id, **options)
+
+    def select_section(self, run_id, template_id, request, *, section_identity=False):
         """Resolve an explicitly named, unique section for application-owned filling."""
         document = load_docx(self.path_for(run_id, template_id).read_bytes())
+        structured, _ = document_structure(document, targets)
+        positions = {field['id']: field for field in structured}
+        def normalized_title(text):
+            return re.sub(r'^\s*\d+(?:[.．]\d+)*[.、．]?\s*', '', text).strip()
         candidates = []
         for index, paragraph in enumerate(document.paragraphs[:-1]):
-            title = paragraph.text.strip()
+            title = normalized_title(paragraph.text)
             if not 2 <= len(title) <= 30 or title not in request:
                 continue
-            context = [item.text.strip() for item in document.paragraphs[max(0, index-8):index+1]]
+            field = positions['p-' + str(index)]
+            context = (field['chapter_path'] + [title] if field['chapter_path'] else
+                       [item.text.strip() for item in document.paragraphs[max(0, index-8):index+1]])
+            context = [normalized_title(text) for text in context]
             matched = {text for text in context if 2 <= len(text) <= 30 and text in request}
             score = sum(len(text) for text in matched)
-            candidates.append((score, 'p-' + str(index+1)))
+            target_id = 'p-' + str(index+1)
+            scope_id = field['section_id'] if field['field_type'] == 'heading' else 'field:' + target_id
+            candidates.append((score, target_id, scope_id))
         table_fields = [(key, cell) for key, cell, kind in targets(document) if kind == 'table_cell']
         for position, (key, cell) in enumerate(table_fields[:-1]):
-            title = cell.text.strip()
+            title = normalized_title(cell.text)
             next_key, next_cell = table_fields[position+1]
             row = key.rsplit('-c', 1)[0]
             if not 2 <= len(title) <= 30 or title not in request or next_key.rsplit('-c', 1)[0] != row:
                 continue
             if next_cell.text.strip() and not re.fullmatch(r'待填写|待补充|[ _＿…\.]+', next_cell.text.strip()):
                 continue
-            context = [item.text.strip() for item in document.paragraphs] + [text.text.strip() for _, text in table_fields[:position+1]]
+            context = positions[key]['chapter_path'] + [title]
+            if not positions[key]['chapter_path']:
+                context = [item.text.strip() for item in document.paragraphs] + [text.text.strip() for _, text in table_fields[:position+1]]
+            context = [normalized_title(text) for text in context]
             matched = {text for text in context if 2 <= len(text) <= 30 and text in request}
-            candidates.append((sum(len(text) for text in matched), next_key))
+            candidates.append((sum(len(text) for text in matched), next_key, 'field:' + next_key))
         if not candidates:
             raise CoreDataError('document_target_ambiguous', '尚未确定模板填写位置，请明确章节和问题名称。')
-        best = max(score for score, _ in candidates)
-        selected = {index for score, index in candidates if score == best}
+        best = max(score for score, _, _ in candidates)
+        selected = {scope_id if section_identity else index for score, index, scope_id in candidates if score == best}
         if len(selected) != 1:
             raise CoreDataError('document_target_ambiguous', '模板包含多个匹配位置，请明确所属章节。')
         return selected.pop()
@@ -220,15 +267,7 @@ class DocumentWorkflow:
             if field_version_issues:
                 content += '\n版本复核\n' + '\n'.join(field_version_issues)
             target = available[key]
-            paragraph = target.paragraphs[0] if hasattr(target, 'paragraphs') else target
-            formatting = deepcopy(paragraph.runs[0]._r.rPr) if paragraph.runs and paragraph.runs[0]._r.rPr is not None else None
-            paragraph.clear()
-            run = paragraph.add_run(content)
-            if formatting is not None:
-                run._r.insert(0, formatting)
-            if hasattr(target, 'paragraphs'):
-                for extra in target.paragraphs[1:]:
-                    extra._p.getparent().remove(extra._p)
+            replace_target_text(target, content, field.get('span'))
             applied[key] = {'target_id': key, 'evidence': metadata, 'missing': gaps,
                 'version_issues': field_version_issues, 'review_issues': field_review_issues, 'review_status': 'pending'}
         output = io.BytesIO()

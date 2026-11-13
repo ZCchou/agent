@@ -8,6 +8,7 @@ ADMISSION_TYPES = frozenset({
 })
 
 MANAGEMENT_READ_ACTIONS = {
+    'intent.request': frozenset({'list', 'status', 'cancel'}),
     "local_model.request": frozenset({"model.list", "job.list", "runtime.status"}),
     "rag.request": frozenset({"library.list", "document.list", "document.preview", "job.list",
                               "model.list", "evidence.read"}),
@@ -29,6 +30,7 @@ def prepare(service, update_id: str) -> dict:
     state = service.repository.app_update_readiness()
     state["active_admissions"] = service.update_admissions
     state["active_tasks"] = sum(not task.done() for task in service.run_tasks.values())
+    state['active_intents'] = sum(not task.done() for task in service.intent_sessions.tasks.values())
     state["active_compactions"] = sum(not task.done() for task in service.compaction_tasks.values())
     if any(state.values()):
         return {"ready": False, **state}

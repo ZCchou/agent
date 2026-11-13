@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import threading
+import sys
 import uuid
 
 from agent.document_parser import ParserService
@@ -28,8 +29,9 @@ def _document_blocks(text):
             locator = json.loads(marker.group(1))
         except ValueError:
             continue
-        if not isinstance(locator, dict) or not isinstance(locator.get('block_id'), str):
+        if not isinstance(locator, dict):
             continue
+        locator.setdefault('block_id', f'block-{index + 1}')
         end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
         yield marker.end(), end, locator
 
@@ -85,6 +87,7 @@ class DocumentAttachments:
         self.owns_parser = parser is None
         self.ocr = ocr or OcrClient(self.repository.data_dir)
         self._lock = asyncio.Lock()
+        self._read_cache = {}
 
     def _original(self, attachment):
         root = self.core.database_path.parent.resolve()
@@ -104,6 +107,116 @@ class DocumentAttachments:
         except (OSError, ValueError, CoreDataError) as error:
             raise CoreDataError('attachment_changed', '文档附件原件不可用或完整性校验失败。') from error
         return self.repository.save_original(payload, Path(attachment['name']).suffix.lower())
+
+    def _read_identity(self):
+        identities = [getattr(component, 'cache_identity', None) for component in (self.parser, self.ocr)]
+        if all(value is not None for value in identities):
+            return json.dumps(identities, sort_keys=True)
+        if type(self.parser) is not ParserService or type(self.ocr) is not OcrClient:
+            return None
+        # Built-in code and full model manifests/files are verified on every read.
+        # Custom workers must expose their own complete cache identity.
+        from agent.ocr.store import OcrModelStore
+        default_command = [sys.executable, '--document-worker'] if getattr(sys, 'frozen', False) else [sys.executable, '-m', 'agent.document_parser.worker']
+        if self.parser.command != default_command:
+            return None
+        try:
+            available = self.ocr.available()
+            if self.ocr.command is not None:
+                return None
+            with Path(sys.executable).open('rb') as stream:
+                executable_identity = hashlib.file_digest(stream, 'sha256').hexdigest()
+            runtime_identity = None
+            if available['available']:
+                from agent.ocr.client import verify_runtime
+                runtime_root = Path(available['command'][0]).resolve().parent.parent
+                manifest_path = runtime_root / 'runtime.json'
+                manifest = manifest_path.read_bytes()
+                verify_runtime(runtime_root)
+                if manifest_path.read_bytes() != manifest:
+                    return None
+                runtime_identity = hashlib.sha256(manifest).hexdigest()
+            code = hashlib.sha256()
+            for folder in (() if getattr(sys, 'frozen', False) else ('document_parser', 'ocr')):
+                for path in sorted((Path(__file__).parent / folder).glob('*.py')):
+                    code.update(path.name.encode())
+                    code.update(path.read_bytes())
+            models = []
+            if available['available']:
+                store = OcrModelStore(self.repository.data_dir / 'ocr-models')
+                records = store.list_models()
+                models = [store.get_profile(item['id'])['digest'] for item in records['models'] if item.get('status') == 'ready']
+            return json.dumps({'code': code.hexdigest(), 'executable': executable_identity,
+                               'ocr_runtime': runtime_identity, 'parser_command': self.parser.command,
+                               'parser_limits': [self.parser.memory_limit, self.parser.timeout, self.parser.result_limit],
+                               'ocr': available, 'models': models, 'device': 'cpu', 'threads': 3}, sort_keys=True)
+        except (OSError, ValueError, KeyError, CoreDataError):
+            return None
+
+    def _read_artifact(self, artifact):
+        root = (self.core.database_path.parent / 'message-attachments').resolve()
+        try:
+            path = self.core.database_path.parent / artifact['storage_key']
+            plain_path(path)
+            path.resolve().relative_to(root)
+            content = path.read_bytes()
+            if len(content) != artifact['byte_size'] or hashlib.sha256(content).hexdigest() != artifact['sha256']:
+                raise ValueError('Artifact hash mismatch')
+            return content.decode('utf-8')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise CoreDataError('attachment_changed', '文档提取产物完整性校验失败。') from error
+
+    async def read(self, attachment, *, offset=0, limit=20, physical_page=None, section=None,
+                   max_characters=16000, progress=None):
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100 \
+                or (physical_page is not None and (type(physical_page) is not int or physical_page < 1)) \
+                or (section is not None and (not isinstance(section, str) or not section.strip() or len(section) > 1024)) \
+                or type(max_characters) is not int or max_characters < 256:
+            raise CoreDataError('invalid_tool_call', '文档读取范围或输出预算无效。')
+        await asyncio.to_thread(self._original, attachment)
+        identity = await asyncio.to_thread(self._read_identity)
+        key = (attachment['sha256'], identity)
+        artifact = self._read_cache.get(key) if identity is not None else None
+        if artifact is None:
+            extracted = await self.extract(attachment, progress=progress)
+            artifact = next(item for item in extracted['artifacts'] if item['kind'] == 'text.utf8')
+            if identity is not None:
+                self._read_cache[key] = dict(artifact)
+        text = await asyncio.to_thread(self._read_artifact, artifact)
+        # Only the generated preamble contains extraction metadata. Literal
+        # WARNING lines inside SOURCE bodies remain ordinary pageable text.
+        preamble = re.split(r'^\[SOURCE ', text, maxsplit=1, flags=re.MULTILINE)[0]
+        warnings = [line[9:] for line in preamble.splitlines() if line.startswith('WARNING: ')]
+        result = {'attachment_id': attachment.get('id'), 'source_sha256': attachment['sha256'],
+                  'trust': 'untrusted', 'text_artifact': dict(artifact), 'blocks': [], 'next_offset': None, 'total': 0, 'warnings': warnings}
+        encode = lambda value: json.dumps(value, ensure_ascii=False)
+        # Keep offsets stable for identical filters and budget, including long blocks.
+        blocks = []
+        for begin, end, locator in _document_blocks(text):
+            if physical_page is not None and locator.get('physical_page', locator.get('page')) != physical_page:
+                continue
+            heading = locator.get('heading_path', locator.get('section', []))
+            heading = ' / '.join(str(item) for item in heading) if isinstance(heading, list) else str(heading)
+            if section is not None and section.casefold() not in heading.casefold():
+                continue
+            body = text[begin:end]
+            overhead = len(encode(result)) + len(encode({'text': '', 'locator': locator, 'character_offset': len(body)})) + 100
+            capacity = (max_characters - overhead) // 6
+            if capacity < 1:
+                raise CoreDataError('document_read_budget_exceeded', '文档定位或警告超过读取预算。')
+            for start in range(0, len(body), capacity):
+                blocks.append({'text': body[start:start + capacity], 'locator': dict(locator), 'character_offset': start})
+        result['total'] = len(blocks)
+        for block in blocks[offset:offset + limit]:
+            candidate = {**result, 'blocks': result['blocks'] + [block], 'next_offset': offset + len(result['blocks']) + 1}
+            if len(encode(candidate)) > max_characters:
+                break
+            result = candidate
+        if offset + len(result['blocks']) >= len(blocks):
+            result['next_offset'] = None
+        if len(encode(result)) > max_characters or (offset < len(blocks) and not result['blocks']):
+            raise CoreDataError('document_read_budget_exceeded', '文档读取结果超过输出预算。')
+        return result
 
     async def _pdf(self, original, progress):
         if not self.ocr.available()['available']:

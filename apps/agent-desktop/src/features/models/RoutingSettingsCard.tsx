@@ -1,3 +1,4 @@
+import { RoutingDurationSettings } from "./RoutingDurationSettings";
 import { Route } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -46,6 +47,7 @@ export function RoutingSettingsCard({ value, onChange }: {
       <div><h2>{t("models.routing.title")}</h2><p>{t("models.routing.description")}</p></div>
     </div>
     <div className="models-routing-card__controls">
+      <RoutingDurationSettings value={value} onChange={onChange} />
       <label><span>{t("models.routing.preset")}</span><select value={value.default_preset}
         onChange={(event) => void onChange({ default_preset: event.target.value as RoutingPreferences["default_preset"] })}>
         <option value="balanced">{t("models.routing.balanced")}</option>

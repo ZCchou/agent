@@ -237,6 +237,10 @@ pub struct AttachmentReference {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRunStartRequest {
+    #[serde(default, skip_serializing)]
+    pub intent_async: bool,
+    #[serde(default, skip_serializing)]
+    pub intent_scope: Option<String>,
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_message_id: Option<String>,
@@ -677,6 +681,40 @@ pub async fn start_model_run(
     });
     let staged_ids = request.attachment_staging_ids.clone();
     let rejected_ids = request.attachment_rejection_staging_ids.clone();
+    if request.intent_async {
+        let scope = request
+            .intent_scope
+            .clone()
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .ok_or("intent_scope_invalid")?;
+        let mut normalized = json!(request);
+        normalized["attachment_staging_ids"] = json!(staged_ids);
+        normalized["attachment_rejection_staging_ids"] = json!(rejected_ids);
+        let authorization_key = format!(
+            "request:{}",
+            normalized["idempotency_key"]
+                .as_str()
+                .ok_or("intent_request_invalid")?
+        );
+        attachment_store
+            .lock()
+            .map_err(|_| "attachment_store_unavailable")?
+            .authorize_intent(&authorization_key, normalized.clone())?;
+        let result = request_core(
+            &app,
+            &manager,
+            "intent.request",
+            json!({"action": "start", "params": {"scope": scope, "request": normalized}}),
+        )
+        .await?;
+        let id = result["task"]["id"].as_str().ok_or("intent_task_invalid")?;
+        let mut store = attachment_store
+            .lock()
+            .map_err(|_| "attachment_store_unavailable")?;
+        store.authorize_intent(id, normalized)?;
+        store.reconcile_intent(&result["task"])?;
+        return Ok(result);
+    }
     let result = request_core(&app, &manager, "model.run.start", json!(request)).await?;
     if result.get("status").and_then(Value::as_str) == Some("preflight_rejected") {
         return Ok(result);
@@ -686,6 +724,53 @@ pub async fn start_model_run(
         .map_err(|_| "attachment_store_unavailable: Attachment storage is busy.".to_string())?;
     store.mark_committed(&staged_ids);
     store.mark_rejections_committed(&rejected_ids);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn intent_request(
+    app: AppHandle,
+    manager: State<'_, Mutex<CoreProcessManager>>,
+    attachment_store: State<'_, Mutex<AttachmentStore>>,
+    action: String,
+    params: Value,
+) -> Result<Value, String> {
+    if !matches!(
+        action.as_str(),
+        "list" | "status" | "respond" | "retry" | "extend" | "cancel"
+    ) {
+        return Err("intent_action_invalid".into());
+    }
+    if !matches!(action.as_str(), "list" | "status") {
+        let current = request_core(
+            &app,
+            &manager,
+            "intent.request",
+            json!({"action": "status", "params": {"task_id": params["task_id"]}}),
+        )
+        .await?;
+        attachment_store
+            .lock()
+            .map_err(|_| "attachment_store_unavailable")?
+            .reconcile_intent(&current["task"])?;
+    }
+    let result = request_core(
+        &app,
+        &manager,
+        "intent.request",
+        json!({"action": action, "params": params}),
+    )
+    .await?;
+    let mut store = attachment_store
+        .lock()
+        .map_err(|_| "attachment_store_unavailable")?;
+    if let Some(tasks) = result["tasks"].as_array() {
+        for task in tasks {
+            store.reconcile_intent(task)?;
+        }
+    } else {
+        store.reconcile_intent(&result["task"])?;
+    }
     Ok(result)
 }
 
@@ -1354,10 +1439,10 @@ mod routing_serialization_tests {
             contract["ipc_version"],
             crate::core_bridge::PROTOCOL_VERSION
         );
-        assert_eq!(contract["settings_schema_version"], 18);
-        assert_eq!(contract["core_schema_version"], 30);
+        assert_eq!(contract["settings_schema_version"], 19);
+        assert_eq!(contract["core_schema_version"], 31);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema30-agent-unified-v1");
+        assert_eq!(contract["build_id"], "schema31-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

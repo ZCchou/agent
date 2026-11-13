@@ -27,6 +27,25 @@ def test_volume_plan_stays_below_asset_limit_and_rejects_oversized_file():
         release.plan_volumes([{'name': 'oversized', 'bytes': 91}], limit=90)
 
 
+def test_native_manifest_maps_every_file_to_verified_volume(tmp_path):
+    release = module()
+    archive = tmp_path / 'old-name.part01.zip'
+    with zipfile.ZipFile(archive, 'w') as stream:
+        stream.writestr('rag-runtime/a', b'a')
+    runtime = {'schema_version': 1, 'release_id': 'agent-test', 'files': {
+        'rag-runtime/a': {'bytes': 1, 'sha256': hashlib.sha256(b'a').hexdigest()}}}
+    application = {'agent-core.exe': {'bytes': 3, 'sha256': hashlib.sha256(b'app').hexdigest()}}
+    parts = [{'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': release.sha256(archive)}]
+    manifest = release.native_manifest(tmp_path, runtime, parts, application)
+    assert manifest['files']['rag-runtime/a']['volume'] == 'old-name.part01.zip'
+    assert manifest['files']['agent-core.exe']['volume'] == 'embedded'
+    assert manifest['application_id'] == 'io.github.zcchou.agent.airworthiness'
+    assert manifest['archives'] == parts
+    runtime['files']['rag-runtime/missing'] = runtime['files']['rag-runtime/a']
+    with pytest.raises(ValueError, match='missing'):
+        release.native_manifest(tmp_path, runtime, parts, application)
+
+
 def test_public_selection_excludes_local_qa_and_user_data():
     release = module()
     names = ['agent-desktop.exe', 'agent-core.exe', 'agent_desktop_lib.dll',
@@ -43,25 +62,30 @@ def test_unified_delivery_preserves_office_and_separates_application_identity(tm
     names = (*release.APPLICATION, 'agent-updater.exe', 'application.json')
     for name in names:
         (source / name).write_bytes(b'fixture')
+    (source / 'agent-installer.exe').write_bytes(b'fixture')
+    (output / '安装与使用说明.md').write_text('fixture', encoding='utf-8')
     (source / 'delivery-manifest.json').write_text(json.dumps({
         'application_id': 'io.github.zcchou.agent.airworthiness', 'files': {
             name: {'bytes': 7, 'sha256': hashlib.sha256(b'fixture').hexdigest()} for name in names}}))
     payload, parts = tmp_path / 'payload.json', tmp_path / 'parts.json'
-    payload.write_text('{}')
-    parts.write_text('{}')
+    payload.write_text(json.dumps({'schema_version': 1, 'release_id': 'agent-test', 'files': {}}))
+    parts.write_text(json.dumps({'archives': []}))
     monkeypatch.setattr(release.subprocess, 'run', lambda *args, **kwargs: None)
     assert release.is_public_file('office-runtime/libreoffice/program/soffice.exe', unified=True)
     assert not release.is_public_file('model.gguf', unified=True)
     result = release.write_installer(source, output, payload, parts, tmp_path / 'compiler',
                                      version='0.16.0-preview.1', unified=True)
     script = (output / 'build/setup.nsi').read_text(encoding='utf-8-sig')
-    hook = (output / 'build/hooks.nsh').read_text(encoding='utf-8-sig')
     assert result.name == 'agent-0.16.0-preview.1-windows-x64-setup.exe'
     assert 'agent-updater.exe' in script and 'application.json' in script
     assert 'agentAirworthiness' in script
     assert 'agentOCRPreview' not in script
-    assert '-Airworthiness' in hook and '-Airworthiness' in script
-    assert 'io.github.zcchou.agent.airworthiness.offline-installer-v1' in hook
+    assert '--postflight' in script and '--uninstaller' in script
+    assert 'io.github.zcchou.agent.airworthiness.offline-installer-v1' in script
+    assert 'native-manifest.json' in script
+    assert '--progress-hwnd $NativeProgress --status-hwnd $NativeStatus' in script
+    assert 'MUI_PAGE_CUSTOMFUNCTION_SHOW SetupProgressUi' in script
+    assert 'MUI_PAGE_CUSTOMFUNCTION_SHOW un.SetupProgressUi' in script
 
 
 def test_changed_tested_application_is_rejected(tmp_path):
@@ -163,6 +187,29 @@ def test_archive_reuse_checks_payload_and_archive_identities(tmp_path):
     archive.write_bytes(b'changed archive')
     with pytest.raises(ValueError, match='mismatch'):
         release.reuse_archives(old, tmp_path / 'other', payload, '0.15.0-ocr-preview.3')
+
+
+def test_unified_partial_volume_reuse_keeps_only_exact_unchanged_archives(tmp_path):
+    release = module()
+    old, output = tmp_path / 'old', tmp_path / 'new'
+    (old / 'build').mkdir(parents=True)
+    output.mkdir()
+    files, archives = {}, []
+    for index, (name, data) in enumerate({'rag-runtime/worker': b'old', 'ocr-runtime/model': b'model'}.items()):
+        archive = old / f'old.part{index}.zip'
+        with zipfile.ZipFile(archive, 'w') as package:
+            package.writestr(name, data)
+        files[name] = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        archives.append({'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': release.sha256(archive)})
+    (old / 'build/payload-manifest.json').write_text(json.dumps({'files': files}))
+    (old / 'build/parts.json').write_text(json.dumps({'archives': archives}))
+    records = [{'name': 'rag-runtime/worker', 'bytes': 3, 'sha256': hashlib.sha256(b'new').hexdigest()},
+               {'name': 'ocr-runtime/model', **files['ocr-runtime/model']}]
+    reused, pending = release.reuse_runtime_volumes(old, output, records, '0.16.0-preview.3')
+    assert len(reused) == 1
+    assert reused[0]['sha256'] == archives[1]['sha256']
+    assert (output / reused[0]['name']).read_bytes() == (old / archives[1]['name']).read_bytes()
+    assert [record['name'] for record in pending] == ['rag-runtime/worker']
 
 
 @pytest.mark.parametrize('fault', ['', 'long', 'missing', 'corrupt', 'escape', 'oversized'])
