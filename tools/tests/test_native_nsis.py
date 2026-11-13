@@ -32,7 +32,8 @@ def wait_native(path, arguments):
     assert result.returncode == 0, (result.stdout + result.stderr).decode(errors='replace')
 
 
-def test_real_generated_nsis_fresh_differential_upgrade_and_uninstall(tmp_path):
+@pytest.mark.parametrize('native_finished', [False, True])
+def test_real_generated_nsis_fresh_differential_upgrade_and_uninstall(tmp_path, native_finished):
     import winreg
     for key in [r'Software\agentAirworthiness', r'Software\Microsoft\Windows\CurrentVersion\Uninstall\agentAirworthiness']:
         try:
@@ -98,6 +99,13 @@ def test_real_generated_nsis_fresh_differential_upgrade_and_uninstall(tmp_path):
         assert unchanged.stat().st_ino == inode
         assert (install / 'rag-runtime/changed').read_bytes() == b'new'
         assert not (install / '.managed-runtime/native-transaction').exists()
+        if native_finished:
+            result = subprocess.run([str(HELPER), '--action', 'uninstall', '--root', str(install)],
+                capture_output=True, timeout=60)
+            assert result.returncode == 0, (result.stdout + result.stderr).decode(errors='replace')
+            assert not (install / '.managed-runtime').exists()
+            assert (install / '.airworthiness-uninstall.json').is_file()
+            assert (install / 'uninstall.exe').is_file()
         wait_native(install / 'uninstall.exe', ['/S'])
         deadline = time.monotonic() + 15
         while install.exists() and time.monotonic() < deadline:

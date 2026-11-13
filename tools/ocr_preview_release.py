@@ -189,12 +189,19 @@ Section Uninstall
     SetErrorLevel 1
     Abort
   ${{EndIf}}
-  Delete "$INSTDIR\\uninstall.exe"
   Delete "$DESKTOP\\agent Airworthiness.lnk"
   Delete "$SMPROGRAMS\\agent Airworthiness\\agent Airworthiness.lnk"
   RMDir "$SMPROGRAMS\\agent Airworthiness"
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\agentAirworthiness"
   DeleteRegKey HKCU "Software\\agentAirworthiness"
+  ClearErrors
+  Delete "$INSTDIR\\uninstall.exe"
+  ${{If}} ${{Errors}}
+    MessageBox MB_OK|MB_ICONSTOP "The uninstall retry executable is still in use. Close it and retry; owned recovery state was retained." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${{EndIf}}
+  Delete "$INSTDIR\\.airworthiness-uninstall.json"
   RMDir "$INSTDIR"
 SectionEnd
 '''

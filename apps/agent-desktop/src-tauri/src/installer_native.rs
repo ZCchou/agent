@@ -16,6 +16,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const APP: &str = "io.github.zcchou.agent.airworthiness";
 const OWNER: &str = "io.github.zcchou.agent.airworthiness.offline-runtime.v1";
+const UNINSTALL_STATE: &str = ".airworthiness-uninstall.json";
 const APP_FILES: &[&str] = &[
     "agent-desktop.exe",
     "agent-core.exe",
@@ -70,6 +71,29 @@ struct CleanupInventory {
     id: String,
     files: BTreeMap<String, Identity>,
     directories: BTreeSet<String>,
+}
+#[derive(Serialize, Deserialize)]
+struct UninstallState {
+    application_id: String,
+    id: String,
+    root: String,
+    inventory: Manifest,
+}
+fn uninstall_state(root: &Path) -> Result<Option<UninstallState>> {
+    let path = safe(root, UNINSTALL_STATE)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let state: UninstallState = read_json(&path)?;
+    if state.application_id != APP
+        || state.id.len() != 32
+        || !state.id.bytes().all(|c| c.is_ascii_hexdigit())
+        || !root.to_string_lossy().eq_ignore_ascii_case(&state.root)
+    {
+        return Err("uninstall recovery ownership differs from installation".into());
+    }
+    validate(&state.inventory)?;
+    Ok(Some(state))
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -1099,12 +1123,24 @@ pub fn main_entry() -> Result<()> {
     assert_idle(&root)?;
     let progress = Progress::new();
     progress.phase("preflight/difference", 0, 0, 0);
+    let action = get("--action")?;
+    // This root-bound full inventory survives removal of managed metadata and the
+    // native/NSIS handoff. An absent inventory alone never authorizes an uninstall.
+    let uninstall = uninstall_state(&root)?;
     let managed = safe(&root, ".managed-runtime")?;
     if managed.exists() {
-        if fs::read_to_string(safe(&managed, "owner.txt")?)?.trim() != OWNER {
+        let owner = safe(&managed, "owner.txt")?;
+        if !owner.exists() && uninstall.is_some() {
+            // Resume a crash between owner removal and removal of its empty directory.
+            write_new(&owner, OWNER.as_bytes())?;
+        }
+        if fs::read_to_string(owner)?.trim() != OWNER {
             return Err("wrong managed ownership".into());
         }
     } else {
+        if action == "uninstall" && uninstall.is_none() {
+            return Err("no owned inventory to uninstall".into());
+        }
         fs::create_dir_all(&root)?;
         // Publish ownership metadata atomically. A crash before this rename leaves
         // only an unreferenced tiny staging directory, never an unowned active root.
@@ -1124,14 +1160,31 @@ pub fn main_entry() -> Result<()> {
                 .into(),
         );
     }
-    let action = get("--action")?;
     if action == "recover" {
         return Ok(());
     }
-    let previous = previous(&root, &managed)?;
+    let previous = previous(&root, &managed)?
+        .or_else(|| uninstall.as_ref().map(|state| state.inventory.clone()));
     if action == "uninstall" {
         let old = previous.ok_or("no owned inventory to uninstall")?;
-        progress.phase("cleanup", old.files.len(), 0, 1);
+        write_json(
+            &root.join(UNINSTALL_STATE),
+            &UninstallState {
+                application_id: APP.into(),
+                id: uninstall
+                    .as_ref()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
+                root: root.to_string_lossy().into_owned(),
+                inventory: old.clone(),
+            },
+        )?;
+        let uninstall_count = old
+            .files
+            .keys()
+            .filter(|name| name.as_str() != "uninstall.exe")
+            .count();
+        progress.phase("cleanup", uninstall_count, 0, 1);
         for name in old.files.keys() {
             // NSIS removes its installed retry entry point only after native cleanup
             // succeeds. A late metadata error or interruption must leave it runnable.
@@ -1160,6 +1213,10 @@ pub fn main_entry() -> Result<()> {
                 fs::remove_file(p)?;
             }
         }
+        fault(
+            args.get("--fault").map(String::as_str).unwrap_or(""),
+            "uninstall-after-inventory",
+        );
         drop(_guard);
         fs::remove_file(managed.join("install.lock"))?;
         let prior_lock = safe(&managed, "native.lock")?;
@@ -1169,9 +1226,17 @@ pub fn main_entry() -> Result<()> {
         // Unknown or modified legacy backup data remains available for inspection.
         if fs::read_dir(&managed)?.count() == 1 {
             fs::remove_file(managed.join("owner.txt"))?;
+            fault(
+                args.get("--fault").map(String::as_str).unwrap_or(""),
+                "uninstall-after-owner",
+            );
             fs::remove_dir(&managed)?;
         }
-        progress.phase("completed", old.files.len(), 0, 100);
+        fault(
+            args.get("--fault").map(String::as_str).unwrap_or(""),
+            "uninstall-before-nsis-tail",
+        );
+        progress.phase("completed", uninstall_count, 0, 100);
         return Ok(());
     }
     if action != "install" {
@@ -1405,6 +1470,10 @@ pub fn main_entry() -> Result<()> {
     }
     finish_cleanup(&managed, &progress, fault_name)?;
     cleanup_legacy(&managed, &progress)?;
+    // A successful reinstall supersedes an interrupted uninstall's inventory.
+    if uninstall.is_some() {
+        fs::remove_file(root.join(UNINSTALL_STATE))?;
+    }
     for name in &deleted {
         remove_empty_parents(&root.join(name), &root);
     }

@@ -372,3 +372,70 @@ def test_late_uninstall_failure_keeps_retry_executable(tmp_path):
         'release_id': 'agent-0.16.0-preview.2', 'files': {}}))
     ok(run(root, action='uninstall'))
     assert (root / 'uninstall.exe').read_bytes() == b'retry', 'NSIS owns final uninstaller deletion'
+
+
+def test_owner_sharing_failure_after_inventory_removal_is_retryable(tmp_path):
+    import ctypes
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'agent-core.exe': b'core', 'uninstall.exe': b'retry'})
+    ok(run(root, manifest))
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    handle = kernel.CreateFileW(str(root / '.managed-runtime/owner.txt'), 0x80000000, 3, None, 3, 0, None)
+    assert handle != ctypes.c_void_p(-1).value
+    try:
+        result = run(root, action='uninstall')
+        assert result.returncode != 0
+        assert not (root / '.managed-runtime/native-active.json').exists()
+        assert (root / 'uninstall.exe').read_bytes() == b'retry'
+    finally:
+        kernel.CloseHandle(ctypes.c_void_p(handle))
+    ok(run(root, action='uninstall'))
+    assert not (root / '.managed-runtime').exists()
+    assert (root / 'uninstall.exe').read_bytes() == b'retry'
+
+
+def test_successful_native_uninstall_can_retry_until_nsis_tail_finishes(tmp_path):
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'agent-core.exe': b'core', 'uninstall.exe': b'retry'})
+    ok(run(root, manifest))
+    ok(run(root, action='uninstall'))
+    assert not (root / '.managed-runtime').exists()
+    ok(run(root, action='uninstall'))
+    assert (root / 'uninstall.exe').read_bytes() == b'retry'
+    # A retry record must not authorize unrelated roots just because files are absent.
+    unrelated = tmp_path / 'unrelated'
+    unrelated.mkdir()
+    assert run(unrelated, action='uninstall').returncode != 0
+    (unrelated / '.airworthiness-uninstall.json').write_bytes((root / '.airworthiness-uninstall.json').read_bytes())
+    (unrelated / 'agent-core.exe').write_bytes(b'personal')
+    result = run(unrelated, action='uninstall')
+    assert result.returncode != 0 and 'ownership differs' in result.stderr
+    assert (unrelated / 'agent-core.exe').read_bytes() == b'personal'
+
+
+@pytest.mark.parametrize('fault', ['uninstall-after-inventory', 'uninstall-after-owner', 'uninstall-before-nsis-tail'])
+def test_uninstall_interruption_retains_durable_retry_inventory(tmp_path, fault):
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'agent-core.exe': b'core', 'uninstall.exe': b'retry'})
+    ok(run(root, manifest))
+    (root / 'personal.txt').write_bytes(b'personal')
+    result = run(root, action='uninstall', extra=['--fault', fault])
+    assert result.returncode == 97
+    assert (root / 'uninstall.exe').read_bytes() == b'retry'
+    ok(run(root, action='uninstall'))
+    assert not (root / '.managed-runtime').exists()
+    assert (root / 'personal.txt').read_bytes() == b'personal'
+
+
+def test_reinstall_supersedes_interrupted_uninstall_inventory(tmp_path):
+    root = tmp_path / 'installed'
+    old = package(tmp_path, {'agent-core.exe': b'old', 'uninstall.exe': b'retry'}, 'old')
+    ok(run(root, old))
+    ok(run(root, action='uninstall'))
+    new = package(tmp_path, {'agent-core.exe': b'new', 'uninstall.exe': b'retry'})
+    ok(run(root, new))
+    assert not (root / '.airworthiness-uninstall.json').exists()
+    assert (root / 'agent-core.exe').read_bytes() == b'new'
