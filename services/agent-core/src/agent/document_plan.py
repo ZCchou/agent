@@ -296,7 +296,8 @@ def validate_source_locators(text, metadata):
     actual_clauses, actual_pages, actual_standards = set(), set(), set()
     canonical = lambda value: re.sub(r'[-‐‑‒–—－ /]', '', value).upper()
     for source in metadata:
-        locator = source.get('locator') or {}
+        locator = source.get('locator')
+        locator = locator if isinstance(locator, dict) else {}
         actual_clauses.add(str(source.get('clause_number') or locator.get('clause_number') or ''))
         actual_pages.update(str(value) for value in [source.get('physical_page'), locator.get('physical_page'), locator.get('page')]
                             if value is not None)

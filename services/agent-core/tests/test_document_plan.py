@@ -407,3 +407,27 @@ def test_matching_source_locators_and_revision_are_admitted(tmp_path):
         return text, [{'id': 'e1', 'clause_number': '8.2', 'title': 'DO-160', 'revision': 'G', 'locator': {'page': 3}}]
     artifact = asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
     assert 'DO-160G Section 8.2 page 3' in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
+
+
+@pytest.mark.parametrize('text', ['Ordinary cited content', 'See page 1'])
+def test_grounding_string_locator_metadata_preserves_prose_and_controls_page_claims(tmp_path, text):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'}]}
+        return {'fields': [{'target_id': 'p-2', 'text': text,
+                            'evidence': [{'id': 'e1', 'quote_id': 'q1'}]}]}
+    def evidence(content, citations):
+        # RagGrounding.document_claim forwards supported string locators unchanged.
+        return content, [{'id': 'e1', 'title': 'Rules', 'revision': 'A', 'clause_number': '25.1',
+                          'locator': 'page 1', 'version_id': 'v1', 'original_hash': '0' * 64,
+                          'quote': 'Ordinary cited content', 'support': {'status': 'supported'},
+                          'version_issues': []}]
+    if text == 'See page 1':
+        with pytest.raises(CoreDataError) as raised:
+            asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
+        assert raised.value.code == 'rag_citation_invalid'
+    else:
+        artifact = asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
+        assert 'Ordinary cited content' in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
