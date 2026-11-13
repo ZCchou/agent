@@ -6,7 +6,7 @@ from test_tool_continuation_retry import fixture, install_http
 
 
 async def rpc(service, kind, **params):
-    return await handle_async_message({"v": 23, "id": kind, "type": kind, "params": params}, service)
+    return await handle_async_message({"v": 24, "id": kind, "type": kind, "params": params}, service)
 
 
 def test_idle_prepare_blocks_new_work_until_matching_abort(tmp_path, monkeypatch):
@@ -92,4 +92,23 @@ def test_background_compaction_also_delays_installation(tmp_path):
         release.set()
         await task
         assert (await rpc(service, "app.update.prepare", update_id="compacting"))["result"]["ready"] is True
+    asyncio.run(scenario())
+
+
+def test_persistent_intent_activity_blocks_update_and_prepared_update_blocks_retry(tmp_path):
+    async def scenario():
+        repo, _, _, service = await fixture(tmp_path, lambda _event: asyncio.sleep(0))
+        async def delayed_start(params):
+            await asyncio.Future()
+        service.intent_sessions.start = delayed_start
+        state = (await service.intent_sessions.handle('start', {'request': {'content': 'Read', 'idempotency_key': 'intent-update'}}))['task']
+        await asyncio.sleep(0)
+        response = await rpc(service, 'app.update.prepare', update_id='intent')
+        assert response['result']['ready'] is False
+        assert response['result']['active_intents'] == 1
+        await service.intent_sessions.handle('cancel', {'task_id': state['id'], 'revision': 1})
+        assert (await rpc(service, 'app.update.prepare', update_id='intent'))['result']['ready'] is True
+        blocked = await rpc(service, 'intent.request', action='start', params={'request': {'content': 'Read', 'idempotency_key': 'intent-blocked'}})
+        assert blocked['error']['code'] == 'app_update_installing'
+        await service.shutdown()
     asyncio.run(scenario())
