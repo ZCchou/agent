@@ -325,3 +325,109 @@ def test_document_retry_reauthorizes_actual_project_evidence_into_child_run(tmp_
         finally:
             await rag.close()
     asyncio.run(scenario())
+
+
+def schema_accepts(value, schema):
+    """Validate the JSON Schema keywords emitted by the captured application contract."""
+    if 'anyOf' in schema:
+        return any(schema_accepts(value, alternative) for alternative in schema['anyOf'])
+    types = schema.get('type', [])
+    types = [types] if isinstance(types, str) else types
+    actual = ('null' if value is None else 'object' if isinstance(value, dict) else 'array' if isinstance(value, list)
+              else 'string' if isinstance(value, str) else 'integer' if type(value) is int else 'unknown')
+    if actual not in types or 'enum' in schema and value not in schema['enum']:
+        return False
+    if actual == 'object':
+        properties = schema.get('properties', {})
+        return (set(schema.get('required', [])) <= set(value)
+                and (schema.get('additionalProperties', True) or set(value) <= set(properties))
+                and all(schema_accepts(item, properties[key]) for key, item in value.items() if key in properties))
+    if actual == 'array':
+        return (schema.get('minItems', 0) <= len(value) <= schema.get('maxItems', float('inf'))
+                and all(schema_accepts(item, schema['items']) for item in value))
+    if actual == 'string':
+        return schema.get('minLength', 0) <= len(value) <= schema.get('maxLength', float('inf'))
+    if actual == 'integer':
+        return schema.get('minimum', float('-inf')) <= value <= schema.get('maximum', float('inf'))
+    return True
+
+
+def test_strict_schema_rag_text_only_reads_late_page_before_grounded_answer(tmp_path, monkeypatch):
+    import json
+    import httpx
+    from test_tool_continuation_retry import fixture, configuration
+    from test_rag_service import Engines, ready, wait_job
+    from agent.rag.service import RagService
+    from agent.rag.grounding import RagGrounding
+    monkeypatch.setenv('AGENT_DATA_DIR', str(tmp_path))
+    original = httpx.AsyncClient
+    captured = []
+    holder = {}
+    def respond(request):
+        payload = json.loads(request.content)
+        captured.append(payload)
+        assert payload['response_format']['type'] == 'json_schema'
+        assert payload['response_format']['json_schema']['strict'] is True
+        schema = payload['response_format']['json_schema']['schema']
+        if len(captured) == 1:
+            result = {'response': {'read_requests': [{'attachment_id': 'late', 'offset': 1, 'limit': 1,
+                                                     'physical_page': 2, 'section': None}]}}
+            assert not schema_accepts({'response': {'read_requests': [{'attachment_id': 'forbidden',
+                'offset': 1, 'limit': 1, 'physical_page': 2, 'section': None}]}}, schema)
+        else:
+            assert 'LATE-PAGE-SECOND' in json.dumps(payload['messages'])
+            state = next(iter(holder['service'].rag_grounding.runs.values()))
+            identity = next(iter(state['admitted']))
+            quote_id, quote = next(iter(state['quote_options'][identity].items()))
+            result = {'response': {'claims': [{'text': quote, 'evidence': [{'id': identity, 'quote_id': quote_id}]}]}}
+        assert schema_accepts(result, schema), 'Strict provider schema rejects the advertised attachment read/answer contract'
+        chunk = {'choices': [{'delta': {'content': json.dumps(result, ensure_ascii=False)}, 'finish_reason': 'stop'}]}
+        return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
+    class Parser:
+        async def parse(self, path):
+            return {'chunks': [{'text': 'LATE-PAGE-FIRST', 'locator': {'page': 2}},
+                               {'text': 'LATE-PAGE-SECOND', 'locator': {'page': 2}}], 'warnings': []}
+    async def scenario():
+        async def sink(event): pass
+        config = configuration()
+        config['base_url'] = 'http://127.0.0.1:19999/v1'
+        config['model_tool_modes']['model'] = 'text_only'
+        core, project, work, service = await fixture(tmp_path, sink, config)
+        holder['service'] = service
+        await service.rag.close()
+        service.rag = RagService(core, Engines())
+        service.rag_grounding = RagGrounding(service.rag)
+        service.context.rag_context = service.rag_grounding.evidence
+        service.document_attachments.parser = Parser()
+        async def intent(**kwargs):
+            return {'web': 'off', 'web_evidence': 'optional', 'reasoning': 'standard',
+                'task_kinds': ['attachment_summary'], 'explanation_code': 'grounded_attachment',
+                'rag_requirement': 'required', 'read_attachment_ids': []}, None
+        service._preflight_intent_advisor = intent
+        try:
+            library = (await service.rag.handle('library.create', {'name': 'Rules', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await ready(service.rag, library)
+            assert (await wait_job(service.rag, await service.rag.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.rag.handle('library.bind', {'library_id': library, 'project_id': project['id'], 'enabled': True})
+            attachment = runtime_attachment(tmp_path, 'late', 'Late document')
+            response = await service.start({'conversation_id': work['id'], 'content': 'Read the late equipment page and explain safety requirements using project evidence',
+                'attachments': [attachment], 'idempotency_key': 'strict-read'})
+            await service.tasks[response['run']['id']]
+            run = core.get_model_run(response['run']['id'])
+            assert run['status'] == 'completed', run.get('error_message')
+            assert len(captured) == 2
+            assert run['rag_decision']['document_reads'][-1]['result']['blocks'][0]['text'].strip() == 'LATE-PAGE-SECOND'
+            plan = service.execution_coordinator.get_for_run(run['id'])
+            step = next(item for item in plan['steps'] if item['step_type'] == 'final_response')
+            spec = service._create_model_invocation_spec(run, plan, step, round_no=99, attempt_no=1,
+                allowed_tools=(), max_output_tokens=512, response_only=True, read_attachment_ids=('late',))
+            final_schema = json.loads(spec.response_schema_json)
+            assert set(final_schema['properties']) == {'claims'}
+            assert not schema_accepts({'read_requests': [{'attachment_id': 'late'}]}, final_schema)
+            plain_spec = service._create_model_invocation_spec(run, plan, step, round_no=100, attempt_no=1,
+                allowed_tools=(), max_output_tokens=512)
+            assert set(json.loads(plain_spec.response_schema_json)['properties']) == {'claims'}
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())

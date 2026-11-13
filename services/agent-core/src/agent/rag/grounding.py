@@ -208,7 +208,7 @@ class RagGrounding:
         state["used_tokens"] += estimate_tokens(json.dumps(output, ensure_ascii=False))
         return json.dumps(output, ensure_ascii=False)
 
-    def answer_schema(self, run_id: str) -> dict:
+    def answer_schema(self, run_id: str, *, read_attachment_ids=()) -> dict:
         citation = {"type": "object", "additionalProperties": False,
                     "required": ["id", "quote_id"], "properties": {
                         "id": {"type": "string", "enum": list(self.runs[run_id]["admitted"])},
@@ -219,8 +219,22 @@ class RagGrounding:
                  "required": ["text", "evidence"], "properties": {
                      "text": {"type": "string", "minLength": 1, "maxLength": 8000},
                      "evidence": {"type": "array", "minItems": 1, "maxItems": 8, "items": citation}}}
-        return {"type": "object", "additionalProperties": False, "required": ["claims"],
-                "properties": {"claims": {"type": "array", "minItems": 1, "maxItems": 32, "items": claim}}}
+        answer = {"type": "object", "additionalProperties": False, "required": ["claims"],
+                  "properties": {"claims": {"type": "array", "minItems": 1, "maxItems": 32, "items": claim}}}
+        if not read_attachment_ids:
+            return answer
+        request = {'type': 'object', 'additionalProperties': False,
+                   'required': ['attachment_id', 'offset', 'limit', 'physical_page', 'section'], 'properties': {
+                       'attachment_id': {'type': 'string', 'enum': list(dict.fromkeys(read_attachment_ids))},
+                       'offset': {'type': 'integer', 'minimum': 0},
+                       'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+                       'physical_page': {'type': ['integer', 'null'], 'minimum': 1},
+                       'section': {'type': ['string', 'null'], 'minLength': 1, 'maxLength': 1024}}}
+        read = {'type': 'object', 'additionalProperties': False, 'required': ['read_requests'],
+                'properties': {'read_requests': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': request}}}
+        # Keep the root an object for strict endpoints that reject root-level unions.
+        return {'type': 'object', 'additionalProperties': False, 'required': ['response'],
+                'properties': {'response': {'anyOf': [answer, read]}}}
 
     def finalize(self, run_id: str, content: str, *, check_subject=True) -> str:
         state = self.runs[run_id]
