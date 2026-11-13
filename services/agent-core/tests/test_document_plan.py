@@ -55,7 +55,8 @@ def test_planned_workflow_batches_chapters_resumes_and_persists_simulation(tmp_p
             fail_second = False
             raise RuntimeError('provider interrupted')
         return {'fields': [{'target_id': task['fields'][0]['target_id'],
-                            'text': task['equipment_parameters']['型号'] + ' 验证试验目的。', 'evidence': [],
+                            'text': '{{equipment:型号}}（{{equipment:质量}}）验证试验目的。',
+                            'parameter_values': task['equipment_parameters'], 'evidence': [],
                             'missing': ['试验示意图未提供']}]}
 
     async def exercise():
@@ -173,7 +174,7 @@ def test_evidence_resolver_rechecks_completed_fields_before_resuming(tmp_path):
     def evidence(text, citations):
         if not evidence_live:
             raise CoreDataError('rag_citation_invalid', '证据已撤回')
-        return text, [{'id': 'e1', 'quote_id': 'q1', 'physical_page': 3}]
+        return text, [{'id': 'e1', 'quote_id': 'q1', 'physical_page': 3, 'clause_number': '8.2'}]
     asyncio.run(service.fill_planned(run['id'], source['id'], '整份', generate, evidence_resolver=evidence))
     evidence_live = False
     with pytest.raises(CoreDataError) as raised:
@@ -276,3 +277,133 @@ def test_existing_inspection_exposes_chapter_identity_and_section_fill_avoids_le
     document = Document(service.path_for(run['id'], artifact['id']))
     assert document.paragraphs[2].text == '说明：填写本章试验目的，删除示例。'
     assert document.paragraphs[5].text == '振动目标'
+
+
+@pytest.mark.parametrize('claim', ['Section 8.2 requires testing', 'DO-160H section 8.2'])
+def test_english_source_claims_cannot_bypass_empty_evidence_resolver(tmp_path, claim):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'}]}
+        return {'fields': [{'target_id': 'p-2', 'text': claim, 'evidence': []}]}
+    with pytest.raises(CoreDataError) as raised:
+        asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate,
+                                         evidence_resolver=lambda text, citations: (text, [])))
+    assert raised.value.code == 'rag_citation_invalid'
+
+
+@pytest.mark.parametrize(('start', 'end', 'expected'), [(3, 4, 'abcXdef'), (2, 5, 'abXef')])
+def test_cell_spans_replace_paragraph_separators_and_keep_drawings(tmp_path, start, end, expected):
+    _, run, service = workflow(tmp_path)
+    document = Document()
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = 'abc'
+    cell.add_paragraph('def').add_run()._r.append(OxmlElement('w:drawing'))
+    stream = io.BytesIO()
+    document.save(stream)
+    source = service.register_template(run['id'], stream.getvalue(), 'cell.docx')
+    artifact = service.fill(run['id'], source['id'], [{'target_id': 't-0-r0-c0', 'text': 'X', 'evidence': [],
+                                                     'span': {'start': start, 'end': end}}])
+    filled = Document(service.path_for(run['id'], artifact['id']))
+    assert filled.tables[0].cell(0, 0).text == expected
+    assert len(filled.element.xpath('.//w:drawing')) == 1
+
+
+@pytest.mark.parametrize('declarations', [None, {'model': 'SIM-A'}])
+def test_simulated_parameter_text_requires_program_rendered_placeholders(tmp_path, declarations):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'}],
+                    'equipment_parameters': {'model': 'SIM-A'}}
+        field = {'target_id': 'p-2', 'text': 'Equipment model SIM-B', 'evidence': []}
+        if declarations is not None:
+            field['parameter_values'] = declarations
+        return {'fields': [field]}
+    with pytest.raises(CoreDataError) as raised:
+        asyncio.run(service.fill_planned(run['id'], source['id'], 'simulate', generate, allow_simulated=True))
+    assert raised.value.code == 'document_plan_invalid'
+
+
+def test_planning_rebudgets_new_parameter_map_before_next_model_callback(tmp_path):
+    _, run, service = workflow(tmp_path)
+    document = Document()
+    for _ in range(30):
+        document.add_paragraph('待填写')
+    stream = io.BytesIO()
+    document.save(stream)
+    source = service.register_template(run['id'], stream.getvalue(), 'pages.docx')
+    calls = []
+    async def generate(task):
+        calls.append(task)
+        return {'targets': [], 'equipment_parameters': {f'parameter-{index}': 'x' * 1000 for index in range(10)}}
+    with pytest.raises(CoreDataError) as raised:
+        asyncio.run(service.fill_planned(run['id'], source['id'], 'simulate', generate,
+                                         allow_simulated=True, token_allowance=6000))
+    assert raised.value.code == 'document_context_too_small'
+    assert len(calls) == 1
+
+
+def test_simulated_placeholder_values_are_rendered_consistently_after_resume(tmp_path):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction', 'parameter_keys': ['model']}],
+                    'equipment_parameters': {'model': 'SIM-A'}}
+        return {'fields': [{'target_id': 'p-2', 'text': 'Equipment model {{equipment:model}}', 'evidence': [],
+                            'parameter_values': {'model': 'SIM-A'}}]}
+    first = asyncio.run(service.fill_planned(run['id'], source['id'], 'simulate', generate, allow_simulated=True))
+    second = asyncio.run(service.fill_planned(run['id'], source['id'], 'simulate', generate, allow_simulated=True))
+    assert second['id'] == first['id']
+    text = Document(service.path_for(run['id'], second['id'])).paragraphs[2].text
+    assert 'Equipment model SIM-A' in text
+    assert '{{equipment:' not in text
+
+
+@pytest.mark.parametrize('text', ['Equipment model SIM-A and {{equipment:model}}',
+                                 'model: SIM-B\n{{equipment:model}}'])
+def test_simulation_rejects_raw_values_and_explicit_conflicting_assignments(tmp_path, text):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'}],
+                    'equipment_parameters': {'model': 'SIM-A'}}
+        return {'fields': [{'target_id': 'p-2', 'text': text, 'evidence': [],
+                            'parameter_values': {'model': 'SIM-A'}}]}
+    with pytest.raises(CoreDataError) as raised:
+        asyncio.run(service.fill_planned(run['id'], source['id'], 'simulate', generate, allow_simulated=True))
+    assert raised.value.code == 'document_plan_invalid'
+
+
+@pytest.mark.parametrize('text', ['Section 8.3 requires testing', 'DO-160H section 8.2', 'See page 4'])
+def test_written_locators_must_match_validated_evidence_metadata(tmp_path, text):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'}]}
+        return {'fields': [{'target_id': 'p-2', 'text': text,
+                            'evidence': [{'id': 'e1', 'quote_id': 'q1'}]}]}
+    def evidence(text, citations):
+        return text, [{'id': 'e1', 'clause_number': '8.2', 'title': 'DO-160G', 'locator': {'page': 3}}]
+    with pytest.raises(CoreDataError) as raised:
+        asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
+    assert raised.value.code == 'rag_citation_invalid'
+
+
+def test_matching_source_locators_and_revision_are_admitted(tmp_path):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'}]}
+        return {'fields': [{'target_id': 'p-2', 'text': 'DO-160G Section 8.2 page 3',
+                            'evidence': [{'id': 'e1', 'quote_id': 'q1'}]}]}
+    def evidence(text, citations):
+        return text, [{'id': 'e1', 'clause_number': '8.2', 'title': 'DO-160', 'revision': 'G', 'locator': {'page': 3}}]
+    artifact = asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
+    assert 'DO-160G Section 8.2 page 3' in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
