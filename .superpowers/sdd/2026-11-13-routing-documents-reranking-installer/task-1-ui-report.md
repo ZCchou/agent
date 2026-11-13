@@ -35,3 +35,16 @@
 - Automatic approval review rejected an attempted diagnostic bind to all interfaces because it would expose workspace assets to the LAN. Verification completed with localhost binding.
 - Root owns Core intent retries and residency runtime semantics. I reported that Core manual retry should return an active queued state immediately before launching, so frontend polling resumes reliably. Existing structured `preflight_rejected` results already flow through unchanged. Terminal errors preserve their code, message, and details on the rejected start promise.
 - Full browser-suite execution and packaged native installer execution remain with root integration. This task's focused browser tests use a mocked Tauri boundary.
+
+
+## Review round 1
+
+- Fixed findings 1 and 4 from `task-1-review-report.md`.
+- Confirmed terminal intent preparation rejects with an `intentTerminal` marker. ChatPage clears the matching pending send identity after confirmed cancellation/terminal failure or a completed preflight rejection. Uncertain admission errors preserve their identity for reconciliation.
+- Resolved promises retain acceptance ownership until a live handler acknowledges adoption. Scope cleanup releases that ownership, including a scope change before the initial start response registers its task. Recovery consumes acceptance only after its scoped asynchronous adoption succeeds.
+- Added a browser-only scope harness using the real ChatPage, repository, task store, AppProvider and surrounding providers. AppContext is exported to inject controlled navigation in the harness. The production New Chat action creates a new draft revision, so the fixture supplies explicit navigation back to the original draft for the requested recovery scenario.
+- Observed RED in the real browser path for Stop followed by unchanged Send, terminal failure followed by unchanged Send, completion before returning to a draft, and completion after returning. The uncertain admission scenario passed before the fix and remains covered.
+- The store acknowledgement assertion also reproduced RED because completion consumed acceptance before the scope handler adopted it.
+- GREEN verification passed for `npx playwright test intent-send-recovery.spec.mjs intent-dialog.spec.mjs --config=.artifacts/intent-playwright.config.mjs --reporter=line --output=.artifacts/intent-recovery-tests` with `AGENT_UI_BASE_URL=http://127.0.0.1:5197`. All eight tests passed.
+- `npx vitest run src --configLoader runner` passed 49 files and 220 tests. `npx tsc --noEmit` passed. `npx vite build --configLoader runner` passed with the existing large-chunk warning. `git diff --check -- apps/agent-desktop` passed.
+- Browser tests emulate the Tauri command boundary and execute the actual frontend entry points. Core retry classification and persisted budget accounting are coordinated by root.

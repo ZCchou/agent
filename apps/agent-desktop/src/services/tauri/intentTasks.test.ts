@@ -20,6 +20,36 @@ describe("persistent intent tasks", () => {
     expect(settled).toBe(true);
     store.dispose();
   });
+  it("keeps resolved acceptance unconsumed until the scope handler acknowledges it", async () => {
+    const store = new IntentTaskStore();
+    const result = { status: "accepted", run: { id: "run1" }, conversation: { id: "accepted-chat" } } as never;
+    const pending = store.wait(task());
+    store.update(task({ status: "completed", result }));
+    await pending;
+    expect(store.isConsumed("i1")).toBe(false);
+    expect(store.hasAcceptanceOwner("i1")).toBe(true);
+    store.acknowledge("other", result);
+    expect(store.isConsumed("i1")).toBe(false);
+    store.acknowledge("c1", result);
+    expect(store.isConsumed("i1")).toBe(true);
+    expect(store.hasAcceptanceOwner("i1")).toBe(false);
+    store.dispose();
+  });
+  it.each(["before registration", "while pending"])("releases stale ownership %s without consuming acceptance", async (when) => {
+    const store = new IntentTaskStore();
+    store.begin("c1");
+    if (when === "before registration") store.releaseScope("c1");
+    const pending = store.wait(task());
+    if (when === "while pending") store.releaseScope("c1");
+    const result = { status: "accepted", run: { id: "run1" }, conversation: { id: "accepted-chat" } } as never;
+    store.update(task({ status: "completed", result }));
+    expect(await pending).toBe(result);
+    expect(store.hasAcceptanceOwner("i1")).toBe(false);
+    expect(store.isConsumed("i1")).toBe(false);
+    store.acknowledge("c1", result);
+    expect(store.isConsumed("i1")).toBe(true);
+    store.dispose();
+  });
   it("guards older revisions and duplicate replies", async () => {
     const store = new IntentTaskStore();
     store.update(task({ revision: 3 }));

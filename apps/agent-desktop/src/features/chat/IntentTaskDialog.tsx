@@ -7,7 +7,7 @@ import type { AcceptedModelRun } from "../../services/repositories/ModelRunRepos
 export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }: {
   scope: string;
   enabled: boolean;
-  onAccepted(result: AcceptedModelRun): void;
+  onAccepted(result: AcceptedModelRun): Promise<boolean>;
   onModelSettings(): void;
 }) {
   const { t } = useTranslation("chat");
@@ -17,6 +17,7 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
+  const adopting = useRef("");
   const revision = task ? `${task.id}-${task.revision}` : "";
   const clarification = task?.status === "waiting_user" && task.clarification;
   const notice = Boolean(task && (clarification || task.status === "failed" || task.status === "interrupted" || (task.status === "waiting_user" && !task.clarification)
@@ -29,10 +30,15 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }
   useEffect(() => { setAnswers({}); setError(""); }, [revision, scope]);
   useEffect(() => {
     if (!enabled || !task || task.status !== "completed" || !task.result
-      || intentTasks.hasWaiter(task.id) || intentTasks.isConsumed(task.id)) return;
-    intentTasks.consume(task.id);
-    if (task.result.status !== "preflight_rejected") onAccepted(task.result);
-  }, [enabled, task, onAccepted]);
+      || intentTasks.hasAcceptanceOwner(task.id) || intentTasks.isConsumed(task.id)) return;
+    if (task.result.status === "preflight_rejected") { intentTasks.consume(task.id); return; }
+    const identity = `${scope}-${task.id}-${task.revision}`;
+    if (adopting.current === identity) return;
+    adopting.current = identity;
+    void onAccepted(task.result).then((accepted) => {
+      if (accepted) intentTasks.acknowledge(scope, task.result!);
+    }).finally(() => { if (adopting.current === identity) adopting.current = ""; });
+  }, [enabled, scope, task, onAccepted]);
   useEffect(() => {
     const element = dialog.current;
     if (open && element && !element.open) element.showModal();

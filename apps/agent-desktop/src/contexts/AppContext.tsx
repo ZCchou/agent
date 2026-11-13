@@ -63,7 +63,7 @@ export interface WorkspaceErrors {
   conversations: boolean;
 }
 
-const AppContext = createContext<AppContextValue | null>(null);
+export const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [currentPage, setCurrentPage] = useState<AppPage>("chat");

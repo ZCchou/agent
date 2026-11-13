@@ -9,6 +9,17 @@ import { TauriModelRunRepository } from "./TauriModelRunRepository";
 describe("TauriModelRunRepository", () => {
   beforeEach(() => { vi.mocked(invoke).mockReset(); vi.mocked(listen).mockReset(); });
 
+  it("marks confirmed terminal intent preparation separately from an uncertain admission failure", async () => {
+    const input = { intentScope: "terminal-scope", content: "Original question", providerProfileId: "local", modelId: "text" };
+    vi.mocked(invoke).mockResolvedValue({ task: { id: "terminal-task", scope: input.intentScope, revision: 1,
+      status: "cancelled", can_retry: false, result: null, error: { code: "cancelled_by_user", message: "Cancelled" } } });
+    await expect(new TauriModelRunRepository().start(input)).rejects.toMatchObject({ intentTerminal: true });
+    const uncertain = new Error("The admission response was lost");
+    vi.mocked(invoke).mockRejectedValue(uncertain);
+    await expect(new TauriModelRunRepository().start(input)).rejects.toBe(uncertain);
+    expect(uncertain).not.toHaveProperty("intentTerminal");
+  });
+
   it("forwards an edited user-message identity to the trusted start boundary", async () => {
     vi.mocked(invoke).mockResolvedValue({ status: "accepted" });
     await new TauriModelRunRepository().start({ conversationId: "c1", content: "Edited question",

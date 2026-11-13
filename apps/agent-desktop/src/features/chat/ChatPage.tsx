@@ -77,6 +77,7 @@ export function ChatPage() {
   const updateInspector = inspectorStore.update;
   const inspectorKey = activeConversationId ?? `draft-${draft.revision}`;
   const inspector = inspectorStore.get(inspectorKey);
+  useEffect(() => () => intentTasks.releaseScope(inspectorKey), [inspectorKey]);
   const inspectorRequest = useRef(0);
   const [conversation, setConversation] = useConversationState<Conversation | null>(inspectorKey, null);
   const workspaceConversationRef = useRef(activeConversation);
@@ -546,6 +547,7 @@ export function ChatPage() {
     setRunActivityLabel(tChat("routing.status.planning"));
     clearStreamingContent();
     let releaseModel: (() => Promise<void>) | undefined;
+    let sendIdentity: string | undefined;
     try {
       let settings = await settingsRepository.getAppSettings();
       const projectId = sendConversation ? sendConversation.project_id : (draft.kind === "project_work" ? draft.projectId : null);
@@ -608,6 +610,7 @@ export function ChatPage() {
       if (pendingSendRef.current?.signature !== sendSignature) {
         pendingSendRef.current = { signature: sendSignature, idempotencyKey: crypto.randomUUID() };
       }
+      sendIdentity = pendingSendRef.current.idempotencyKey;
       const started = await modelRunRepository.start({
         intentScope: inspectorKey,
         conversationId: conversation?.id, kind: conversation ? undefined : draft.kind,
@@ -641,6 +644,7 @@ export function ChatPage() {
         attachmentRejectionStagingIds: stagedRejections.map((item) => item.receipt_id),
         webSearchRequestMode: webSearch.requestMode,
       });
+      if (started.status === "preflight_rejected" && pendingSendRef.current?.idempotencyKey === sendIdentity) pendingSendRef.current = null;
       if (!isCurrent()) {
         if (started.status !== "preflight_rejected" && submission.stopRequested) {
           await modelRunRepository.cancel(started.run.id);
@@ -648,6 +652,7 @@ export function ChatPage() {
         void refreshWorkspace();
         return;
       }
+      intentTasks.acknowledge(inspectorKey, started);
       if (started.status === "preflight_rejected") {
         restoreRejected();
         setError(true);
@@ -707,6 +712,8 @@ export function ChatPage() {
       }
       return true;
     } catch (value) {
+      if (value instanceof Error && "intentTerminal" in value && value.intentTerminal === true
+        && pendingSendRef.current?.idempotencyKey === sendIdentity) pendingSendRef.current = null;
       if (!isCurrent()) return;
       if (submission.stopRequested && !submission.accepted) { setError(false); return; }
       if (!submission.accepted) restoreRejected();
@@ -1280,20 +1287,26 @@ export function ChatPage() {
 
       <IntentTaskDialog scope={inspectorKey} enabled={currentPage === "chat" && coreOnline}
         onModelSettings={() => setCurrentPage("models")}
-        onAccepted={(started) => {
+        onAccepted={async (started) => {
           const scope = inspectorKey;
-          if (sendScopeRef.current !== scope) return;
+          if (sendScopeRef.current !== scope) return false;
           runIdRef.current = started.run.id;
-          void Promise.all([conversationRepository.get(started.conversation.id), modelRunRepository.get(started.run.id)])
-            .then(async ([acceptedConversation, run]) => {
-              if (sendScopeRef.current !== scope || runIdRef.current !== run.id) return;
-              setConversation(acceptedConversation); setMessages(acceptedConversation.messages);
-              setActiveRun(run); setLastRunId(run.id);
-              setSending(!["completed", "failed", "cancelled", "interrupted", "waiting_budget"].includes(run.status));
-              if (started.execution_plan && run.status === "waiting_budget") setPendingBudgetPlan(started.execution_plan);
-              if (acceptedConversation.id !== scope) adoptedScopeRef.current = acceptedConversation.id;
-              await conversationCreated(acceptedConversation);
-            }).catch((value) => { if (sendScopeRef.current === scope) { setError(true); setErrorDetail(String(value)); } });
+          try {
+            const [acceptedConversation, run] = await Promise.all([
+              conversationRepository.get(started.conversation.id), modelRunRepository.get(started.run.id),
+            ]);
+            if (sendScopeRef.current !== scope || runIdRef.current !== run.id) return false;
+            setConversation(acceptedConversation); setMessages(acceptedConversation.messages);
+            setActiveRun(run); setLastRunId(run.id);
+            setSending(!["completed", "failed", "cancelled", "interrupted", "waiting_budget"].includes(run.status));
+            if (started.execution_plan && run.status === "waiting_budget") setPendingBudgetPlan(started.execution_plan);
+            if (acceptedConversation.id !== scope) adoptedScopeRef.current = acceptedConversation.id;
+            await conversationCreated(acceptedConversation);
+            return true;
+          } catch (value) {
+            if (sendScopeRef.current === scope) { setError(true); setErrorDetail(String(value)); }
+            return false;
+          }
         }} />
       <ComposerDock
         ragControl={<Button size="composer" variant={ragMode === 'required' ? 'primary' : 'secondary'} icon={<Database />} aria-pressed={ragMode === 'required'}

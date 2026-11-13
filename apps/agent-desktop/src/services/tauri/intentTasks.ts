@@ -31,8 +31,16 @@ export class IntentTaskStore {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private actions = new Set<string>();
   private consumed = new Set<string>();
+  private acceptanceOwners = new Set<string>();
+  private releasedScopes = new Set<string>();
   private cancelledScopes = new Set<string>();
-  begin(scope: string) { this.cancelledScopes.delete(scope); }
+  begin(scope: string) { this.cancelledScopes.delete(scope); this.releasedScopes.delete(scope); }
+  releaseScope(scope: string) {
+    this.releasedScopes.add(scope);
+    const task = this.get(scope);
+    if (task) this.acceptanceOwners.delete(task.id);
+    this.emit();
+  }
   async cancelScope(scope: string) {
     this.cancelledScopes.add(scope);
     const task = this.get(scope);
@@ -41,8 +49,15 @@ export class IntentTaskStore {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   get = (scope: string): IntentTask | undefined => this.tasks.get(scope);
   isBusy = (id: string) => this.actions.has(id);
-  hasWaiter = (id: string) => this.waiters.has(id);
-  consume(id: string) { this.consumed.add(id); }
+  hasAcceptanceOwner = (id: string) => this.acceptanceOwners.has(id);
+  consume(id: string) { this.acceptanceOwners.delete(id); this.consumed.add(id); this.emit(); }
+  acknowledge(scope: string, result: StartedModelRun) {
+    const task = this.get(scope);
+    if (!task || task.status !== "completed" || !task.result) return;
+    if (result !== task.result && (result.status === "preflight_rejected" || task.result.status === "preflight_rejected"
+      || result.run.id !== task.result.run.id)) return;
+    this.consume(task.id);
+  }
   isConsumed(id: string) { return this.consumed.has(id); }
   private emit() { this.listeners.forEach((listener) => listener()); }
 
@@ -55,12 +70,14 @@ export class IntentTaskStore {
     this.timers.delete(task.id);
     const pending = this.waiters.get(task.id);
     if (task.status === "completed" && task.result) {
-      if (pending) this.consume(task.id);
       pending?.forEach((waiter) => waiter.resolve(task.result!));
       this.waiters.delete(task.id);
     } else if (task.status === "cancelled" || (task.status === "failed" && !task.can_retry)) {
-      pending?.forEach((waiter) => waiter.reject(Object.assign(new Error(task.error ? `${task.error.code}: ${task.error.message}` : "intent_cancelled"), { details: task.error?.details })));
+      pending?.forEach((waiter) => waiter.reject(Object.assign(new Error(task.error ? `${task.error.code}: ${task.error.message}` : "intent_cancelled"), {
+        details: task.error?.details, intentTerminal: true,
+      })));
       this.waiters.delete(task.id);
+      this.acceptanceOwners.delete(task.id);
     }
     if (active(task)) this.pollLater(task);
     this.emit();
@@ -71,6 +88,7 @@ export class IntentTaskStore {
       const pending = this.waiters.get(task.id) ?? [];
       pending.push({ resolve, reject });
       this.waiters.set(task.id, pending);
+      if (!this.releasedScopes.has(task.scope)) this.acceptanceOwners.add(task.id);
       this.update(task);
       if (this.cancelledScopes.has(task.scope)) void this.act(task.scope, "cancel").catch(reject);
     });
