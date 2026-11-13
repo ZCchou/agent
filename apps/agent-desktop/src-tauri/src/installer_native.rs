@@ -64,6 +64,13 @@ struct Intent {
     name: String,
     old: Option<Identity>,
 }
+#[derive(Serialize, Deserialize)]
+struct CleanupInventory {
+    application_id: String,
+    id: String,
+    files: BTreeMap<String, Identity>,
+    directories: BTreeSet<String>,
+}
 
 #[derive(Clone, Default, Serialize)]
 struct Status {
@@ -389,15 +396,79 @@ fn process_started(pid: u32) -> Option<u64> {
         }
     }
 }
+fn canonical_path(path: &Path) -> Result<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        // Normalize long, short and extended Windows names to one comparison form.
+        let value = canonical.to_string_lossy();
+        if let Some(value) = value.strip_prefix("\\\\?\\UNC\\") {
+            return Ok(PathBuf::from(format!("\\\\{value}")));
+        }
+        if let Some(value) = value.strip_prefix("\\\\?\\") {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Ok(canonical)
+}
+fn normalize_root(root: &Path) -> Result<PathBuf> {
+    if !root.is_absolute()
+        || root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .split('/')
+            .any(|p| p == "." || p == "..")
+    {
+        return Err("ambiguous installation root refused".into());
+    }
+    plain(root)?;
+    let mut existing = root;
+    let mut pending = Vec::new();
+    while !existing.exists() {
+        pending.push(
+            existing
+                .file_name()
+                .ok_or("invalid installation root")?
+                .to_owned(),
+        );
+        existing = existing.parent().ok_or("invalid installation root")?;
+    }
+    let mut canonical = canonical_path(existing)?;
+    for part in pending.iter().rev() {
+        canonical.push(part);
+    }
+    Ok(canonical)
+}
 fn assert_idle(root: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let output = std::process::Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
-            "$ErrorActionPreference='Stop'; $prefix=$env:AGENT_INSTALL_ROOT.TrimEnd('\\')+'\\'; Get-Process | ForEach-Object { if ($_.Path -and $_.Path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { Write-Error ('Close application and managed workers; busy PID '+$_.Id) } }"])
-            .env("AGENT_INSTALL_ROOT", root).creation_flags(0x08000000).output()?;
+            "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); ConvertTo-Json -Compress -InputObject @(Get-Process | Where-Object { $_.Path } | ForEach-Object { @{pid=$_.Id;path=$_.Path} })"])
+            .creation_flags(0x08000000).output()?;
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        #[derive(Deserialize)]
+        struct Process {
+            pid: u32,
+            path: String,
+        }
+        let processes: Vec<Process> = serde_json::from_slice(&output.stdout)?;
+        let prefix = format!(
+            "{}\\",
+            root.to_string_lossy().trim_end_matches('\\').to_lowercase()
+        );
+        for process in processes {
+            let path = canonical_path(Path::new(&process.path))
+                .unwrap_or_else(|_| PathBuf::from(&process.path));
+            if path.to_string_lossy().to_lowercase().starts_with(&prefix) {
+                return Err(format!(
+                    "Close application and managed workers; busy PID {}",
+                    process.pid
+                )
+                .into());
+            }
         }
     }
     Ok(())
@@ -457,22 +528,187 @@ fn remove_empty_parents(path: &Path, stop: &Path) {
         parent = p.parent();
     }
 }
-fn remove_tree_plain(root: &Path) -> Result<()> {
+fn empty_cleanup_inventory() -> CleanupInventory {
+    CleanupInventory {
+        application_id: APP.into(),
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        files: BTreeMap::new(),
+        directories: BTreeSet::new(),
+    }
+}
+fn cleanup_entry(plan: &mut CleanupInventory, name: String, identity: Identity) -> Result<()> {
+    valid_name(&name)?;
+    let mut parent = Path::new(&name).parent();
+    while let Some(path) = parent {
+        if path.as_os_str().is_empty() {
+            break;
+        }
+        plan.directories
+            .insert(path.to_string_lossy().replace('\\', "/"));
+        parent = path.parent();
+    }
+    plan.files.insert(name, identity);
+    Ok(())
+}
+fn control_entries(root: &Path, controls: &[&str], plan: &mut CleanupInventory) -> Result<()> {
+    for name in controls {
+        let path = safe(root, name)?;
+        if path.is_file() {
+            cleanup_entry(plan, (*name).into(), hash(&path, None, false)?)?;
+        }
+    }
+    Ok(())
+}
+fn native_cleanup_inventory(root: &Path) -> Result<CleanupInventory> {
+    let mut plan = empty_cleanup_inventory();
+    let journal_path = safe(root, "journal.json")?;
+    if journal_path.exists() {
+        let journal: Journal = read_json(&journal_path)?;
+        if journal.application_id != APP
+            || journal.id.len() != 32
+            || !journal.id.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err("invalid cleanup transaction identity".into());
+        }
+        validate(&journal.next)?;
+        if let Some(old) = &journal.previous {
+            validate(old)?;
+        }
+        plan.id = journal.id;
+        plan.directories.extend(["stage".into(), "backup".into()]);
+        for (name, identity) in &journal.next.files {
+            cleanup_entry(&mut plan, format!("stage/{name}"), identity.clone())?;
+        }
+        let operations = safe(root, "operations.jsonl")?;
+        if operations.exists() {
+            for line in fs::read_to_string(&operations)?.split_inclusive('\n') {
+                if !line.ends_with('\n') {
+                    continue;
+                }
+                let op: Intent = serde_json::from_str(line)?;
+                if !journal.next.files.contains_key(&op.name)
+                    && !journal
+                        .previous
+                        .as_ref()
+                        .is_some_and(|m| m.files.contains_key(&op.name))
+                {
+                    return Err("cleanup operation is not owned".into());
+                }
+                if let Some(old) = op.old {
+                    cleanup_entry(&mut plan, format!("backup/{}", op.name), old)?;
+                }
+            }
+        }
+        let health = safe(root, "health-inventory.json")?;
+        if health.exists() {
+            let health: CleanupInventory = read_json(&health)?;
+            if health.application_id != APP || health.id != plan.id {
+                return Err("health cleanup ownership mismatch".into());
+            }
+            plan.directories.insert("health-data".into());
+            for directory in health.directories {
+                valid_name(&directory)?;
+                plan.directories.insert(format!("health-data/{directory}"));
+            }
+            for (name, record) in health.files {
+                cleanup_entry(&mut plan, format!("health-data/{name}"), record)?;
+            }
+        }
+    }
+    control_entries(
+        root,
+        &[
+            "owner.txt",
+            "journal.json",
+            "journal.new",
+            "operations.jsonl",
+            "committed",
+            "postflight-owner.json",
+            "postflight-owner.new",
+            "health-inventory.json",
+            "health-inventory.new",
+        ],
+        &mut plan,
+    )?;
+    Ok(plan)
+}
+fn clean_recorded(root: &Path, managed: &Path, inventory: &CleanupInventory) -> Result<()> {
+    if inventory.application_id != APP
+        || inventory.id.len() != 32
+        || !inventory.id.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err("wrong cleanup ownership".into());
+    }
     plain(root)?;
     if !root.exists() {
         return Ok(());
     }
-    for entry in fs::read_dir(root)? {
-        let p = entry?.path();
-        plain(&p)?;
-        if p.is_dir() {
-            remove_tree_plain(&p)?;
-        } else {
-            fs::remove_file(p)?;
+    for (name, expected) in &inventory.files {
+        let path = safe(root, name)?;
+        if path.is_file() && equal(&hash(&path, None, false)?, expected) {
+            fs::remove_file(path)?;
         }
     }
-    fs::remove_dir(root)?;
+    let mut directories: Vec<_> = inventory.directories.iter().collect();
+    directories.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    for name in directories {
+        let path = safe(root, name)?;
+        if path.is_dir() && fs::read_dir(&path)?.next().is_none() {
+            fs::remove_dir(path)?;
+        }
+    }
+    if fs::read_dir(root)?.next().is_none() {
+        fs::remove_dir(root)?;
+    } else {
+        // Unknown or changed files were never granted deletion ownership. Move the
+        // remainder intact, making retry possible without silently discarding data.
+        let preserved = safe(
+            managed,
+            &format!("preserved-native-{}", uuid::Uuid::new_v4().simple()),
+        )?;
+        rename(root, &preserved, false)?;
+        println!("PRESERVED_UNKNOWN_NATIVE_DATA {}", preserved.display());
+    }
     Ok(())
+}
+fn retire_recorded(
+    root: &Path,
+    managed: &Path,
+    inventory: &CleanupInventory,
+    requested_fault: &str,
+) -> Result<()> {
+    write_json(&managed.join("native-cleanup.json"), inventory)?;
+    let garbage = managed.join("native-cleanup");
+    rename(root, &garbage, false)?;
+    fault(requested_fault, "after-cleanup-rename");
+    clean_recorded(&garbage, managed, inventory)?;
+    fs::remove_file(managed.join("native-cleanup.json"))?;
+    Ok(())
+}
+fn record_health(root: &Path, transaction: &Path, id: &str) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut inventory = empty_cleanup_inventory();
+    inventory.id = id.into();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            plain(&path)?;
+            let name = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if path.is_dir() {
+                inventory.directories.insert(name);
+                pending.push(path);
+            } else {
+                cleanup_entry(&mut inventory, name, hash(&path, None, false)?)?;
+            }
+        }
+    }
+    write_json(&transaction.join("health-inventory.json"), &inventory)
 }
 fn cleanup_legacy(managed: &Path, progress: &Progress) -> Result<()> {
     let versions = safe(managed, "versions")?;
@@ -565,10 +801,9 @@ fn cleanup_legacy(managed: &Path, progress: &Progress) -> Result<()> {
         }) {
             // No resource or unknown entry remains. Retire the metadata through the
             // same crash-resumable cleanup directory used for native transactions.
-            write_json(&managed.join("native-cleanup.json"), &APP)?;
-            rename(&version, &managed.join("native-cleanup"), false)?;
-            remove_tree_plain(&managed.join("native-cleanup"))?;
-            fs::remove_file(managed.join("native-cleanup.json"))?;
+            let mut plan = empty_cleanup_inventory();
+            control_entries(&version, &controls, &mut plan)?;
+            retire_recorded(&version, managed, &plan, "")?;
         } else {
             println!("PRESERVED_UNKNOWN_LEGACY_DATA {}", version.display());
         }
@@ -577,6 +812,16 @@ fn cleanup_legacy(managed: &Path, progress: &Progress) -> Result<()> {
     Ok(())
 }
 fn recover(root: &Path, managed: &Path, progress: &Progress) -> Result<()> {
+    let garbage = safe(managed, "native-cleanup")?;
+    let cleanup_record = safe(managed, "native-cleanup.json")?;
+    if cleanup_record.exists() {
+        let inventory: CleanupInventory = read_json(&cleanup_record)?;
+        progress.phase("cleanup", 0, 0, 99);
+        clean_recorded(&garbage, managed, &inventory)?;
+        fs::remove_file(&cleanup_record)?;
+    } else if garbage.exists() {
+        return Err("unowned cleanup directory".into());
+    }
     let preparation = safe(managed, "native-preparation")?;
     let preparation_record = safe(managed, "native-preparation.json")?;
     if preparation_record.exists() {
@@ -584,23 +829,17 @@ fn recover(root: &Path, managed: &Path, progress: &Progress) -> Result<()> {
         if application != APP {
             return Err("wrong preparation ownership".into());
         }
-        remove_tree_plain(&preparation)?;
+        if preparation.exists() {
+            retire_recorded(
+                &preparation,
+                managed,
+                &native_cleanup_inventory(&preparation)?,
+                "",
+            )?;
+        }
         fs::remove_file(&preparation_record)?;
     } else if preparation.exists() {
         return Err("unowned preparation directory".into());
-    }
-    let garbage = safe(managed, "native-cleanup")?;
-    let cleanup_record = safe(managed, "native-cleanup.json")?;
-    if cleanup_record.exists() {
-        let application: String = read_json(&cleanup_record)?;
-        if application != APP {
-            return Err("wrong cleanup ownership".into());
-        }
-        progress.phase("cleanup", 0, 0, 99);
-        remove_tree_plain(&garbage)?;
-        fs::remove_file(&cleanup_record)?;
-    } else if garbage.exists() {
-        return Err("unowned cleanup directory".into());
     }
     let txn = safe(managed, "native-transaction")?;
     if !txn.exists() {
@@ -610,11 +849,21 @@ fn recover(root: &Path, managed: &Path, progress: &Progress) -> Result<()> {
         return Err("wrong transaction ownership".into());
     }
     let journal: Journal = read_json(&safe(&txn, "journal.json")?)?;
-    if journal.application_id != APP || journal.id.len() != 32 {
+    if journal.application_id != APP
+        || journal.id.len() != 32
+        || !journal.id.bytes().all(|c| c.is_ascii_hexdigit())
+    {
         return Err("invalid transaction identity".into());
     }
     if journal.pid != std::process::id() && process_started(journal.pid) == Some(journal.started) {
         return Err("another live installer owns transaction".into());
+    }
+    #[cfg(windows)]
+    {
+        let child = safe(&txn, "postflight-owner.json")?;
+        if child.exists() {
+            crate::installer_process::recover(&read_json(&child)?, &journal.id)?;
+        }
     }
     validate(&journal.next)?;
     if let Some(m) = &journal.previous {
@@ -687,16 +936,13 @@ fn recover(root: &Path, managed: &Path, progress: &Progress) -> Result<()> {
 fn finish_cleanup(managed: &Path, progress: &Progress, requested_fault: &str) -> Result<()> {
     progress.phase("cleanup", 0, 0, 99);
     fault(requested_fault, "before-cleanup");
-    write_json(&managed.join("native-cleanup.json"), &APP)?;
-    rename(
-        &managed.join("native-transaction"),
-        &managed.join("native-cleanup"),
-        false,
-    )?;
-    fault(requested_fault, "after-cleanup-rename");
-    remove_tree_plain(&managed.join("native-cleanup"))?;
-    fs::remove_file(managed.join("native-cleanup.json"))?;
-    Ok(())
+    let transaction = managed.join("native-transaction");
+    retire_recorded(
+        &transaction,
+        managed,
+        &native_cleanup_inventory(&transaction)?,
+        requested_fault,
+    )
 }
 fn check_space(root: &Path, bytes: u64) -> Result<()> {
     #[cfg(windows)]
@@ -845,7 +1091,7 @@ pub fn main_entry() -> Result<()> {
             .map(String::as_str)
             .ok_or_else(|| format!("missing {key}"))
     };
-    let root = PathBuf::from(get("--root")?);
+    let root = normalize_root(Path::new(get("--root")?))?;
     if !root.is_absolute() || root.parent().is_none() || root.components().count() < 3 {
         return Err("unsafe installation root".into());
     }
@@ -887,6 +1133,11 @@ pub fn main_entry() -> Result<()> {
         let old = previous.ok_or("no owned inventory to uninstall")?;
         progress.phase("cleanup", old.files.len(), 0, 1);
         for name in old.files.keys() {
+            // NSIS removes its installed retry entry point only after native cleanup
+            // succeeds. A late metadata error or interruption must leave it runnable.
+            if name == "uninstall.exe" {
+                continue;
+            }
             let path = safe(&root, name)?;
             // Ownership is an inventory property; a normal program update can legitimately
             // change executable hashes. Unknown paths are never enumerated or removed.
@@ -1105,27 +1356,36 @@ pub fn main_entry() -> Result<()> {
         if let Some(script) = args.get("--postflight") {
             #[cfg(windows)]
             {
-                use std::os::windows::process::CommandExt;
-                let status = std::process::Command::new("powershell.exe")
-                    .args([
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        script,
-                        "-InstallDirectory",
-                    ])
-                    .arg(&root)
-                    .arg("-ManifestPath")
-                    .arg(&manifest_path)
-                    .arg("-HealthDirectory")
-                    .arg(txn.join("health-data"))
-                    .creation_flags(0x08000000)
-                    .status()?;
-                if !status.success() {
+                let health = safe(&txn, "health-data")?;
+                if health.exists() {
+                    return Err("unowned health directory collision".into());
+                }
+                let executable = PathBuf::from(
+                    std::env::var_os("SystemRoot").ok_or("missing Windows directory")?,
+                )
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+                let arguments = vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    script.clone(),
+                    "-InstallDirectory".into(),
+                    root.to_string_lossy().into_owned(),
+                    "-ManifestPath".into(),
+                    manifest_path.to_string_lossy().into_owned(),
+                    "-HealthDirectory".into(),
+                    txn.join("health-data").to_string_lossy().into_owned(),
+                ];
+                let child =
+                    crate::installer_process::Child::spawn(&executable, &arguments, &journal.id)?;
+                write_json(&txn.join("postflight-owner.json"), child.identity())?;
+                let code = child.resume_and_wait()?;
+                if code != 0 {
                     return Err("prerequisites or isolated Core health failed".into());
                 }
+                record_health(&health, &txn, &journal.id)?;
             }
             #[cfg(not(windows))]
             let _ = script;

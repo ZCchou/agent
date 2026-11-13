@@ -255,3 +255,120 @@ def test_locked_owned_file_blocks_update(tmp_path):
         assert (root / 'rag-runtime/a').read_bytes() == b'old'
     finally:
         kernel.CloseHandle(ctypes.c_void_p(handle))
+
+
+def windows_process_alive(pid, terminate=False):
+    import ctypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel.OpenProcess(0x00100001, False, pid)
+    if not handle:
+        return False
+    try:
+        alive = kernel.WaitForSingleObject(ctypes.c_void_p(handle), 0) == 258
+        if alive and terminate:
+            kernel.TerminateProcess(ctypes.c_void_p(handle), 1)
+            kernel.WaitForSingleObject(ctypes.c_void_p(handle), 5000)
+        return alive
+    finally:
+        kernel.CloseHandle(ctypes.c_void_p(handle))
+
+
+def test_helper_death_terminates_postflight_tree_before_recovery(tmp_path):
+    root = tmp_path / 'installed'
+    old = package(tmp_path, {'agent-core.exe': b'old'}, 'old')
+    ok(run(root, old))
+    new = package(tmp_path, {'agent-core.exe': b'new'})
+    script = tmp_path / 'postflight.ps1'
+    script.write_text('param($InstallDirectory, $ManifestPath, $HealthDirectory)\n'
+        '$child=Start-Process powershell.exe -ArgumentList "-NoProfile -Command Start-Sleep -Seconds 20" -WindowStyle Hidden -PassThru\n'
+        '[IO.File]::WriteAllText((Join-Path $InstallDirectory "grandchild.pid"), [string]$child.Id)\n'
+        '[IO.File]::WriteAllText((Join-Path $InstallDirectory "postflight.pid"), [string]$PID)\n'
+        'Start-Sleep -Seconds 6\n'
+        'New-Item -ItemType Directory -Path $HealthDirectory -Force | Out-Null\n'
+        '[IO.File]::WriteAllText((Join-Path $InstallDirectory "orphan-write"), "late")\n')
+    process = subprocess.Popen([str(HELPER), '--action', 'install', '--root', str(root),
+        '--manifest', str(new), '--sha256', identity(new.read_bytes())['sha256'],
+        '--archives', str(new.parent), '--embedded', str(new.parent), '--postflight', str(script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    children = []
+    try:
+        deadline = time.monotonic() + 30
+        while not (root / 'postflight.pid').exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(.05)
+        assert (root / 'postflight.pid').exists()
+        children = [int((root / name).read_text()) for name in ('postflight.pid', 'grandchild.pid')]
+        process.kill()
+        process.wait(timeout=10)
+        ok(run(root, action='recover'))
+        assert not any(windows_process_alive(pid) for pid in children), 'postflight descendants survived recovery'
+        assert not (root / 'orphan-write').exists()
+        assert (root / 'agent-core.exe').read_bytes() == b'old'
+        ok(run(root, new))
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=10)
+        for pid in children:
+            windows_process_alive(pid, terminate=True)
+
+
+def test_running_worker_blocks_equivalent_installation_root_aliases(tmp_path):
+    root = tmp_path / 'installed'
+    worker_bytes = (Path(os.environ['SystemRoot']) / 'System32/ping.exe').read_bytes()
+    old = package(tmp_path, {'agent-core.exe': b'old', 'rag-runtime/worker.exe': worker_bytes}, 'old')
+    ok(run(root, old))
+    new = package(tmp_path, {'agent-core.exe': b'new', 'rag-runtime/worker.exe': worker_bytes})
+    alias = tmp_path / 'alias'
+    alias.mkdir()
+    worker = subprocess.Popen([str(root / 'rag-runtime/worker.exe'), '-t', '127.0.0.1'], stdout=subprocess.DEVNULL)
+    try:
+        normal = run(root, new)
+        assert normal.returncode != 0
+        result = run(alias / '..' / 'installed', new)
+        assert result.returncode != 0, 'aliased root bypassed live-worker check'
+        assert 'ambiguous installation root' in result.stderr
+        assert (root / 'agent-core.exe').read_bytes() == b'old'
+        assert run(Path('\\\\?\\' + str(root)), new).returncode != 0
+        import ctypes
+        short = ctypes.create_unicode_buffer(32768)
+        if ctypes.windll.kernel32.GetShortPathNameW(str(root), short, len(short)):
+            assert run(Path(short.value), new).returncode != 0
+    finally:
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.parametrize('fault,transaction', [('after-publish:0', 'native-transaction'),
+    ('before-prepare-journal', 'native-preparation'), ('after-cleanup-rename', 'native-cleanup')])
+def test_recovery_preserves_unknown_native_transaction_content(tmp_path, fault, transaction):
+    root = tmp_path / 'installed'
+    old = package(tmp_path, {'agent-core.exe': b'old'}, 'old')
+    ok(run(root, old))
+    new = package(tmp_path, {'agent-core.exe': b'new'})
+    assert run(root, new, extra=['--fault', fault]).returncode == 97
+    personal = root / '.managed-runtime' / transaction / 'personal.txt'
+    personal.write_bytes(b'personal data')
+    result = run(root, action='recover')
+    ok(result)
+    preserved = list((root / '.managed-runtime').rglob('personal.txt'))
+    assert len(preserved) == 1 and preserved[0].read_bytes() == b'personal data'
+    assert 'PRESERVED_UNKNOWN' in result.stdout
+    ok(run(root, new))
+
+
+def test_late_uninstall_failure_keeps_retry_executable(tmp_path):
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'agent-core.exe': b'core', 'uninstall.exe': b'retry'})
+    ok(run(root, manifest))
+    version = root / '.managed-runtime/versions' / ('b' * 32)
+    (version / 'previous').mkdir(parents=True)
+    (version / 'owner.txt').write_text(APP + '.offline-runtime.v1')
+    (version / 'previous-active.json').write_text('malformed')
+    result = run(root, action='uninstall')
+    assert result.returncode != 0
+    assert (root / 'uninstall.exe').read_bytes() == b'retry'
+    (version / 'previous-active.json').write_text(json.dumps({'schema_version': 1,
+        'release_id': 'agent-0.16.0-preview.2', 'files': {}}))
+    ok(run(root, action='uninstall'))
+    assert (root / 'uninstall.exe').read_bytes() == b'retry', 'NSIS owns final uninstaller deletion'
