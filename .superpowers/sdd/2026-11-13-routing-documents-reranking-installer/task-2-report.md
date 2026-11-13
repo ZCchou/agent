@@ -15,3 +15,13 @@ Validation used the established external venv Python and elevated environment wi
 - Regression coverage includes page/section filtering, generic locators, long-block pagination, original mutation, text artifact tampering, parser/OCR identity changes, unknown configuration reparsing, caller artifact rejection, budget errors, and malformed tool arguments.
 
 Implementation preceded new test execution in this task, so strict red-first TDD was not achieved. Root owns schema-version migration test adjustment and runtime authorization/persistence integration.
+
+## Review fix round 1
+
+Addressed both P2 findings and the production frozen paging ruling. Warning metadata now comes only from the generated preamble before the first SOURCE marker. Literal WARNING-prefixed document content stays in text blocks, while genuine extraction/OCR warnings remain present.
+
+Built-in source and frozen identities now hash the actual Core/interpreter executable. Available OCR runtime reuse requires its runtime.json manifest and every manifest file to pass existing verify_runtime verification on every read. The verified manifest digest enters the identity. Same-path executable/dependency replacements invalidate cached extraction when the manifest is updated. File tampering against an unchanged manifest disables cache reuse. Frozen built-in mode can reuse its artifact across continuation reads. Custom identities still have their explicit contract, and unknown/unverifiable runtime identities conservatively reparse. Source-mode installations without a verifiable runtime manifest conservatively reparse when OCR is available.
+
+Red-first regressions for literal WARNING source lines and source/frozen runtime cache behavior initially produced 3 failures. After implementation, the final focused command using the established elevated venv environment was `python -m pytest services/agent-core/tests/test_document_attachment_read.py -q --basetemp=F:/agent-interaction-v0163-20261113/task2-round1-final`, yielding 11 passed in 2.16s. Coverage verifies unchanged cached artifact IDs on continuation, same-path OCR executable and dependency mutation, Core executable mutation, and unverified runtime file mutation.
+
+Combined extraction tests yielded 23 passed and one failure in test_normal_chat_entry_extracts_document_before_model_dispatch, whose eager-extraction expectation conflicts with root's on-demand runtime update. Root was informed and owns that test/integration adjustment. No unrelated runtime paths were edited.

@@ -82,3 +82,85 @@ def test_unknown_configuration_reparses_and_ignores_caller_artifact(tmp_path):
         with pytest.raises(CoreDataError):
             await service.read(attachment, max_characters=256)
     asyncio.run(scenario())
+
+
+def test_literal_warning_body_remains_pageable(tmp_path):
+    async def scenario():
+        parser = Parser()
+        body = ('WARNING: ' + 'ordinary source text ' * 15 + '\n') * 10
+        async def parse(path):
+            return {'chunks': [{'text': body, 'locator': {'kind': 'pdf', 'page': 1}}], 'warnings': ['OCR missing']}
+        parser.parse = parse
+        service = DocumentAttachments(CoreRepository(tmp_path / 'agent.db'), parser=parser, ocr=Ocr())
+        attachment = source_attachment(tmp_path)
+        offset, parts = 0, []
+        while True:
+            result = await service.read(attachment, offset=offset, max_characters=1200)
+            assert result['warnings'] == ['OCR missing']
+            parts.extend(block['text'] for block in result['blocks'])
+            offset = result['next_offset']
+            if offset is None:
+                break
+        assert ''.join(parts).strip() == body.strip()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('frozen', [False, True])
+def test_builtin_runtime_identity_and_frozen_paging(tmp_path, monkeypatch, frozen):
+    import hashlib
+    import sys
+    from agent.document_parser import ParserService
+    from agent.ocr.client import OcrClient
+    from agent.rag.repository import RagRepository
+
+    async def scenario():
+        core = CoreRepository(tmp_path / 'agent.db')
+        data_dir = RagRepository(core).data_dir
+        parser, ocr = ParserService(data_dir), OcrClient(data_dir)
+        runtime = tmp_path / 'ocr-runtime'
+        executable = runtime / 'python' / 'python.exe'
+        executable.parent.mkdir(parents=True)
+        dependency = runtime / 'dependency.dll'
+        executable.write_bytes(b'ocr executable')
+        dependency.write_bytes(b'first runtime')
+        def manifest():
+            value = {'schema_version': 1, 'profile': 'ocr-preview-cpu-v1', 'files': {
+                'python/python.exe': hashlib.sha256(executable.read_bytes()).hexdigest(),
+                'dependency.dll': hashlib.sha256(dependency.read_bytes()).hexdigest()}}
+            (runtime / 'runtime.json').write_text(json.dumps(value), encoding='utf-8')
+        manifest()
+        core_executable = tmp_path / 'core.exe'
+        core_executable.write_bytes(b'core executable')
+        monkeypatch.setattr(sys, 'executable', str(core_executable))
+        monkeypatch.setattr(sys, 'frozen', frozen, raising=False)
+        parser.command = [str(core_executable), '--document-worker'] if frozen else [str(core_executable), '-m', 'agent.document_parser.worker']
+        monkeypatch.setattr(ocr, 'available', lambda: {'available': True, 'command': [str(executable), '-B', '-m', 'agent.ocr.worker']})
+        calls = []
+        async def parse(path):
+            calls.append(path)
+            return {'chunks': [{'text': 'reading ' * 1000, 'locator': {'kind': 'docx', 'paragraph': 1}}], 'warnings': []}
+        monkeypatch.setattr(parser, 'parse', parse)
+        service = DocumentAttachments(core, parser=parser, ocr=ocr)
+        attachment = source_attachment(tmp_path)
+        first = await service.read(attachment, max_characters=1200)
+        assert first['next_offset'] is not None
+        second = await service.read(attachment, offset=first['next_offset'], max_characters=1200)
+        assert len(calls) == 1
+        assert first['text_artifact']['artifact_id'] == second['text_artifact']['artifact_id']
+        dependency.write_bytes(b'changed runtime')
+        manifest()
+        await service.read(attachment, max_characters=1200)
+        assert len(calls) == 2
+        executable.write_bytes(b'changed OCR executable')
+        manifest()
+        await service.read(attachment, max_characters=1200)
+        assert len(calls) == 3
+        core_executable.write_bytes(b'changed core')
+        await service.read(attachment, max_characters=1200)
+        assert len(calls) == 4
+        dependency.write_bytes(b'unverified runtime')
+        await service.read(attachment, max_characters=1200)
+        await service.read(attachment, max_characters=1200)
+        assert len(calls) == 6
+        await service.close()
+    asyncio.run(scenario())

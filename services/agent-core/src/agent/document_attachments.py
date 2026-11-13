@@ -118,14 +118,26 @@ class DocumentAttachments:
         # Custom workers must expose their own complete cache identity.
         from agent.ocr.store import OcrModelStore
         default_command = [sys.executable, '--document-worker'] if getattr(sys, 'frozen', False) else [sys.executable, '-m', 'agent.document_parser.worker']
-        if self.parser.command != default_command or getattr(sys, 'frozen', False):
+        if self.parser.command != default_command:
             return None
         try:
             available = self.ocr.available()
             if self.ocr.command is not None:
                 return None
+            with Path(sys.executable).open('rb') as stream:
+                executable_identity = hashlib.file_digest(stream, 'sha256').hexdigest()
+            runtime_identity = None
+            if available['available']:
+                from agent.ocr.client import verify_runtime
+                runtime_root = Path(available['command'][0]).resolve().parent.parent
+                manifest_path = runtime_root / 'runtime.json'
+                manifest = manifest_path.read_bytes()
+                verify_runtime(runtime_root)
+                if manifest_path.read_bytes() != manifest:
+                    return None
+                runtime_identity = hashlib.sha256(manifest).hexdigest()
             code = hashlib.sha256()
-            for folder in ('document_parser', 'ocr'):
+            for folder in (() if getattr(sys, 'frozen', False) else ('document_parser', 'ocr')):
                 for path in sorted((Path(__file__).parent / folder).glob('*.py')):
                     code.update(path.name.encode())
                     code.update(path.read_bytes())
@@ -134,7 +146,8 @@ class DocumentAttachments:
                 store = OcrModelStore(self.repository.data_dir / 'ocr-models')
                 records = store.list_models()
                 models = [store.get_profile(item['id'])['digest'] for item in records['models'] if item.get('status') == 'ready']
-            return json.dumps({'code': code.hexdigest(), 'parser_command': self.parser.command,
+            return json.dumps({'code': code.hexdigest(), 'executable': executable_identity,
+                               'ocr_runtime': runtime_identity, 'parser_command': self.parser.command,
                                'parser_limits': [self.parser.memory_limit, self.parser.timeout, self.parser.result_limit],
                                'ocr': available, 'models': models, 'device': 'cpu', 'threads': 3}, sort_keys=True)
         except (OSError, ValueError, KeyError, CoreDataError):
@@ -170,7 +183,10 @@ class DocumentAttachments:
             if identity is not None:
                 self._read_cache[key] = dict(artifact)
         text = await asyncio.to_thread(self._read_artifact, artifact)
-        warnings = [line[9:] for line in text.splitlines() if line.startswith('WARNING: ')]
+        # Only the generated preamble contains extraction metadata. Literal
+        # WARNING lines inside SOURCE bodies remain ordinary pageable text.
+        preamble = re.split(r'^\[SOURCE ', text, maxsplit=1, flags=re.MULTILINE)[0]
+        warnings = [line[9:] for line in preamble.splitlines() if line.startswith('WARNING: ')]
         result = {'attachment_id': attachment.get('id'), 'source_sha256': attachment['sha256'],
                   'trust': 'untrusted', 'text_artifact': dict(artifact), 'blocks': [], 'next_offset': None, 'total': 0, 'warnings': warnings}
         encode = lambda value: json.dumps(value, ensure_ascii=False)
