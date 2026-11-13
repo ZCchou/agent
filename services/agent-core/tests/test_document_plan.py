@@ -385,22 +385,31 @@ def test_actual_user_parameter_is_retained_without_simulation_permission(tmp_pat
     assert '【模拟' not in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
 
 
-def test_legacy_completed_plan_replays_saved_fields_with_derived_actual_provenance(tmp_path):
+@pytest.mark.parametrize('partial_span', [False, True])
+def test_legacy_completed_plan_replays_saved_fields_with_derived_actual_provenance(tmp_path, partial_span):
     import json
     _, run, service = workflow(tmp_path)
     source = source_document(service, run)
+    if partial_span:
+        document = Document(service.path_for(run['id'], source['id']))
+        document.paragraphs[2].text = 'KEEP [TODO] TAIL'
+        payload = io.BytesIO()
+        document.save(payload)
+        source = service.register_template(run['id'], payload.getvalue(), 'partial.docx')
     calls = []
     def generate(task):
         calls.append(task['stage'])
         if task['stage'] == 'plan':
-            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction', 'parameter_keys': ['model']}],
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction', 'parameter_keys': ['model'],
+                                 **({'span': {'start': 5, 'end': 11}} if partial_span else {})}],
                     'equipment_parameters': {'model': 'USER-ACTUAL-123'}}
         return {'fields': [{'target_id': 'p-2', 'text': 'Equipment {{equipment:model}}', 'evidence': [],
                             'parameter_values': {'model': 'USER-ACTUAL-123'}}]}
     user_request = 'Use my actual model USER-ACTUAL-123. Simulation is allowed for missing data.'
     current = asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate, allow_simulated=True))
-    legacy = service.fill(run['id'], current['id'], [{'target_id': 'p-2',
-        'text': '【模拟数据示例，仅用于示例用途】\nEquipment USER-ACTUAL-123', 'evidence': []}])
+    legacy = service.fill(run['id'], source['id'], [{'target_id': 'p-2',
+        'text': '【模拟数据示例，仅用于示例用途】\nEquipment USER-ACTUAL-123', 'evidence': [],
+        **({'span': {'start': 5, 'end': 11}} if partial_span else {})}])
     checkpoint = service.root / current['manifest']['document_plan_path']
     plan = json.loads(checkpoint.read_text(encoding='utf8'))
     plan.pop('equipment_parameter_provenance')
@@ -409,7 +418,10 @@ def test_legacy_completed_plan_replays_saved_fields_with_derived_actual_provenan
     resumed = asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate, allow_simulated=True))
     assert calls == ['plan', 'fill']
     assert resumed['manifest']['simulated'] is False
-    assert '【模拟' not in Document(service.path_for(run['id'], resumed['id'])).paragraphs[2].text
+    text = Document(service.path_for(run['id'], resumed['id'])).paragraphs[2].text
+    assert text == ('KEEP Equipment USER-ACTUAL-123 TAIL' if partial_span else 'Equipment USER-ACTUAL-123')
+    repeated = asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate, allow_simulated=True))
+    assert repeated['id'] == resumed['id']
 
 
 @pytest.mark.parametrize(('user_request', 'purpose', 'source_text'), [

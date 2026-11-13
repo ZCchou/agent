@@ -573,9 +573,13 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
                 replay.append({'target_id': target['target_id'], 'text': text,
                     'evidence': field.get('evidence', []), 'missing': field.get('missing', []), 'span': target.get('span')})
             plan['provenance_migration_pending'] = True
+            # Target spans belong to the immutable template. Restart replay there
+            # on every attempt, including recovery after a partially saved replay.
+            replay_id = template_id
             for offset in range(0, len(replay), 10):
-                migrated = workflow.fill(run_id, plan['artifact_id'] or template_id, replay[offset:offset+10],
+                migrated = workflow.fill(run_id, replay_id, replay[offset:offset+10],
                                          evidence_resolver=resolve_evidence if evidence_resolver else None)
+                replay_id = migrated['id']
                 plan['artifact_id'] = migrated['id']
                 save_checkpoint(path, plan)
             plan.pop('provenance_migration_pending')
