@@ -413,7 +413,7 @@ def test_runtime_status_never_walks_component_directories(tmp_path, monkeypatch)
     assert status['available']
     assert status['integrity_check'] == 'on_load'
 
-def test_cpu_worker_is_reused_only_for_the_same_model_identity(tmp_path, monkeypatch):
+def test_cpu_workers_are_reused_for_two_distinct_model_identities(tmp_path, monkeypatch):
     import sys
     script = tmp_path / 'worker.py'
     script.write_text("import sys,json,os\nfor line in sys.stdin:\n r=json.loads(line); print(json.dumps({'id':r['id'],'result':{'available':True,'pid':os.getpid()}}),flush=True)\n")
@@ -424,6 +424,7 @@ def test_cpu_worker_is_reused_only_for_the_same_model_identity(tmp_path, monkeyp
     first = asyncio.run(store.import_model(first_source, 'bge-m3'))
     second = asyncio.run(store.import_model(second_source, 'bge-m3'))
     monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+    monkeypatch.setattr('agent.rag.models.system_memory', lambda: {'available_physical_bytes': 16 * 1024**3})
 
     async def exercise():
         try:
@@ -433,10 +434,11 @@ def test_cpu_worker_is_reused_only_for_the_same_model_identity(tmp_path, monkeyp
             assert (await store.probe(first['id']))['pid'] == first_probe['pid']
             second_probe = await store.probe(second['id'])
             assert second_probe['available']
-            assert old_process.returncode is not None
+            assert old_process.returncode is None
             assert store._workers['cpu'] is not old_worker
             assert second_probe['pid'] != first_probe['pid']
             third_probe = await store.probe(first['id'])
+            assert third_probe['pid'] == first_probe['pid']
             assert third_probe['pid'] != second_probe['pid']
         finally:
             await store.close()
@@ -464,6 +466,7 @@ def test_shutdown_during_model_switch_cannot_start_a_replacement_worker(tmp_path
             await release.wait()
         try:
             assert (await store.probe(first['id']))['available']
+            monkeypatch.setattr('agent.rag.models.system_memory', lambda: {'available_physical_bytes': 2 * 1024**3})
             monkeypatch.setattr(WorkerClient, 'close', paused_close)
             switching = asyncio.create_task(store.probe(second['id']))
             await asyncio.wait_for(entered.wait(), 2)

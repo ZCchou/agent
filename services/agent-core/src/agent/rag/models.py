@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import importlib.util
 import json
 import math
@@ -13,10 +14,12 @@ import sys
 import tempfile
 import threading
 import uuid
+from collections import OrderedDict
 from contextlib import nullcontext
 from pathlib import Path
 
 from agent.storage import CoreDataError
+from agent.gpu_resources import system_memory
 from agent.rag.model_profiles import PROFILES, validate_onnx_package
 from agent.rag.worker_client import WorkerClient
 
@@ -149,6 +152,10 @@ class ModelStore:
         self._device_locks = {"cpu": asyncio.Lock(), "cuda": asyncio.Lock()}
         self._verified_files = {}
         self._loaded_models = {}
+        self._resident_workers = OrderedDict()
+        self._retired_workers = set()
+        self._model_peaks = {}
+        self._rerank_partial = OrderedDict()
         self.gpu_resources = None
         self._state = _json(self._state_path) if self._state_path.exists() else {"schema_version": 1, "root": str(self.data_dir / "models"), "models": []}
         if self._state.get("schema_version") != 1:
@@ -317,6 +324,7 @@ class ModelStore:
             except Exception:
                 record.update(previous)
                 raise
+            self._invalidate_cached(model_id)
             return dict(record)
 
     def set_root(self, path):
@@ -324,6 +332,7 @@ class ModelStore:
         with self._mutation_lock:
             if target.resolve() == self.root.resolve():
                 return {"root": str(self.root)}
+            self._invalidate_cached()
             if target.resolve().is_relative_to(self.root.resolve()) or self.root.resolve().is_relative_to(target.resolve()):
                 raise CoreDataError("rag_model_error", "Model roots must not contain each other")
             target.mkdir(parents=True, exist_ok=True)
@@ -362,6 +371,7 @@ class ModelStore:
 
     def remove(self, model_id):
         with self._mutation_lock:
+            self._invalidate_cached(model_id)
             with self._lock:
                 record = self._record(model_id)
                 target = self.root / record["id"]
@@ -468,7 +478,54 @@ class ModelStore:
                 self._verified_files[key] = after
         return path
 
-    async def _request(self, model_id, action, **params):
+    def _invalidate_cached(self, model_id=None):
+        for key in list(self._resident_workers):
+            if model_id is None or key[0] == model_id:
+                worker = self._resident_workers.pop(key, None)
+                if worker is None:
+                    continue
+                worker.invalidate()
+                self._retired_workers.add(worker)
+                if self._workers.get(key[2]) is worker:
+                    self._workers.pop(key[2], None)
+                    self._loaded_models.pop(key[2], None)
+        self._verified_files.clear()
+        self._rerank_partial.clear()
+
+    async def _discard_worker(self, key):
+        worker = self._resident_workers.pop(key, None)
+        if worker is None:
+            return
+        device = key[2]
+        if self._workers.get(device) is worker:
+            self._workers.pop(device, None)
+            self._loaded_models.pop(device, None)
+        await worker.close()
+
+    async def invalidate(self, model_id=None):
+        """Release native handles before registry mutation or root migration."""
+        for device in ('cpu', 'cuda'):
+            async with self._device_locks[device]:
+                for key in list(self._resident_workers):
+                    if key[2] == device and (model_id is None or key[0] == model_id):
+                        await self._discard_worker(key)
+        self._rerank_partial.clear()
+        self._verified_files.clear()
+
+    async def _admit_cpu(self, record):
+        required = max(2 * record['size_bytes'] + 512 * 1024**2,
+                       self._model_peaks.get((record['id'], record['digest']), 0))
+        available = system_memory().get('available_physical_bytes')
+        cpu_keys = [key for key in self._resident_workers if key[2] == 'cpu']
+        while cpu_keys and (len(cpu_keys) >= 2 or available is None or available - required < 2 * 1024**3):
+            key = cpu_keys.pop(0)
+            await self._discard_worker(key)
+            available = system_memory().get('available_physical_bytes')
+        if available is not None and available - required < 2 * 1024**3:
+            raise CoreDataError('rag_resource_exhausted', '辅助检索模型可用内存不足。',
+                                {'device': 'cpu', 'resource': 'cpu_memory', 'reserve_bytes': 2 * 1024**3})
+
+    async def _request(self, model_id, action, *, progress=None, partial=None, **params):
         if self._closed:
             raise CoreDataError("rag_model_error", "Local model store is closed")
         with self._lock:
@@ -477,71 +534,111 @@ class ModelStore:
         if action == "embed" and record["role"] != "embedding" or action == "rerank" and record["role"] != "reranker":
             raise CoreDataError("rag_model_error", "Selected local model has the wrong role")
         device = record["device"]
+        key = (record['id'], record['digest'], device)
         def is_resident():
-            loaded = self._loaded_models.get(device)
-            return loaded is not None and loaded[1] == (str(root), record["id"], record["digest"]) \
-                and loaded[0].process is not None and loaded[0].process.returncode is None
+            worker = self._resident_workers.get(key)
+            return worker is not None and worker.process is not None and worker.process.returncode is None
         guard = self.gpu_resources.auxiliary(record, resident=is_resident) if self.gpu_resources else nullcontext()
         async with guard, self._device_locks[device]:
             if self._closed:
                 raise CoreDataError("rag_model_error", "Local model store is closed")
             identity = (str(root), record["id"], record["digest"])
-            worker = self._workers.get(device)
-            if worker is not None and (self._loaded_models.get(device) != (worker, identity)
-                    or worker.process is None or worker.process.returncode is not None):
-                # Reclaim native allocators before loading a different model.
-                self._workers.pop(device, None)
-                self._loaded_models.pop(device, None)
-                await worker.close()
-                worker = None
-            if worker is None:
-                command = await asyncio.to_thread(self._command)
-                if self._closed:
-                    raise CoreDataError("rag_model_error", "Local model store is closed")
-                worker = WorkerClient(command)
-                self._workers[device] = worker
-            force = self._loaded_models.get(device) != (worker, identity) or worker.process is None or worker.process.returncode is not None
+            with self._lock:
+                current = self._record(model_id)
+                if self.root != root or any(current[field] != record[field] for field in ('digest', 'device', 'profile', 'backend')):
+                    raise CoreDataError('rag_model_changed', 'The selected model changed while waiting for resources.')
+            worker = self._resident_workers.get(key)
+            force = worker is None or not is_resident()
             try:
                 path = await asyncio.to_thread(self._verified_path, record, root, force)
+                fingerprint = self._stat_identity(path)
+                if worker is not None and (force or worker.model_fingerprint != fingerprint or worker.model_root != str(root)):
+                    await self._discard_worker(key)
+                    worker = None
+                if worker is None:
+                    if device == 'cpu':
+                        await self._admit_cpu(record)
+                    else:
+                        for old in list(self._resident_workers):
+                            if old[2] == 'cuda':
+                                await self._discard_worker(old)
+                    command = await asyncio.to_thread(self._command)
+                    if self._closed:
+                        raise CoreDataError('rag_model_error', 'Local model store is closed')
+                    with self._lock:
+                        current = self._record(model_id)
+                        if self.root != root or any(current[field] != record[field] for field in ('digest', 'device', 'profile', 'backend')):
+                            raise CoreDataError('rag_model_changed', 'The selected model changed during admission.')
+                    worker = WorkerClient(command)
+                    worker.model_fingerprint = fingerprint
+                    worker.model_root = str(root)
+                    self._resident_workers[key] = worker
+                self._resident_workers.move_to_end(key)
+                self._workers[device] = worker
+                self._loaded_models[device] = (worker, identity)
                 request_params = {"path": str(path), "profile": record["profile"], "backend": record["backend"],
                                   "device": device, "digest": record["digest"], **params}
                 if action == 'probe':
                     result = await worker.request(action, request_params)
                 else:
                     texts = params['texts']
-                    batch_size = 2 if record['backend'] == 'onnx' else max(1, len(texts))
-                    result = []
-                    offset = 0
+                    batch_size = 2 if record['backend'] == 'onnx' else (4 if action == 'rerank' else 8)
+                    result = partial if partial is not None else []
+                    offset = len(result)
+                    if progress:
+                        event = {'stage': 'reranking' if is_resident() else 'model_loading',
+                                 'completed': offset, 'total': len(texts)}
+                        pending = progress(event)
+                        if inspect.isawaitable(pending):
+                            await pending
                     while offset < len(texts):
                         batch = texts[offset:offset + batch_size]
+                        async def worker_progress(event):
+                            if progress:
+                                pending = progress({**event, 'completed': offset, 'total': len(texts)})
+                                if inspect.isawaitable(pending):
+                                    await pending
                         try:
-                            batch_result = await worker.request(action, {**request_params, 'texts': batch})
+                            batch_result = await worker.request(action, {**request_params, 'texts': batch,
+                                                                         'report_progress': progress is not None},
+                                                                progress=worker_progress if progress else None)
                         except CoreDataError as exc:
                             if exc.code != 'rag_resource_exhausted' or batch_size == 1:
                                 raise
                             batch_size = 1
+                            await asyncio.to_thread(self._verified_path, record, root, True)
                             continue
                         if not isinstance(batch_result, list) or len(batch_result) != len(batch):
                             raise CoreDataError('rag_model_error', 'Inference returned an invalid batch size')
+                        if action == 'rerank' and any(type(value) not in (int, float) or not math.isfinite(value)
+                                                      or not 0 <= value <= 1 for value in batch_result):
+                            raise CoreDataError('rag_model_error', 'Inference returned invalid reranker scores')
                         result.extend(batch_result)
                         offset += len(batch)
+                        if progress:
+                            pending = progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
+                                                'completed': offset, 'total': len(texts)})
+                            if inspect.isawaitable(pending):
+                                await pending
+                self._model_peaks[(record['id'], record['digest'])] = max(
+                    self._model_peaks.get((record['id'], record['digest']), 0),
+                    getattr(worker, 'peak_memory_bytes', 0))
+                if self._resident_workers.get(key) is not worker:
+                    raise CoreDataError('rag_model_changed', 'The selected model changed during inference.')
                 self._loaded_models[device] = (worker, identity)
                 return result
             except asyncio.CancelledError:
-                self._loaded_models.pop(device, None)
-                self._workers.pop(device, None)
-                await worker.close()
+                await self._discard_worker(key)
                 raise
             except Exception:
-                self._loaded_models.pop(device, None)
+                await self._discard_worker(key)
                 raise
 
     async def release_cuda(self):
         async with self._device_locks["cuda"]:
-            worker = self._workers.pop("cuda", None)
-            self._loaded_models.pop("cuda", None)
-            if worker is not None:
-                await worker.close()
+            for key in list(self._resident_workers):
+                if key[2] == 'cuda':
+                    await self._discard_worker(key)
 
     async def probe(self, model_id):
         try:
@@ -565,15 +662,36 @@ class ModelStore:
             raise CoreDataError("rag_model_error", "Inference returned invalid embedding dimensions or values")
         return result
 
-    async def rerank(self, model_id, query, texts):
+    async def rerank(self, model_id, query, texts, *, token_budget=2048, progress=None, cache_key=None, timeout=90):
         if not isinstance(query, str) or not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
             raise CoreDataError("rag_model_error", "Reranking requires a query and list of strings")
-        result = await self._request(model_id, "rerank", query=query, texts=texts)
+        partial = []
+        try:
+            async with asyncio.timeout(timeout):
+                record = dict(self._record(model_id))
+                fingerprint = await asyncio.to_thread(self._stat_identity, self.root / model_id)
+                identity = (str(self.root), model_id, record['digest'], record['device'], fingerprint,
+                            query, tuple(texts), token_budget, cache_key)
+                partial = self._rerank_partial.setdefault(identity, [])
+                self._rerank_partial.move_to_end(identity)
+                while len(self._rerank_partial) > 8:
+                    self._rerank_partial.popitem(last=False)
+                result = await self._request(model_id, 'rerank', query=query, texts=texts,
+                                             token_budget=token_budget, progress=progress, partial=partial)
+        except TimeoutError as exc:
+            raise CoreDataError('rag_rerank_timeout', '辅助检索重排超过时间预算，可重试继续。',
+                                {'completed': len(partial), 'total': len(texts), 'timeout_seconds': timeout,
+                                 'model_id': model_id, 'retryable': True}) from exc
         if len(result) != len(texts) or any(not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1 for value in result):
             raise CoreDataError("rag_model_error", "Inference returned invalid reranker scores")
         return result
 
     async def close(self):
         self._closed = True
-        workers, self._workers = self._workers, {}
-        await asyncio.gather(*(worker.close() for worker in workers.values()))
+        workers, self._resident_workers = self._resident_workers, OrderedDict()
+        self._workers.clear()
+        self._loaded_models.clear()
+        self._verified_files.clear()
+        self._rerank_partial.clear()
+        retired, self._retired_workers = self._retired_workers, set()
+        await asyncio.gather(*(worker.close() for worker in set(workers.values()) | retired))
