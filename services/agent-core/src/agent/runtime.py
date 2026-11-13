@@ -5164,6 +5164,8 @@ class ChatRunService:
             instruction += (' Wrap the result in {"response":RESULT}. Select only writable target IDs, never headings or containers. '
                 'Use span:null to replace the complete target. A span is a character range object, never a boolean. '
                 'For a test-purpose section, fill the body below its heading and preserve the heading. '
+                'In this strict response, encode equipment_parameters and parameter_values as arrays of {"name":NAME,"value":VALUE}; '
+                'use [] when empty. The application converts these arrays to the shared parameter map. '
                 'task.fields already contains the authorized original content for these targets; plan them directly. '
                 'Read further only for missing source data. Read section uses heading text, not an internal section ID. '
                 'Use physical_page only for PDF, otherwise null.')
@@ -5197,7 +5199,24 @@ class ChatRunService:
             raise CoreDataError('document_plan_invalid', '模板批次需要结构化结果，已保存完成的批次。')
         if strict and set(result) == {'response'} and isinstance(result['response'], dict):
             result = result['response']
+        if strict:
+            parameter_containers = [result] if task['stage'] == 'plan' else result.get('fields', [])
+            if not isinstance(parameter_containers, list):
+                raise CoreDataError('document_plan_invalid', '模板批次字段清单无效。')
+            parameter_key = 'equipment_parameters' if task['stage'] == 'plan' else 'parameter_values'
+            for container in parameter_containers:
+                if not isinstance(container, dict):
+                    raise CoreDataError('document_plan_invalid', '模板批次字段需要结构化结果。')
+                values = container.get(parameter_key, {})
+                if isinstance(values, list):
+                    if any(not isinstance(item, dict) or set(item) != {'name', 'value'}
+                           or not isinstance(item['name'], str) or not isinstance(item['value'], str) for item in values) \
+                            or len({item['name'] for item in values}) != len(values):
+                        raise CoreDataError('document_plan_invalid', '模板批次设备参数清单无效或包含重复名称。')
+                    container[parameter_key] = {item['name']: item['value'] for item in values}
         if strict and isinstance(result.get('read_requests'), list):
+            if any(not isinstance(item, dict) for item in result['read_requests']):
+                raise CoreDataError('document_plan_invalid', '模板批次附件读取清单无效。')
             result['read_requests'] = [{key: value for key, value in item.items() if value is not None}
                                       for item in result['read_requests']]
         return result

@@ -156,7 +156,8 @@ def test_application_full_template_uses_batched_plan_for_repeated_headings(tmp_p
 
 @pytest.mark.parametrize(('equipment_value', 'retry_mode'), [('EQ-ALPHA', None), ('EQ-BETA', 'same'), ('EQ-GAMMA', 'linked'),
     ('USER-ACTUAL-123', 'real_only'), ('USER-ACTUAL-456', 'mixed'), ('LONG-ACTUAL', 'long'),
-    ('CHANGED-ACTUAL', 'changed_source'), ('EQ-FALLBACK', 'schema_unsupported')])
+    ('CHANGED-ACTUAL', 'changed_source'), ('EQ-FALLBACK', 'schema_unsupported'),
+    ('EQ-ARRAY', 'strict_arrays'), ('EQ-DUPLICATE', 'strict_duplicate')])
 def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, monkeypatch, equipment_value, retry_mode):
     import json
     import httpx
@@ -197,6 +198,14 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
                 'text': ' '.join('{{equipment:' + key + '}}' for key in field['parameter_keys']) + ' 设备性能验证草稿。',
                 'parameter_values': {key: parameters[key] for key in field['parameter_keys']},
                 'evidence': citations, 'missing': ['设备安装位置和适用依据待补充']} for field in task['fields']]}
+        if retry_mode in {'strict_arrays', 'strict_duplicate'} and not result.get('read_requests'):
+            containers = [result] if task['stage'] == 'plan' else result['fields']
+            key = 'equipment_parameters' if task['stage'] == 'plan' else 'parameter_values'
+            for container in containers:
+                container[key] = [{'name': name, 'value': value} for name, value in container[key].items()]
+                if retry_mode == 'strict_duplicate':
+                    container[key] += container[key]
+            result = {'response': result}
         chunk = {'choices': [{'delta': {'content': json.dumps(result, ensure_ascii=False)}, 'finish_reason': 'stop'}]}
         return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
@@ -269,6 +278,10 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
                 'attachments': [attachment, equipment], 'idempotency_key': 'template-normal'})
             await application.tasks[response['run']['id']]
             run = core.get_model_run(response['run']['id'])
+            if retry_mode == 'strict_duplicate':
+                assert run['status'] == 'failed' and run['error_code'] == 'document_plan_invalid'
+                assert not published
+                return
             if retry_mode == 'changed_source':
                 assert run['status'] == 'failed'
                 assert run['error_code'] == 'attachment_changed'
@@ -376,7 +389,7 @@ def test_batch_schema_protects_headings_spans_and_attachment_identity():
                                        {'id': 'p-611', 'field_type': 'content'}]}
     schema = document_batch_schema(task, ['authorized'])
     target = {'target_id': 'p-611', 'field_type': 'content', 'parameter_keys': [], 'span': None}
-    response = {'response': {'targets': [target], 'equipment_parameters': {}, 'gaps': []}}
+    response = {'response': {'targets': [target], 'equipment_parameters': [], 'gaps': []}}
     assert schema_accepts(response, schema)
     target['target_id'] = 'p-610'
     assert not schema_accepts(response, schema)
@@ -386,6 +399,17 @@ def test_batch_schema_protects_headings_spans_and_attachment_identity():
     assert schema_accepts({'response': {'read_requests': [reading]}}, schema)
     reading['attachment_id'] = 'forged'
     assert not schema_accepts({'response': {'read_requests': [reading]}}, schema)
+    def check_closed_objects(node):
+        if isinstance(node, dict):
+            if node.get('type') == 'object':
+                assert node.get('additionalProperties') is False
+                assert set(node['required']) == set(node['properties'])
+            for value in node.values():
+                check_closed_objects(value)
+        elif isinstance(node, list):
+            for value in node:
+                check_closed_objects(value)
+    check_closed_objects(schema)
 
 
 def schema_accepts(value, schema):

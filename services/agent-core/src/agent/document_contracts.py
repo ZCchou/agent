@@ -9,7 +9,8 @@ def document_batch_schema(task, attachment_ids):
         return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
     strings = {'type': 'array', 'items': {'type': 'string'}}
-    parameters = {'type': 'object', 'additionalProperties': {'type': 'string'}}
+    parameters = {'type': 'array', 'maxItems': 100, 'items': object_schema({
+        'name': {'type': 'string'}, 'value': {'type': 'string'}})}
     writable = [field.get('target_id', field.get('id')) for field in task['fields']
                 if field.get('field_type') not in {'heading', 'container'}]
     target_id = {'type': 'string', **({'enum': writable} if writable else {})}
