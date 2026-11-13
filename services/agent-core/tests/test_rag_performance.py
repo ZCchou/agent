@@ -11,6 +11,7 @@ from test_rag_models import model_directory
 
 
 def store_with_models(tmp_path, monkeypatch, count=3, reranker=False):
+    monkeypatch.setattr('agent.rag.models.system_memory', lambda: {'available_physical_bytes': 16 * 1024**3})
     store = ModelStore(tmp_path / 'data')
     records = []
     for number in range(count):

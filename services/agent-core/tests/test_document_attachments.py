@@ -128,6 +128,12 @@ def test_normal_chat_entry_extracts_document_before_model_dispatch(tmp_path, mon
             events.append(event)
         service = ChatRunService(core, sink)
         service.document_attachments.parser = Parser()
+        async def select_read(**kwargs):
+            return {'files': 'read', 'tools': 'available', 'web': 'off', 'web_evidence': 'optional',
+                'reasoning': 'standard', 'task_kinds': ['attachment_extract'],
+                'explanation_code': 'attachment_read', 'rag_requirement': 'not_needed',
+                'follow_up': 'none', 'read_attachment_ids': [attachment['id']]}, None
+        service._preflight_intent_advisor = select_read
         try:
             result = await service.start({"content": "Read the equipment requirements", "idempotency_key": "read-document",
                 "kind": "standard_chat", "category": "casual", "provider_profile_id": "builtin-demo", "model_id": "demo",
@@ -196,7 +202,7 @@ def test_schema26_upgrade_preserves_existing_attachment_records(tmp_path):
     assert stored['sha256'] == attachment['sha256']
     assert stored['storage_key'] == attachment['storage_key']
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 30
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 31
         assert "'document.source'" in connection.execute("SELECT sql FROM sqlite_master WHERE name='attachment_artifacts'").fetchone()[0]
 
 

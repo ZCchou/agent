@@ -21,7 +21,7 @@ def test_health_command_checks_exact_core_contract_without_starting_models(tmp_p
     result = invoke('--profile-health', tmp_path)
     assert result.returncode == 0, result.stderr
     health = json.loads(result.stdout)
-    assert health['schema_version'] == 30
+    assert health['schema_version'] == 31
     assert health['core_build_id'] == BUILD_ID
     assert health['integrity'] == 'ok'
 

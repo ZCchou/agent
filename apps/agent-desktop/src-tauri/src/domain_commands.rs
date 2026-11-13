@@ -1439,10 +1439,10 @@ mod routing_serialization_tests {
             contract["ipc_version"],
             crate::core_bridge::PROTOCOL_VERSION
         );
-        assert_eq!(contract["settings_schema_version"], 18);
-        assert_eq!(contract["core_schema_version"], 30);
+        assert_eq!(contract["settings_schema_version"], 19);
+        assert_eq!(contract["core_schema_version"], 31);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema30-agent-unified-v1");
+        assert_eq!(contract["build_id"], "schema31-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

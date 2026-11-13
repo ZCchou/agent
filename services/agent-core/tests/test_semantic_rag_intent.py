@@ -7,6 +7,33 @@ from agent.execution.coordinator import ExecutionCoordinator
 from agent.rag.routing import decide_evidence, merge_evidence_intent
 
 
+def test_classifier_carries_attachment_plan_and_clarification():
+    intent = ExecutionCoordinator.parse_routing_intent(json.dumps({
+        'web': 'off', 'reasoning': 'standard', 'task_kinds': ['attachment_extract'],
+        'explanation_code': 'read_attachment', 'rag_requirement': 'not_needed',
+        'read_attachment_ids': ['attachment-1'], 'task_scope': 'full',
+        'retrieval_scope': 'focused', 'allow_simulated_data': True,
+        'clarification': {'summary': '已识别读取任务', 'questions': [
+            {'id': 'file', 'question': '读取哪份附件？', 'options': ['第一份', '第二份']}]},
+    }))
+    assert intent['read_attachment_ids'] == ['attachment-1']
+    assert intent['task_scope'] == 'full'
+    assert intent['clarification']['questions'][0]['id'] == 'file'
+    merged = merge_evidence_intent(decide_evidence('提取文件'), intent)
+    assert merged['task_type'] == 'attachment_extract'
+    assert merged['retrieval_scope'] == 'focused'
+
+
+@pytest.mark.parametrize('field,value', [('task_scope', 'everything'),
+    ('read_attachment_ids', ['a', 'a']), ('read_attachment_ids', 'all'),
+    ('allow_simulated_data', 'yes'), ('clarification', {'summary': 'x', 'questions': []})])
+def test_classifier_rejects_invalid_read_plan_fields(field, value):
+    payload = {'web': 'off', 'reasoning': 'standard', 'task_kinds': ['general'],
+               'explanation_code': 'general', 'rag_requirement': 'not_needed', field: value}
+    with pytest.raises(ValueError):
+        ExecutionCoordinator.parse_routing_intent(json.dumps(payload))
+
+
 def test_classifier_prompt_demonstrates_array_and_explanation_contract():
     import ast
     from pathlib import Path
