@@ -103,43 +103,104 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
     return result
 
 
-def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes, pending_task=None):
+def routing_intent_schema(attachment_ids, *, pending_action=False):
+    """The existing classifier contract, constrained to this request's authority."""
+    from agent.document_contracts import DOCUMENT_DEFINITIONS
+    def choice(values):
+        return {'type': 'string', 'enum': list(values)}
+    def object_schema(properties):
+        return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
+    identity = {'type': 'string', 'minLength': 1, 'maxLength': 200}
+    if attachment_ids:
+        identity['enum'] = list(attachment_ids)
+    read = next(item['function']['parameters'] for item in DOCUMENT_DEFINITIONS
+                if item['function']['name'] == 'document.read_attachment')
+    read_properties = {key: {**value, 'type': [value['type'], 'null']}
+                       for key, value in read['properties'].items() if key != 'attachment_id'}
+    read_properties = {'attachment_id': identity, **read_properties}
+    question = object_schema({'id': {'type': 'string', 'minLength': 1, 'maxLength': 80},
+        'question': {'type': 'string', 'minLength': 1, 'maxLength': 160},
+        'options': {'type': 'array', 'maxItems': 4, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 100}}})
+    clarification = object_schema({'summary': {'type': 'string', 'minLength': 1, 'maxLength': 200},
+        'questions': {'type': 'array', 'minItems': 1, 'maxItems': 3, 'items': question}})
+    return object_schema({
+        'files': choice(('none', 'read', 'write', 'available')),
+        'tools': choice(('none', 'preferred', 'required', 'available')),
+        'web': choice(('off', 'optional', 'required')), 'web_evidence': choice(('optional', 'required')),
+        'reasoning': choice(('standard', 'preferred')),
+        'task_kinds': {'type': 'array', 'minItems': 1, 'maxItems': 4, 'items': choice((
+            'vision', 'research', 'file_work', 'reasoning', 'general', 'airworthiness',
+            'document_export', 'attachment_summary', 'attachment_extract'))},
+        'explanation_code': {'type': 'string', 'minLength': 1, 'maxLength': 80, 'pattern': '^[a-z0-9_.-]{1,80}$'},
+        'follow_up': choice(('none', 'confirm', 'reject') if pending_action else ('none',)),
+        'rag_requirement': choice(('required', 'not_needed', 'uncertain')),
+        'read_attachment_ids': {'type': 'array', 'maxItems': min(8, len(attachment_ids)), 'items': identity},
+        'read_requests': {'type': 'array', 'maxItems': min(8, len(attachment_ids)), 'items': object_schema(read_properties)},
+        'task_scope': choice(('full', 'section', 'unspecified')), 'retrieval_scope': choice(('focused', 'broad')),
+        'allow_simulated_data': {'type': 'boolean'},
+        'clarification': {'anyOf': [{'type': 'null'}, clarification]},
+    })
+
+
+def intent_tokens(value):
+    """Conservative mixed-language estimate when no provider tokenizer is exposed."""
+    from agent.context_engine.policy import estimate_tokens
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    return max(estimate_tokens(text), (len(text.encode('utf8')) + 2) // 3)
+
+
+def intent_payload(content, attachments, recent_messages, conversation_kind, *, budget_bytes=None,
+                   budget_tokens=None, pending_task=None):
     """Bound classifier data independently from attachment bodies and generation history."""
     def clip(text, limit):
         return str(text).encode('utf8')[:limit].decode('utf8', errors='ignore')
 
+    measure = intent_tokens if budget_tokens is not None else lambda text: len(text.encode('utf8'))
+    budget = budget_tokens if budget_tokens is not None else budget_bytes
     value = {'request': '', 'request_truncated': False, 'attachments': [],
              'work_kind': conversation_kind, 'recent_conversation': []}
     if pending_task:
         value['pending_task'] = {'task_type': pending_task.get('task_type'), 'required': bool(pending_task.get('required')),
-                                 'request': clip(pending_task.get('request', ''), min(256, budget_bytes // 4))}
+                                 'request': clip(pending_task.get('request', ''), 256)}
     def render():
         return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
     if pending_task:
-        while len(render().encode('utf8')) > budget_bytes - 32 and value['pending_task']['request']:
+        while measure(render()) > budget - 32 and value['pending_task']['request']:
             value['pending_task']['request'] = value['pending_task']['request'][:-16]
 
-    for attachment in attachments[:8]:
-        entry = {'id': clip(attachment.get('id', ''), 200),
-                 'name': clip(attachment.get('name', 'attachment'), 100),
+    for attachment in attachments:
+        entry = {'id': attachment.get('id', ''),
+                 'name': attachment.get('name', 'attachment'),
                  'purpose': attachment.get('purpose', 'reference')}
+        for key in ('media_type', 'byte_size'):
+            if key in attachment:
+                entry[key] = attachment[key]
         value['attachments'].append(entry)
-        if len(render().encode('utf8')) > budget_bytes // 3:
-            value['attachments'].pop()
-            break
-    request_budget = max(0, budget_bytes - len(render().encode('utf8')) - 64)
-    value['request'] = clip(content, request_budget)
-    value['request_truncated'] = value['request'] != content
-    # JSON escaping can expand control characters. Remove tails until the
-    # serialized payload fits, retaining the beginning of the user request.
-    while len(render().encode('utf8')) > budget_bytes and value['request']:
-        value['request'] = value['request'][:-32]
+    # Complete authorized metadata and appended clarification answers precede history.
+    request, separator, answers = content.partition('\n\n补充信息\n')
+    essential_tail = separator + answers
+    minimum = request[:128] + essential_tail
+    value['request'] = minimum
+    if measure(render()) > budget:
+        raise CoreDataError('routing_intent_context_too_small',
+            '当前模型上下文不足以保留附件标识与补充回答，请扩大上下文、减少附件或缩短补充信息后重试。')
+    value['request'] = content
+    retained = len(request)
+    while measure(render()) > budget:
+        retained = max(min(len(request), 128), retained - max(32, retained // 10))
+        if essential_tail:
+            value['request'] = request[:retained] + '\n[request middle truncated]\n' + essential_tail
+        else:
+            value['request'] = request[:retained // 2] + '\n[request middle truncated]\n' + request[-(retained - retained // 2):]
         value['request_truncated'] = True
+        if retained <= min(len(request), 128) and measure(render()) > budget:
+            value['request'] = minimum
+            break
     for message in reversed(recent_messages[-6:]):
         entry = {'role': message['role'], 'content': clip(message.get('content', ''), 256)}
         value['recent_conversation'].insert(0, entry)
-        if len(render().encode('utf8')) > budget_bytes:
+        if measure(render()) > budget:
             value['recent_conversation'].pop(0)
             break
     return render()

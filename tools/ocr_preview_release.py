@@ -123,12 +123,17 @@ VIAddVersionKey /LANG=1033 "FileVersion" "{version}"
 VIAddVersionKey /LANG=1033 "FileDescription" "Differential full offline installer"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "agent contributors"
 Var LifecycleMutex
+Var NativeProgress
+Var NativeStatus
+Var NativeUiArgs
 !define MUI_FINISHPAGE_RUN "$INSTDIR\\agent-desktop.exe"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW SetupProgressUi
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.SetupProgressUi
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
@@ -150,6 +155,34 @@ FunctionEnd
 Function un.onInit
   !insertmacro AcquireLifecycle
 FunctionEnd
+!macro NativeProgressUi PREFIX
+Function ${{PREFIX}}SetupProgressUi
+  GetDlgItem $NativeProgress $mui.InstFilesPage 1004
+  SendMessage $NativeProgress 0x406 0 100
+  GetDlgItem $0 $mui.InstFilesPage 1016
+  System::Alloc 16
+  Pop $1
+  System::Call 'user32::GetWindowRect(p r0, p r1)'
+  System::Call 'user32::MapWindowPoints(p 0, p $mui.InstFilesPage, p r1, i 2)'
+  System::Call '*$1(i .r2, i .r3, i .r4, i .r5)'
+  IntOp $4 $4 - $2
+  IntOp $5 $5 - $3
+  System::Call '*$1(i 0, i 0, i 0, i 32)'
+  System::Call 'user32::MapDialogRect(p $mui.InstFilesPage, p r1)'
+  System::Call '*$1(i, i, i, i .r6)'
+  System::Free $1
+  System::Call 'user32::CreateWindowExW(i 0, w "STATIC", w "", i 0x50000000, i r2, i r3, i r4, i r6, p $mui.InstFilesPage, p 0, p 0, p 0) p .r7'
+  StrCpy $NativeStatus $7
+  SendMessage $0 0x31 0 0 $8
+  SendMessage $NativeStatus 0x30 $8 1
+  IntOp $3 $3 + $6
+  IntOp $5 $5 - $6
+  System::Call 'user32::SetWindowPos(p r0, p 0, i r2, i r3, i r4, i r5, i 0x14)'
+  StrCpy $NativeUiArgs '--ui-parent $HWNDPARENT --progress-hwnd $NativeProgress --status-hwnd $NativeStatus'
+FunctionEnd
+!macroend
+!insertmacro NativeProgressUi ""
+!insertmacro NativeProgressUi "un."
 Section Install
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
@@ -161,7 +194,7 @@ Section Install
 {app_files}
   WriteUninstaller "$PLUGINSDIR\\app\\uninstall.exe"
   SetOutPath "$PLUGINSDIR"
-  nsExec::ExecToLog '"$PLUGINSDIR\\agent-installer.exe" --action install --root "$INSTDIR" --manifest "$PLUGINSDIR\\payload.json" --sha256 {sha256(native)} --archives "$EXEDIR" --embedded "$PLUGINSDIR\\app" --uninstaller "$PLUGINSDIR\\app\\uninstall.exe" --postflight "$PLUGINSDIR\\postflight.ps1"'
+  nsExec::ExecToLog '"$PLUGINSDIR\\agent-installer.exe" --action install --root "$INSTDIR" --manifest "$PLUGINSDIR\\payload.json" --sha256 {sha256(native)} --archives "$EXEDIR" --embedded "$PLUGINSDIR\\app" --uninstaller "$PLUGINSDIR\\app\\uninstall.exe" --postflight "$PLUGINSDIR\\postflight.ps1" $NativeUiArgs'
   Pop $0
   ${{If}} $0 != 0
     MessageBox MB_OK|MB_ICONSTOP "Installation could not finish. See details for missing volumes, busy processes or preserved recovery state. Retry this installer after resolving the reported condition." /SD IDOK
@@ -182,7 +215,7 @@ Section Uninstall
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
 {helper_file}
-  nsExec::ExecToLog '"$PLUGINSDIR\\agent-installer.exe" --action uninstall --root "$INSTDIR"'
+  nsExec::ExecToLog '"$PLUGINSDIR\\agent-installer.exe" --action uninstall --root "$INSTDIR" $NativeUiArgs'
   Pop $0
   ${{If}} $0 != 0
     MessageBox MB_OK|MB_ICONSTOP "Uninstall cleanup did not complete. Close application and workers, inspect the details, and retry." /SD IDOK
@@ -472,7 +505,7 @@ def build(source, prerequisites, output, compiler, version='0.15.0-ocr-preview.1
 1. 下载 setup.exe 和全部 offline.partNN.zip，放在同一目录，运行安装器。完整包同时用于首次安装、升级和受管文件修复；升级保留已校验且未变化的文件，仅解压新增或变化的文件。相同内容的旧版分卷可直接复用，文件名不同也会按大小和 SHA256 识别。
 2. 安装目录独立使用 agent Airworthiness。运行后在设置中迁入 Document Preview 和 OCR Preview 数据，并选择独立模型库。
 3. 新用户需自行导入本地 GGUF 对话模型、嵌入和重排序模型。下载方式见仓库 README。OCR 模型已在离线包内提供。
-4. 在资料库导入文档，处理完成后在项目设置中启用资料库。主模型必须加载后才能问答。
+4. 在资料库导入文档，处理完成后在项目设置中启用资料库。本地模型选定后，发送时由应用加载。
 5. 程序更新采用设置中的手动检查。签名程序包仅更新主程序、Core、DLL 和更新辅助程序。运行组件变化需安装完整离线包。安装或卸载前关闭程序及后台工作进程；详情显示校验、解压、发布和清理的实际数量、字节数与耗时。
 
 完整组件包含 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR、Office 解析、WebView2 和微软运行库。显卡驱动由电脑提供。

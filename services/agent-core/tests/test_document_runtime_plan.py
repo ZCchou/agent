@@ -154,7 +154,9 @@ def test_application_full_template_uses_batched_plan_for_repeated_headings(tmp_p
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(('equipment_value', 'retry_mode'), [('EQ-ALPHA', None), ('EQ-BETA', 'same'), ('EQ-GAMMA', 'linked')])
+@pytest.mark.parametrize(('equipment_value', 'retry_mode'), [('EQ-ALPHA', None), ('EQ-BETA', 'same'), ('EQ-GAMMA', 'linked'),
+    ('USER-ACTUAL-123', 'real_only'), ('USER-ACTUAL-456', 'mixed'), ('LONG-ACTUAL', 'long'),
+    ('CHANGED-ACTUAL', 'changed_source')])
 def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, monkeypatch, equipment_value, retry_mode):
     import json
     import httpx
@@ -165,6 +167,9 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
     from agent.rag.grounding import RagGrounding
     original = httpx.AsyncClient
     payloads = []
+    retry = retry_mode in {'same', 'linked'}
+    simulated = retry_mode == 'mixed'
+    parameters = {'model': equipment_value, **({'serial': 'SIM-999'} if simulated else {})}
     def respond(request):
         payload = json.loads(request.content)
         payloads.append(payload)
@@ -174,17 +179,21 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
             result = {'read_requests': [{'attachment_id': 'equipment', 'offset': 0, 'limit': 1},
                                         {'attachment_id': 'doc', 'offset': 0, 'limit': 1}]}
         elif task['stage'] == 'plan':
-            if not retry_mode:
+            if not retry:
                 assert any(item['attachment_id'] == 'doc' for item in supplied['read_results'])
-            result = {'targets': [{'target_id': field['id'], 'field_type': 'placeholder', 'parameter_keys': []}
+            result = {'equipment_parameters': parameters,
+                'targets': [{'target_id': field['id'], 'field_type': 'placeholder',
+                             'parameter_keys': list(parameters) if field['id'] == 'p-5' else ['model']}
                 for field in task['fields'] if field['original_content'] == '待填写']}
         else:
             supplied = json.loads(payload['messages'][-1]['content'])['source_context']
             assert equipment_value in json.dumps(supplied, ensure_ascii=False)
             sources = json.loads(payload['messages'][-1]['content'])['evidence']
             citations = ([{'id': sources[0]['id'], 'quote_id': sources[0]['quote_options'][0]['quote_id']}]
-                         if retry_mode and sources else [])
-            result = {'fields': [{'target_id': field['target_id'], 'text': equipment_value + ' 设备性能验证草稿。',
+                         if retry and sources else [])
+            result = {'fields': [{'target_id': field['target_id'],
+                'text': ' '.join('{{equipment:' + key + '}}' for key in field['parameter_keys']) + ' 设备性能验证草稿。',
+                'parameter_values': {key: parameters[key] for key in field['parameter_keys']},
                 'evidence': citations, 'missing': ['设备安装位置和适用依据待补充']} for field in task['fields']]}
         chunk = {'choices': [{'delta': {'content': json.dumps(result, ensure_ascii=False)}, 'finish_reason': 'stop'}]}
         return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
@@ -210,8 +219,8 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
         async def intent(**kwargs):
             return {'web': 'off', 'web_evidence': 'optional', 'reasoning': 'standard',
                 'task_kinds': ['document_export'], 'explanation_code': 'template_fill',
-                'rag_requirement': 'required', 'read_attachment_ids': ['equipment'] if retry_mode else [], 'task_scope': 'full',
-                'allow_simulated_data': True}, None
+                'rag_requirement': 'required', 'read_attachment_ids': ['equipment'] if retry else [], 'task_scope': 'full',
+                'allow_simulated_data': retry_mode != 'real_only'}, None
         application._preflight_intent_advisor = intent
         generated = application._generate_document_batch
         seen = []
@@ -219,10 +228,13 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
         async def interrupt_batch(run, attempt_id, task):
             nonlocal failed
             seen.append((task['stage'], [field.get('target_id', field.get('id')) for field in task['fields']]))
-            if retry_mode and task['stage'] == 'fill' and task['fields'][0]['target_id'] == 'p-5' and not failed:
+            if retry and task['stage'] == 'fill' and task['fields'][0]['target_id'] == 'p-5' and not failed:
                 failed = True
                 raise CoreDataError('document_test_interrupted', 'Interrupted later chapter')
-            return await generated(run, attempt_id, task)
+            result = await generated(run, attempt_id, task)
+            if retry_mode == 'changed_source' and task['stage'] == 'plan':
+                (tmp_path / 'message-attachments/equipment.docx').write_bytes(b'changed source')
+            return result
         application._generate_document_batch = interrupt_batch
         class Parser:
             async def parse(self, path):
@@ -248,11 +260,19 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
             attachment['storage_key'] = 'message-attachments/template.docx'
             attachment['artifacts'][0]['storage_key'] = attachment['storage_key']
             equipment = runtime_attachment(tmp_path, 'equipment', equipment_value, 'equipment.docx')
-            response = await application.start({'conversation_id': work['id'], 'content': '填写整份模板，允许模拟数据',
+            request_text = '填写整份模板，' + ('只使用实际数据，不允许模拟' if retry_mode == 'real_only' else '允许模拟数据')
+            if retry_mode == 'long':
+                request_text += ' 请保留各章节专业任务与设备验证要求。' * 140
+            response = await application.start({'conversation_id': work['id'], 'content': request_text,
                 'attachments': [attachment, equipment], 'idempotency_key': 'template-normal'})
             await application.tasks[response['run']['id']]
             run = core.get_model_run(response['run']['id'])
-            if retry_mode:
+            if retry_mode == 'changed_source':
+                assert run['status'] == 'failed'
+                assert run['error_code'] == 'attachment_changed'
+                assert published == []
+                return
+            if retry:
                 assert run['status'] == 'failed'
                 resumed = await application.retry(run['id'], context_strategy='expanded_retry' if retry_mode == 'linked' else 'default')
                 await application.tasks[resumed['id']]
@@ -264,16 +284,26 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
             completed = Document(published[0])
             assert sum('设备性能验证草稿' in p.text for p in completed.paragraphs) == 2
             assert sum(equipment_value in p.text for p in completed.paragraphs) == 2
-            if retry_mode:
+            with core._connect() as connection:
+                published_id = connection.execute("SELECT id FROM document_artifacts WHERE run_id=? AND status='published'", (run['id'],)).fetchone()['id']
+            manifest = application.documents.get(run['id'], published_id)['manifest']
+            assert manifest['equipment_parameters'] == parameters
+            assert manifest['equipment_parameter_provenance']['model']['kind'] == 'attachment'
+            assert manifest['equipment_parameter_provenance']['model']['source_sha256'] == equipment['sha256']
+            assert manifest['simulated'] is simulated
+            assert sum('【模拟数据示例' in p.text for p in completed.paragraphs) == int(simulated)
+            if simulated:
+                assert manifest['equipment_parameter_provenance']['serial']['kind'] == 'simulated'
+            if retry:
                 with core._connect() as connection:
                     published_id = connection.execute("SELECT id FROM document_artifacts WHERE run_id=? AND status='published'", (run['id'],)).fetchone()['id']
                 fields = application.documents.get(run['id'], published_id)['manifest']['fields']
                 assert all(field['evidence'] for field in fields)
                 application.rag.validate_evidence(project['id'], [source['id'] for field in fields for source in field['evidence']], run_id=run['id'])
             assert all(payload.get('response_format', {}).get('type') == 'json_object' for payload in payloads)
-            assert len(payloads) == (3 if retry_mode else 4)
+            assert len(payloads) == (3 if retry else 4)
             plan = application.execution_coordinator.get_for_run(run['id'])
-            assert len(plan['invocations']) == (1 if retry_mode == 'linked' else 3 if retry_mode else 4)
+            assert len(plan['invocations']) == (1 if retry_mode == 'linked' else 3 if retry else 4)
             assert all(item['status'] == 'completed' for item in plan['invocations'])
         finally:
             await application.shutdown()
@@ -341,7 +371,7 @@ def schema_accepts(value, schema):
         return any(schema_accepts(value, alternative) for alternative in schema['anyOf'])
     types = schema.get('type', [])
     types = [types] if isinstance(types, str) else types
-    actual = ('null' if value is None else 'object' if isinstance(value, dict) else 'array' if isinstance(value, list)
+    actual = ('null' if value is None else 'boolean' if type(value) is bool else 'object' if isinstance(value, dict) else 'array' if isinstance(value, list)
               else 'string' if isinstance(value, str) else 'integer' if type(value) is int else 'unknown')
     if actual not in types or 'enum' in schema and value not in schema['enum']:
         return False

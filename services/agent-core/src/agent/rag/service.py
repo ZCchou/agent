@@ -22,6 +22,7 @@ from agent.storage import CoreDataError, _utc_now
 
 DOCUMENT_PARSE_TIMEOUT = 125
 RERANK_TIMEOUT = 90
+SEARCH_QUERY_MAX_CHARS = 2000
 MEDIA_TYPES = {'.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown'}
 LEGACY_SPLITTING_WARNING = 'Reimport the original documents and rebuild their indexes to refresh section and clause metadata from the updated parser.'
@@ -369,7 +370,7 @@ class RagService:
     async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None, retrieval_scope=None):
         if self._closed:
             raise CoreDataError('rag_closed', 'The RAG service is closed.')
-        query = required_text(query, 'Search query', 2000)
+        query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)
         if not isinstance(limit, int) or not 1 <= limit <= 8:
             raise CoreDataError('rag_invalid_request', 'The evidence limit must be between 1 and 8.')
         for selection in (library_ids, version_ids):
@@ -537,7 +538,7 @@ class RagService:
         return chosen, index_by_chunk
 
     async def search_library(self, library_id, query):
-        query = required_text(query, 'Search query', 2000)
+        query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)
         with closing(self.repository.connect()) as c:
             library = self.repository.library(c, library_id)
             index = c.execute('SELECT * FROM rag_indexes WHERE id=?', (library['active_index_id'],)).fetchone()

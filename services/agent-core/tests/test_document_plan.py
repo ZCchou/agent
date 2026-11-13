@@ -367,6 +367,77 @@ def test_simulated_placeholder_values_are_rendered_consistently_after_resume(tmp
     assert '{{equipment:' not in text
 
 
+def test_actual_user_parameter_is_retained_without_simulation_permission(tmp_path):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction', 'parameter_keys': ['model']}],
+                    'equipment_parameters': {'model': 'USER-ACTUAL-123'}}
+        return {'fields': [{'target_id': 'p-2', 'text': 'Equipment {{equipment:model}}', 'evidence': [],
+                            'parameter_values': {'model': 'USER-ACTUAL-123'}}]}
+    request = 'Use my actual equipment model USER-ACTUAL-123. Do not simulate.'
+    artifact = asyncio.run(service.fill_planned(run['id'], source['id'], request, generate))
+    resumed = asyncio.run(service.fill_planned(run['id'], source['id'], request, generate))
+    assert resumed['id'] == artifact['id']
+    assert artifact['manifest']['equipment_parameter_provenance']['model']['kind'] == 'request'
+    assert artifact['manifest']['simulated'] is False
+    assert '【模拟' not in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
+
+
+def test_legacy_completed_plan_replays_saved_fields_with_derived_actual_provenance(tmp_path):
+    import json
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    calls = []
+    def generate(task):
+        calls.append(task['stage'])
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction', 'parameter_keys': ['model']}],
+                    'equipment_parameters': {'model': 'USER-ACTUAL-123'}}
+        return {'fields': [{'target_id': 'p-2', 'text': 'Equipment {{equipment:model}}', 'evidence': [],
+                            'parameter_values': {'model': 'USER-ACTUAL-123'}}]}
+    user_request = 'Use my actual model USER-ACTUAL-123. Simulation is allowed for missing data.'
+    current = asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate, allow_simulated=True))
+    legacy = service.fill(run['id'], current['id'], [{'target_id': 'p-2',
+        'text': '【模拟数据示例，仅用于示例用途】\nEquipment USER-ACTUAL-123', 'evidence': []}])
+    checkpoint = service.root / current['manifest']['document_plan_path']
+    plan = json.loads(checkpoint.read_text(encoding='utf8'))
+    plan.pop('equipment_parameter_provenance')
+    plan['artifact_id'] = legacy['id']
+    checkpoint.write_text(json.dumps(plan, ensure_ascii=False), encoding='utf8')
+    resumed = asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate, allow_simulated=True))
+    assert calls == ['plan', 'fill']
+    assert resumed['manifest']['simulated'] is False
+    assert '【模拟' not in Document(service.path_for(run['id'], resumed['id'])).paragraphs[2].text
+
+
+@pytest.mark.parametrize(('user_request', 'purpose', 'source_text'), [
+    ('Use equipment supplied in my document.', 'template', 'Device model EXAMPLE-A'),
+    ('Use equipment supplied in my document.', 'reference', 'Example model EXAMPLE-A'),
+    ('Use simulated model EXAMPLE-A.', 'reference', 'Device model EXAMPLE-A')])
+def test_template_examples_and_explicit_user_simulations_keep_simulated_provenance(tmp_path, user_request, purpose, source_text):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    def context(task):
+        return {'attachments': [{'attachment_id': 'source', 'purpose': purpose}],
+                'read_results': [{'attachment_id': 'source', 'source_sha256': 'a' * 64,
+                                 'blocks': [{'text': source_text, 'locator': {'page': 1}}]}]}
+    def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction', 'parameter_keys': ['model']}],
+                    'equipment_parameters': {'model': 'EXAMPLE-A'}}
+        return {'fields': [{'target_id': 'p-2', 'text': '{{equipment:model}}',
+                            'parameter_values': {'model': 'EXAMPLE-A'}, 'evidence': []}]}
+    with pytest.raises(CoreDataError) as raised:
+        asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate, source_context=context))
+    assert raised.value.code == 'document_simulation_forbidden'
+    artifact = asyncio.run(service.fill_planned(run['id'], source['id'], user_request, generate,
+                                               allow_simulated=True, source_context=context, revision='allowed'))
+    assert artifact['manifest']['equipment_parameter_provenance']['model']['kind'] == 'simulated'
+    assert '【模拟' in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
+
+
 @pytest.mark.parametrize('text', ['Equipment model SIM-A and {{equipment:model}}',
                                  'model: SIM-B\n{{equipment:model}}'])
 def test_simulation_rejects_raw_values_and_explicit_conflicting_assignments(tmp_path, text):

@@ -60,6 +60,67 @@ def test_verified_unchanged_file_keeps_identity_and_never_reads_its_volume(tmp_p
     assert 'completed' in result.stdout and '"percent":100' in result.stdout
 
 
+def test_progress_reports_target_current_file_and_count_driven_percent(tmp_path):
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'rag-runtime/a': b'a' * 10000, 'rag-runtime/b': b'b' * 20000})
+    result = run(root, manifest)
+    ok(result)
+    statuses = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+    assert all(item['target_directory'] == str(root) for item in statuses)
+    extraction = [item for item in statuses if item['phase'] == 'extraction']
+    assert any(item['current_file'] == 'rag-runtime/a' for item in extraction)
+    assert any(40 < item['percent'] < 60 for item in extraction)
+    assert all(item['percent'] < 100 for item in statuses if item['phase'] != 'completed')
+    interrupted = run(root, package(tmp_path, {'rag-runtime/a': b'new'}, 'update'), extra=['--fault', 'before-commit'])
+    assert interrupted.returncode == 97
+    assert all(json.loads(line)['percent'] < 100 for line in interrupted.stdout.splitlines() if line.startswith('{'))
+
+
+def test_explicit_installer_hwnds_receive_live_progress_and_status(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.CreateWindowExW.restype = wintypes.HWND
+    user.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+    user.SendMessageW.restype = ctypes.c_ssize_t
+    user.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.DestroyWindow.argtypes = [wintypes.HWND]
+    ctypes.WinDLL('comctl32').InitCommonControls()
+    parent = user.CreateWindowExW(0, 'STATIC', 'test installer', 0, 0, 0, 500, 100, None, None, None, None)
+    progress = user.CreateWindowExW(0, 'msctls_progress32', '', 0x40000000, 0, 0, 500, 20, parent, None, None, None)
+    status = user.CreateWindowExW(0, 'STATIC', '', 0x40000000, 0, 20, 500, 80, parent, None, None, None)
+    assert parent and progress and status
+    user.SendMessageW(progress, 0x406, 0, 100)  # PBM_SETRANGE32
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'rag-runtime/current-file': b'content' * 10000})
+    text_states, positions = [], []
+    try:
+        with (tmp_path / 'helper.log').open('w', encoding='utf8') as log:
+            process = subprocess.Popen([str(HELPER), '--action', 'install', '--root', str(root),
+                '--manifest', str(manifest), '--sha256', identity(manifest.read_bytes())['sha256'],
+                '--archives', str(manifest.parent), '--embedded', str(manifest.parent),
+                '--ui-parent', str(parent), '--progress-hwnd', str(progress), '--status-hwnd', str(status)], stdout=log, stderr=log)
+            deadline = time.monotonic() + 30
+            while process.poll() is None and time.monotonic() < deadline:
+                message = wintypes.MSG()
+                while user.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+                    user.TranslateMessage(ctypes.byref(message))
+                    user.DispatchMessageW(ctypes.byref(message))
+                buffer = ctypes.create_unicode_buffer(2048)
+                user.GetWindowTextW(status, buffer, len(buffer))
+                text_states.append(buffer.value)
+                positions.append(user.SendMessageW(progress, 0x408, 0, 0))
+                time.sleep(.005)
+            assert process.wait(timeout=2) == 0, (tmp_path / 'helper.log').read_text(encoding='utf8')
+        assert any(str(root) in text for text in text_states)
+        assert any('rag-runtime/current-file' in text for text in text_states)
+        assert max(positions) == 100
+    finally:
+        user.DestroyWindow(parent)
+
+
 def test_modified_owned_file_is_repaired_and_unknown_data_survives(tmp_path):
     root = tmp_path / 'installed'
     manifest = package(tmp_path, {'rag-runtime/file': b'valid'})

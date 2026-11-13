@@ -105,23 +105,135 @@ struct Status {
     bytes_total: u64,
     elapsed_ms: u128,
     percent: u8,
+    target_directory: String,
+    current_file: String,
+    #[serde(skip)]
+    phase_start: u8,
+    #[serde(skip)]
+    phase_end: u8,
+}
+impl Status {
+    fn advance(&mut self) {
+        let files = self.files_done as f64 / self.files_total.max(1) as f64;
+        let bytes = self.bytes_done as f64 / self.bytes_total.max(1) as f64;
+        let fraction = files.max(bytes).min(1.0);
+        self.percent =
+            self.phase_start + ((self.phase_end - self.phase_start) as f64 * fraction) as u8;
+    }
+}
+
+#[derive(Clone, Default)]
+struct InstallerUi {
+    parent: usize,
+    progress: usize,
+    status: usize,
+    disabled: Arc<AtomicBool>,
+}
+impl InstallerUi {
+    fn from_args(args: &BTreeMap<String, String>) -> Result<Self> {
+        let keys = ["--ui-parent", "--progress-hwnd", "--status-hwnd"];
+        if keys.iter().all(|key| !args.contains_key(*key)) {
+            return Ok(Self::default());
+        }
+        let mut handles = Vec::new();
+        for key in keys {
+            handles.push(
+                args.get(key)
+                    .ok_or("incomplete installer UI handles")?
+                    .parse::<usize>()?,
+            );
+        }
+        let ui = Self {
+            parent: handles[0],
+            progress: handles[1],
+            status: handles[2],
+            ..Self::default()
+        };
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{IsChild, IsWindow};
+            if IsWindow(ui.parent as _) == 0
+                || IsChild(ui.parent as _, ui.progress as _) == 0
+                || IsChild(ui.parent as _, ui.status as _) == 0
+            {
+                return Err(
+                    "installer UI controls must belong to the passed installer window".into(),
+                );
+            }
+        }
+        Ok(ui)
+    }
+
+    fn update(&self, value: &Status) {
+        if self.parent == 0 || self.disabled.load(Ordering::Relaxed) {
+            return;
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_SETTEXT,
+            };
+            let text = format!(
+                "{}  {} / {} files  {} / {} bytes  {:.1}s\r\n{}\r\n{}",
+                value.phase,
+                value.files_done,
+                value.files_total,
+                value.bytes_done,
+                value.bytes_total,
+                value.elapsed_ms as f64 / 1000.0,
+                value.target_directory,
+                value.current_file
+            );
+            let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            let mut result = 0;
+            // A hung/closed installer disables further UI writes. CLI work stays headless.
+            if SendMessageTimeoutW(
+                self.progress as _,
+                0x402,
+                value.percent as usize,
+                0,
+                SMTO_ABORTIFHUNG,
+                100,
+                &mut result,
+            ) == 0
+                || SendMessageTimeoutW(
+                    self.status as _,
+                    WM_SETTEXT,
+                    0,
+                    wide.as_ptr() as isize,
+                    SMTO_ABORTIFHUNG,
+                    100,
+                    &mut result,
+                ) == 0
+            {
+                self.disabled.store(true, Ordering::Relaxed);
+            }
+        }
+    }
 }
 struct Progress {
     state: Arc<Mutex<Status>>,
     stopped: Arc<AtomicBool>,
     start: Instant,
+    ui: InstallerUi,
 }
 impl Progress {
-    fn new() -> Self {
-        let state = Arc::new(Mutex::new(Status::default()));
+    fn new(root: &Path, ui: InstallerUi) -> Self {
+        let state = Arc::new(Mutex::new(Status {
+            target_directory: root.to_string_lossy().into_owned(),
+            ..Status::default()
+        }));
         let stopped = Arc::new(AtomicBool::new(false));
         let (s, stop) = (state.clone(), stopped.clone());
         let start = Instant::now();
+        let display = ui.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 if let Ok(mut value) = s.lock() {
                     value.elapsed_ms = start.elapsed().as_millis();
+                    value.advance();
                     println!("{}", serde_json::to_string(&*value).unwrap());
+                    display.update(&value);
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -130,6 +242,7 @@ impl Progress {
             state,
             stopped,
             start,
+            ui,
         }
     }
     fn phase(&self, phase: &str, total: usize, bytes: u64, percent: u8) {
@@ -139,6 +252,18 @@ impl Progress {
             files_total: total as u64,
             bytes_total: bytes,
             percent,
+            phase_start: percent,
+            phase_end: match percent {
+                0 => 1,
+                1 => 20,
+                20 => 40,
+                40 => 60,
+                60 => 75,
+                75 => 90,
+                90 => 99,
+                _ => percent,
+            },
+            target_directory: s.target_directory.clone(),
             elapsed_ms: self.start.elapsed().as_millis(),
             ..Status::default()
         };
@@ -147,12 +272,21 @@ impl Progress {
             s.bytes_done = s.bytes_total;
         }
         println!("{}", serde_json::to_string(&*s).unwrap());
+        self.ui.update(&s);
     }
     fn bytes(&self, count: usize) {
         self.state.lock().unwrap().bytes_done += count as u64;
     }
     fn file(&self) {
-        self.state.lock().unwrap().files_done += 1;
+        let mut s = self.state.lock().unwrap();
+        s.files_done += 1;
+        s.advance();
+        s.elapsed_ms = self.start.elapsed().as_millis();
+        println!("{}", serde_json::to_string(&*s).unwrap());
+        self.ui.update(&s);
+    }
+    fn current(&self, name: &str) {
+        self.state.lock().unwrap().current_file = name.into();
     }
 }
 impl Drop for Progress {
@@ -1024,6 +1158,7 @@ fn resolve_volumes(
     let mut result = BTreeMap::new();
     let mut missing = Vec::new();
     for archive in required {
+        progress.current(&archive.name);
         let preferred = safe(downloads, &archive.name)?;
         for path in std::iter::once(&preferred).chain(candidates.iter()) {
             if !path.exists() || fs::metadata(path)?.len() != archive.bytes {
@@ -1121,7 +1256,7 @@ pub fn main_entry() -> Result<()> {
     }
     plain(&root)?;
     assert_idle(&root)?;
-    let progress = Progress::new();
+    let progress = Progress::new(&root, InstallerUi::from_args(&args)?);
     progress.phase("preflight/difference", 0, 0, 0);
     let action = get("--action")?;
     // This root-bound full inventory survives removal of managed metadata and the
@@ -1269,6 +1404,7 @@ pub fn main_entry() -> Result<()> {
         1,
     );
     for (name, record) in &manifest.files {
+        progress.current(name);
         let path = safe(&root, name)?;
         if path.exists() && !old_files.contains_key(name) {
             return Err(format!("unowned destination preserved: {name}").into());
@@ -1350,6 +1486,7 @@ pub fn main_entry() -> Result<()> {
                     return Err("invalid mapped archive entry".into());
                 }
                 if changed.contains(&name) {
+                    progress.current(&name);
                     copy_verified(entry, &safe(&stage, &name)?, record, &progress)?;
                 }
             }
@@ -1357,6 +1494,7 @@ pub fn main_entry() -> Result<()> {
         for name in &changed {
             let record = &manifest.files[name];
             if record.volume == "embedded" {
+                progress.current(name);
                 copy_verified(
                     open_regular(&safe(Path::new(get("--embedded")?), name)?)?,
                     &safe(&stage, name)?,
@@ -1376,6 +1514,7 @@ pub fn main_entry() -> Result<()> {
             60,
         );
         for name in &reuse {
+            progress.current(name);
             if !equal(
                 &hash(&safe(&root, name)?, Some(&progress), false)?,
                 &manifest.files[name],
@@ -1391,6 +1530,7 @@ pub fn main_entry() -> Result<()> {
             .append(true)
             .open(txn.join("operations.jsonl"))?;
         for (index, name) in mutations.iter().enumerate() {
+            progress.current(name);
             let active = safe(&root, name)?;
             let old = if active.exists() {
                 Some(hash(&active, None, false)?)

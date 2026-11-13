@@ -83,6 +83,9 @@ def test_unified_delivery_preserves_office_and_separates_application_identity(tm
     assert '--postflight' in script and '--uninstaller' in script
     assert 'io.github.zcchou.agent.airworthiness.offline-installer-v1' in script
     assert 'native-manifest.json' in script
+    assert '--progress-hwnd $NativeProgress --status-hwnd $NativeStatus' in script
+    assert 'MUI_PAGE_CUSTOMFUNCTION_SHOW SetupProgressUi' in script
+    assert 'MUI_PAGE_CUSTOMFUNCTION_SHOW un.SetupProgressUi' in script
 
 
 def test_changed_tested_application_is_rejected(tmp_path):
