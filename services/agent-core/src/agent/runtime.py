@@ -3220,6 +3220,7 @@ class ChatRunService:
             '处理模板或提取附件时，从 attachments 选择对应真实 id 放入 read_attachment_ids。'
             '范围与模拟授权已明确时 clarification:null，不重复询问。示例仅演示格式，按本轮实际请求决定每个值。'
             'Honor task_scope_constraint when supplied by the application from the user request.'
+            'Use question id "scope" for a clarification about filling range.'
         )
         from agent.rag.routing import intent_payload, intent_tokens, routing_intent_schema, explicit_document_scope
         schema = routing_intent_schema([item['id'] for item in attachments], pending_action=pending_action)

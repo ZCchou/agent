@@ -80,9 +80,11 @@ def explicit_document_scope(text):
         try:
             answers = json.loads(supplement)
         except (ValueError, TypeError):
-            answers = {}
+            answers = dict(line.split(' ', 1) for line in supplement.splitlines() if ' ' in line)
         choices = {'整份模板': 'full', '整份': 'full', '指定章节': 'section', '具体章节': 'section'}
-        selected = {choices[value] for value in answers.values() if isinstance(value, str) and value in choices} \
+        scope_keys = {'scope', 'task_scope', 'document_scope', 'fill_scope', 'template_scope'}
+        selected = {choices[value.strip()] for key, value in answers.items()
+                    if key.casefold() in scope_keys and isinstance(value, str) and value.strip() in choices} \
             if isinstance(answers, dict) else set()
         if selected:
             return next(iter(selected)) if len(selected) == 1 else None
