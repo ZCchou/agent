@@ -404,11 +404,11 @@ fn process_started(pid: u32) -> Option<u64> {
             let alive = WaitForSingleObject(process, 0) == 258;
             let ok = GetProcessTimes(process, &mut a, &mut b, &mut c, &mut d) != 0;
             CloseHandle(process);
-            return if ok && alive {
+            if ok && alive {
                 Some(((a.dwHighDateTime as u64) << 32) | a.dwLowDateTime as u64)
             } else {
                 None
-            };
+            }
         }
     }
     #[cfg(not(windows))]

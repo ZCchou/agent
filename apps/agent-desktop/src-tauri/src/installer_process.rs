@@ -44,15 +44,14 @@ fn quote(value: &str) -> String {
             slashes += 1;
             continue;
         }
-        result.extend(std::iter::repeat('\\').take(if c == '"' {
-            slashes * 2 + 1
-        } else {
-            slashes
-        }));
+        result.extend(std::iter::repeat_n(
+            '\\',
+            if c == '"' { slashes * 2 + 1 } else { slashes },
+        ));
         result.push(c);
         slashes = 0;
     }
-    result.extend(std::iter::repeat('\\').take(slashes * 2));
+    result.extend(std::iter::repeat_n('\\', slashes * 2));
     result.push('"');
     result
 }
