@@ -344,6 +344,63 @@ def render_parameters(field, target, parameters):
     return re.sub(pattern, lambda match: parameters[match.group(1)], text)
 
 
+def inherit_plan(workflow, run_id, template_id, request, parent_run_id, parent_template_id,
+                 *, scope='full', section_id=None, revision='1', reauthorize=None, evidence_resolver=None):
+    current_run, parent_run = workflow.repository.get_model_run(run_id), workflow.repository.get_model_run(parent_run_id)
+    if current_run.get('parent_run_id') != parent_run_id or any(current_run[key] != parent_run[key]
+            for key in ('conversation_id', 'user_message_id')):
+        raise invalid('文档重试来源与当前授权消息不一致。')
+    template, parent_template = workflow.get(run_id, template_id), workflow.get(parent_run_id, parent_template_id)
+    if template['sha256'] != parent_template['sha256'] or template['project_id'] != parent_template['project_id']:
+        raise invalid('重试模板身份已变化。')
+    workflow.path_for(run_id, template_id)
+    workflow.path_for(parent_run_id, parent_template_id)
+    prior = workflow.read_plan(parent_run_id, parent_template_id, request, scope=scope, section_id=section_id, revision=revision)
+    if prior is None:
+        return
+    if prior.get('artifact_id'):
+        workflow.path_for(parent_run_id, prior['artifact_id'])
+    key, identity = checkpoint_identity(run_id, template, request, scope, section_id, revision)
+    path = workflow.root / (key + '.plan.json')
+    with plan_lock(path.with_suffix('.lock')):
+        if load_checkpoint(path, identity) is not None:
+            return
+        plan = deepcopy(prior)
+        plan.update(id=key, identity=identity, artifact_id=None, status='filling', inherited_from=prior['id'])
+        replay = []
+        for target in plan['targets']:
+            if target['status'] != 'completed':
+                continue
+            target['status'] = 'pending'
+            field = deepcopy(target['result'])
+            try:
+                if field.get('evidence'):
+                    if reauthorize is None:
+                        continue
+                    field = reauthorize(field)
+                text = render_parameters(field, target, plan['equipment_parameters'])
+                citation_claims(text, field.get('evidence', []))
+                if evidence_resolver:
+                    _, metadata = evidence_resolver(text, field.get('evidence', []))
+                    validate_source_locators(text, metadata)
+            except CoreDataError as error:
+                if not error.code.startswith('rag_'):
+                    raise
+                target['resume_issue'] = error.code
+                continue
+            if plan['allow_simulated'] and plan['equipment_parameters']:
+                text = '【模拟数据示例，仅用于示例用途】\n' + text
+            replay.append((target, field, {'target_id': target['target_id'], 'text': text,
+                'evidence': field.get('evidence', []), 'missing': field.get('missing', []), 'span': target.get('span')}))
+        for offset in range(0, len(replay), 10):
+            batch = replay[offset:offset+10]
+            artifact = workflow.fill(run_id, plan['artifact_id'] or template_id, [item[2] for item in batch], evidence_resolver)
+            plan['artifact_id'] = artifact['id']
+            for target, field, _ in batch:
+                target.update(status='completed', result=field)
+        save_checkpoint(path, plan)
+
+
 async def fill_planned(workflow, run_id, template_id, request, generate, evidence_resolver=None,
                        progress=None, *, scope='full', section_id=None, revision='1',
                        token_allowance=12000, allow_simulated=False):
@@ -372,8 +429,9 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
 
         async def notify(stage):
             if progress:
-                await invoke(progress, {'stage': stage, 'completed': sum(item['status'] == 'completed' for item in plan['targets']),
-                                        'total': len(plan['targets']), 'plan_id': key})
+                completed = plan['planning_offset'] if stage == 'planning' else sum(item['status'] == 'completed' for item in plan['targets'])
+                total = len(eligible) if stage == 'planning' else len(plan['targets'])
+                await invoke(progress, {'stage': stage, 'completed': completed, 'total': total, 'plan_id': key})
 
         base = {'request': request, 'scope': scope, 'section_id': section_id,
                 'allow_simulated': allow_simulated, 'token_budget': token_allowance,
@@ -435,6 +493,7 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
                 plan['gaps'] = list(dict.fromkeys(plan['gaps'] + gaps))
                 plan['planning_offset'] += len(page)
                 save_checkpoint(path, plan)
+                await notify('planning')
             plan['planning_complete'] = True
             plan['status'] = 'filling'
             save_checkpoint(path, plan)

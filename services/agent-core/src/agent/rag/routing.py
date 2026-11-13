@@ -93,8 +93,13 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
             result['reuse_evidence'] = bool(result['required'] and decision.get('reuse_evidence'))
     if 'document_export' in intent.get('task_kinds', []):
         result['task_type'] = 'document_export'
+    elif 'attachment_extract' in intent.get('task_kinds', []):
+        result['task_type'] = 'attachment_extract'
     elif decision['task_type'] != 'document_export':
         result['task_type'] = 'evidence_answer' if result['required'] else 'chat'
+    for key in ('read_attachment_ids', 'read_requests', 'task_scope', 'retrieval_scope', 'allow_simulated_data', 'clarification'):
+        if key in intent:
+            result[key] = intent[key]
     return result
 
 
@@ -116,7 +121,8 @@ def intent_payload(content, attachments, recent_messages, conversation_kind, *, 
             value['pending_task']['request'] = value['pending_task']['request'][:-16]
 
     for attachment in attachments[:8]:
-        entry = {'name': clip(attachment.get('name', 'attachment'), 100),
+        entry = {'id': clip(attachment.get('id', ''), 200),
+                 'name': clip(attachment.get('name', 'attachment'), 100),
                  'purpose': attachment.get('purpose', 'reference')}
         value['attachments'].append(entry)
         if len(render().encode('utf8')) > budget_bytes // 3:

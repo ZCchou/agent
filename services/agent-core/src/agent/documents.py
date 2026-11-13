@@ -15,7 +15,7 @@ from docx import Document
 from agent.storage import CoreDataError, _utc_now
 from agent.rag.support import review_issues
 from agent.document_plan import (checkpoint_identity, document_structure, fill_planned,
-                                 load_checkpoint, replace_target_text)
+                                 inherit_plan, load_checkpoint, replace_target_text)
 
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 MAX_EXPANDED_BYTES = 200 * 1024 * 1024
@@ -125,6 +125,14 @@ class DocumentWorkflow:
             raise CoreDataError('document_template_invalid', '首期回填支持 20 MiB 以内的 DOCX 模板。')
         load_docx(payload)
         document = load_docx(payload)
+        with self.repository._connect() as connection:
+            existing = connection.execute("SELECT id FROM document_artifacts WHERE run_id=? AND kind='template' AND sha256=? ORDER BY created_at",
+                                          (run_id, digest(payload))).fetchall()
+        for item in existing:
+            artifact = self.get(run_id, item['id'])
+            if artifact['manifest'].get('name') == name:
+                self.path_for(run_id, artifact['id'])
+                return {**artifact, 'template_id': artifact['id']}
         standards = sorted(set(re.findall(r'DO[-－ ]?160[FG]', '\n'.join(target.text for _, target, _ in targets(document)), re.I)))
         result = self._save(run_id, payload, 'template', {'name': name, 'referenced_standards': standards})
         return {**result, 'template_id': result['id']}
@@ -169,6 +177,9 @@ class DocumentWorkflow:
                            progress=None, **options):
         return await fill_planned(self, run_id, template_id, request, generate, evidence_resolver,
                                   progress, **options)
+
+    def inherit_plan(self, run_id, template_id, request, parent_run_id, parent_template_id, **options):
+        return inherit_plan(self, run_id, template_id, request, parent_run_id, parent_template_id, **options)
 
     def select_section(self, run_id, template_id, request):
         """Resolve an explicitly named, unique section for application-owned filling."""

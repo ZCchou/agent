@@ -146,6 +146,7 @@ def test_plan_batch_limit_and_context_budget_are_enforced(tmp_path):
     document.save(stream)
     source = service.register_template(run['id'], stream.getvalue(), '长.docx')
     batch_sizes = []
+    progress = []
     async def generate(task):
         if task['stage'] == 'plan':
             return {'targets': [{'target_id': field['id'], 'field_type': 'placeholder'}
@@ -153,10 +154,13 @@ def test_plan_batch_limit_and_context_budget_are_enforced(tmp_path):
         batch_sizes.append(len(task['fields']))
         assert task['token_budget'] <= 6000
         return {'fields': [{'target_id': field['target_id'], 'text': '已填写', 'evidence': []} for field in task['fields']]}
-    result = asyncio.run(service.fill_planned(run['id'], source['id'], '整份', generate, token_allowance=6000))
+    result = asyncio.run(service.fill_planned(run['id'], source['id'], '整份', generate, token_allowance=6000, progress=progress.append))
     assert max(batch_sizes) <= 10
     assert sum(batch_sizes) == 23
     assert result['manifest']['coverage']['completed'] == 23
+    planning = [event for event in progress if event['stage'] == 'planning']
+    assert planning[0]['total'] == 24
+    assert planning[-1]['completed'] == planning[-1]['total'] == 24
     with pytest.raises(CoreDataError) as raised:
         asyncio.run(service.fill_planned(run['id'], source['id'], '整份', generate, revision='tiny', token_allowance=10))
     assert raised.value.code == 'document_context_too_small'
@@ -431,3 +435,33 @@ def test_grounding_string_locator_metadata_preserves_prose_and_controls_page_cla
     else:
         artifact = asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
         assert 'Ordinary cited content' in Document(service.path_for(run['id'], artifact['id'])).paragraphs[2].text
+
+
+def test_linked_plan_replays_reauthorized_completed_field_and_keeps_unfinished_targets(tmp_path):
+    _, parent, service = workflow(tmp_path)
+    source = source_document(service, parent)
+    async def generate(task):
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 'p-2', 'field_type': 'instruction'},
+                                {'target_id': 'p-5', 'field_type': 'instruction'}]}
+        if task['fields'][0]['target_id'] == 'p-5':
+            raise RuntimeError('later chapter')
+        return {'fields': [{'target_id': 'p-2', 'text': 'Completed cited chapter',
+                            'evidence': [{'id': 'old-evidence', 'quote_id': 'q1'}]}]}
+    def evidence(text, citations):
+        return text, [{'id': item['id'], 'revision': 'A'} for item in citations]
+    with pytest.raises(RuntimeError):
+        asyncio.run(service.fill_planned(parent['id'], source['id'], 'fill', generate, evidence_resolver=evidence))
+    service.repository.transition_model_run(parent['id'], {'queued'}, 'failed', 'interrupted', 'interrupted')
+    child = service.repository.create_expanded_retry(parent['id'])
+    child_source = service.register_template(child['id'], service.path_for(parent['id'], source['id']).read_bytes(), '模板.docx')
+    def reauthorize(field):
+        assert field['evidence'] == [{'id': 'old-evidence', 'quote_id': 'q1'}]
+        return {**field, 'evidence': [{'id': 'new-evidence', 'quote_id': 'q1'}]}
+    service.inherit_plan(child['id'], child_source['id'], 'fill', parent['id'], source['id'],
+                         reauthorize=reauthorize, evidence_resolver=evidence)
+    inherited = service.read_plan(child['id'], child_source['id'], 'fill')
+    assert [target['status'] for target in inherited['targets']] == ['completed', 'pending']
+    assert inherited['targets'][0]['result']['evidence'] == [{'id': 'new-evidence', 'quote_id': 'q1'}]
+    artifact = service.get(child['id'], inherited['artifact_id'])
+    assert artifact['manifest']['fields'][0]['evidence'][0]['id'] == 'new-evidence'
