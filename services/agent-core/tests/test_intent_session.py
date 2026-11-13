@@ -189,14 +189,15 @@ def test_actual_transport_errors_auto_retry_then_allow_third_call(tmp_path, code
     asyncio.run(scenario())
 
 
-def test_resource_error_allows_manual_retry_after_repair(tmp_path):
+@pytest.mark.parametrize('code', ['resource_exhausted', 'model_not_found'])
+def test_resource_error_allows_manual_retry_after_repair(tmp_path, code):
     from agent.execution.intent_session import IntentService, current_intent
     from agent.providers import ProviderError
     async def scenario():
         repaired = False
         async def classify(mode):
             if not repaired:
-                raise ProviderError('resource_exhausted', 'Synthetic memory shortage')
+                raise ProviderError(code, 'Synthetic repairable model error')
             return {'ok': True}
         async def start(params):
             return await current_intent.get().classify(classify)

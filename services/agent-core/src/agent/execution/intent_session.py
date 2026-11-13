@@ -19,6 +19,7 @@ RETRY_CODES = {'routing_intent_timeout', 'routing_intent_invalid', 'provider_tim
                'network_error', 'response_format_unsupported', 'connection_reset',
                'stream_stalled', 'network_unavailable', 'request_timeout'}
 RECOVERY_CODES = RETRY_CODES | {'core_interrupted', 'resource_exhausted', 'model_not_loaded',
+    'model_not_found',
     'model_load_failed', 'runtime_missing', 'engine_missing', 'runtime_integrity_invalid',
     'model_file_changed', 'model_runtime_unavailable'}
 
