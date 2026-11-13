@@ -3561,6 +3561,7 @@ class ChatRunService:
         native_search_mode: str | None = None,
         artifact_ids: tuple[str, ...] = (),
         apply_rag_contract: bool = True,
+        response_schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
         managed_request = isinstance(provider, ManagedLocalProvider)
         if managed_request:
@@ -3577,6 +3578,9 @@ class ChatRunService:
                 additional_artifact_ids=artifact_ids,
                 apply_rag_contract=apply_rag_contract,
             )
+            if response_schema is not None:
+                spec = replace(spec, response_format='json_schema',
+                               response_schema_json=json.dumps(response_schema, sort_keys=True))
             self.execution_repository.save_invocation_spec(spec)
             prepared = self._compile_model_request(run['id'], spec, messages)
             if round_no == 1:
@@ -5154,14 +5158,34 @@ class ChatRunService:
             '{read_requests:[{attachment_id,offset?,limit?,physical_page?,section?}]}; continue via next_offset with the same filters. '
             'Read results carry source hashes, locators, warnings and coverage. Never infer unread contents.'
         )
+        source_context = self._document_batch_context(run, task)
+        strict = step.get('protocol_id') in {'openai_chat', 'ollama_chat'}
+        if strict:
+            instruction += (' Wrap the result in {"response":RESULT}. Select only writable target IDs, never headings or containers. '
+                'Use span:null to replace the complete target. A span is a character range object, never a boolean. '
+                'For a test-purpose section, fill the body below its heading and preserve the heading. '
+                'task.fields already contains the authorized original content for these targets; plan them directly. '
+                'Read further only for missing source data. Read section uses heading text, not an internal section ID. '
+                'Use physical_page only for PDF, otherwise null.')
         messages = [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': json.dumps(
-            {'task': task, 'evidence': evidence, 'source_context': self._document_batch_context(run, task)}, ensure_ascii=False)}]
+            {'task': task, 'evidence': evidence, 'source_context': source_context}, ensure_ascii=False)}]
+        from agent.document_contracts import document_batch_schema
+        # The inspected template fields are already supplied in full. Further
+        # reads in this batch are for reference data that has not been provided.
+        reference_ids = [item['attachment_id'] for item in source_context['attachments'] if item['purpose'] != 'template']
+        schema = document_batch_schema(task, reference_ids) if strict else None
         with self.repository._connect() as connection:
             round_no = connection.execute('SELECT COALESCE(MAX(round_no),0)+1 FROM invocation_specs WHERE step_id=? AND attempt_no=?',
                 (step['id'], attempt['attempt_number'])).fetchone()[0]
-        text, usage, _ = await self._invoke_planned_step(run, plan, step, attempt, self._provider(profile), messages,
-            max_output_tokens=min(4096, max(512, task['token_budget'])), response_format='json_object',
-            round_no=round_no, apply_rag_contract=False)
+        for compatibility_round, active_schema in enumerate([schema, None] if schema else [None]):
+            try:
+                text, usage, _ = await self._invoke_planned_step(run, plan, step, attempt, self._provider(profile), messages,
+                    max_output_tokens=min(4096, max(512, task['token_budget'])), response_format='json_object',
+                    round_no=round_no + compatibility_round, apply_rag_contract=False, response_schema=active_schema)
+                break
+            except ProviderError as error:
+                if active_schema is None or error.code != 'response_format_unsupported':
+                    raise
         if usage:
             self.repository.update_attempt_usage(attempt_id, usage)
             self.execution_repository.update_step_usage(step['id'], usage)
@@ -5171,6 +5195,11 @@ class ChatRunService:
             raise CoreDataError('document_plan_invalid', '模板批次返回格式无效，已保存完成的批次。') from error
         if not isinstance(result, dict):
             raise CoreDataError('document_plan_invalid', '模板批次需要结构化结果，已保存完成的批次。')
+        if strict and set(result) == {'response'} and isinstance(result['response'], dict):
+            result = result['response']
+        if strict and isinstance(result.get('read_requests'), list):
+            result['read_requests'] = [{key: value for key, value in item.items() if value is not None}
+                                      for item in result['read_requests']]
         return result
 
     async def _application_document_operation(self, run, attempt_id, call):

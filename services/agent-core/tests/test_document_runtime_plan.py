@@ -156,7 +156,7 @@ def test_application_full_template_uses_batched_plan_for_repeated_headings(tmp_p
 
 @pytest.mark.parametrize(('equipment_value', 'retry_mode'), [('EQ-ALPHA', None), ('EQ-BETA', 'same'), ('EQ-GAMMA', 'linked'),
     ('USER-ACTUAL-123', 'real_only'), ('USER-ACTUAL-456', 'mixed'), ('LONG-ACTUAL', 'long'),
-    ('CHANGED-ACTUAL', 'changed_source')])
+    ('CHANGED-ACTUAL', 'changed_source'), ('EQ-FALLBACK', 'schema_unsupported')])
 def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, monkeypatch, equipment_value, retry_mode):
     import json
     import httpx
@@ -173,6 +173,8 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
     def respond(request):
         payload = json.loads(request.content)
         payloads.append(payload)
+        if retry_mode == 'schema_unsupported' and len(payloads) == 1:
+            return httpx.Response(400, json={'error': {'message': 'response_format unsupported'}})
         task = json.loads(payload['messages'][-1]['content'])['task']
         supplied = json.loads(payload['messages'][-1]['content'])['source_context']
         if equipment_value not in json.dumps(supplied, ensure_ascii=False):
@@ -300,11 +302,14 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
                 fields = application.documents.get(run['id'], published_id)['manifest']['fields']
                 assert all(field['evidence'] for field in fields)
                 application.rag.validate_evidence(project['id'], [source['id'] for field in fields for source in field['evidence']], run_id=run['id'])
-            assert all(payload.get('response_format', {}).get('type') == 'json_object' for payload in payloads)
-            assert len(payloads) == (3 if retry else 4)
+            fallback = retry_mode == 'schema_unsupported'
+            assert all(payload.get('response_format', {}).get('type') == (
+                'json_object' if fallback and index == 1 else 'json_schema') for index, payload in enumerate(payloads))
+            assert len(payloads) == (3 if retry else 4) + int(fallback)
             plan = application.execution_coordinator.get_for_run(run['id'])
-            assert len(plan['invocations']) == (1 if retry_mode == 'linked' else 3 if retry else 4)
-            assert all(item['status'] == 'completed' for item in plan['invocations'])
+            assert len(plan['invocations']) == (1 if retry_mode == 'linked' else 3 if retry else 4) + int(fallback)
+            assert sum(item['status'] == 'failed' for item in plan['invocations']) == int(fallback)
+            assert all(item['status'] in {'completed', 'failed'} for item in plan['invocations'])
         finally:
             await application.shutdown()
     asyncio.run(scenario())
@@ -363,6 +368,24 @@ def test_document_retry_reauthorizes_actual_project_evidence_into_child_run(tmp_
         finally:
             await rag.close()
     asyncio.run(scenario())
+
+
+def test_batch_schema_protects_headings_spans_and_attachment_identity():
+    from agent.document_contracts import document_batch_schema
+    task = {'stage': 'plan', 'fields': [{'id': 'p-610', 'field_type': 'heading'},
+                                       {'id': 'p-611', 'field_type': 'content'}]}
+    schema = document_batch_schema(task, ['authorized'])
+    target = {'target_id': 'p-611', 'field_type': 'content', 'parameter_keys': [], 'span': None}
+    response = {'response': {'targets': [target], 'equipment_parameters': {}, 'gaps': []}}
+    assert schema_accepts(response, schema)
+    target['target_id'] = 'p-610'
+    assert not schema_accepts(response, schema)
+    target.update(target_id='p-611', span=False)
+    assert not schema_accepts(response, schema)
+    reading = {'attachment_id': 'authorized', 'offset': 0, 'limit': 1, 'physical_page': None, 'section': None}
+    assert schema_accepts({'response': {'read_requests': [reading]}}, schema)
+    reading['attachment_id'] = 'forged'
+    assert not schema_accepts({'response': {'read_requests': [reading]}}, schema)
 
 
 def schema_accepts(value, schema):

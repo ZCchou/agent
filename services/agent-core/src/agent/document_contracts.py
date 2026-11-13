@@ -3,6 +3,42 @@ from agent.storage import CoreDataError
 
 DOCUMENT_TOOLS = ('document.inspect_template', 'document.fill_template', 'document.export', 'document.read_attachment')
 
+def document_batch_schema(task, attachment_ids):
+    """Constrain model choices to writable positions in this authorized batch."""
+    def object_schema(properties):
+        return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
+
+    strings = {'type': 'array', 'items': {'type': 'string'}}
+    parameters = {'type': 'object', 'additionalProperties': {'type': 'string'}}
+    writable = [field.get('target_id', field.get('id')) for field in task['fields']
+                if field.get('field_type') not in {'heading', 'container'}]
+    target_id = {'type': 'string', **({'enum': writable} if writable else {})}
+    if task['stage'] == 'plan':
+        target = object_schema({'target_id': target_id,
+            'field_type': {'type': 'string', 'enum': ['instruction', 'example', 'placeholder', 'content']},
+            'parameter_keys': strings,
+            'span': {'anyOf': [{'type': 'null'}, object_schema({
+                'start': {'type': 'integer', 'minimum': 0}, 'end': {'type': 'integer', 'minimum': 1}})]}})
+        completed = object_schema({'targets': {'type': 'array', 'maxItems': len(writable), 'items': target},
+                                   'equipment_parameters': parameters, 'gaps': strings})
+    else:
+        citation = object_schema({'id': {'type': 'string'}, 'quote_id': {'type': 'string'}})
+        field = object_schema({'target_id': target_id, 'text': {'type': 'string', 'maxLength': 16000},
+            'evidence': {'type': 'array', 'maxItems': 8, 'items': citation}, 'missing': strings,
+            'parameter_values': parameters})
+        completed = object_schema({'fields': {'type': 'array', 'minItems': len(writable),
+                                              'maxItems': len(writable), 'items': field}})
+    alternatives = [completed]
+    if attachment_ids:
+        properties = DOCUMENT_DEFINITIONS[3]['function']['parameters']['properties']
+        reading = {name: {'anyOf': [schema, {'type': 'null'}]} for name, schema in properties.items()
+                   if name != 'attachment_id'}
+        reading = {'attachment_id': {'type': 'string', 'enum': list(attachment_ids)}, **reading}
+        alternatives.append(object_schema({'read_requests': {'type': 'array', 'minItems': 1,
+            'maxItems': 8, 'items': object_schema(reading)}}))
+    return object_schema({'response': {'anyOf': alternatives}})
+
+
 def definition(name, description, properties, required):
     return {'type': 'function', 'function': {'name': name, 'description': description,
         'parameters': {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}}}
