@@ -36,7 +36,7 @@
 
 将 DOCX 用途设为“待填写模板”，将设备资料用途设为“参考资料”，说明填写整份或具体章节，并明确是否允许模拟设备数据。模型按需读取、检索和分批填写，生成稿保存来源、条款、物理页码、资料缺口及复核事项。文件发布完成后可通过“打开文件”核对 Word 内容。
 
-完整离线包的安装、迁移和故障恢复操作见说明。统一版安装器无 Authenticode 签名，程序更新包和更新清单使用独立密钥签名。干净 Windows 断网环境等验收状态单独列出。[安装与迁移](docs/offline-windows-operations.zh-CN.md) · [验收报告](docs/offline-windows-acceptance.zh-CN.md)
+完整离线包的安装、迁移和故障恢复操作见说明。统一版安装器无 Authenticode 签名，程序更新包和更新清单使用独立密钥签名。真实整份模板和干净 Windows 环境的验收状态在报告中列出。[安装与迁移](docs/offline-windows-operations.zh-CN.md) · [本版验收报告](docs/interaction-recovery-acceptance.zh-CN.md)
 
 ## 统一版迁移与更新
 

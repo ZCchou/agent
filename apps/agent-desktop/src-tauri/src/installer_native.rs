@@ -457,6 +457,26 @@ fn hash(path: &Path, progress: Option<&Progress>, allow_archive_links: bool) -> 
 fn equal(a: &Identity, b: &Identity) -> bool {
     a.bytes == b.bytes && a.sha256 == b.sha256
 }
+#[cfg(windows)]
+fn move_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| if unit == 47 { 92 } else { unit })
+        .collect();
+    // Win32 move APIs need an explicit extended prefix for staging paths, even
+    // when the final install path is shorter than MAX_PATH.
+    if wide.starts_with(&[92, 92, 63, 92]) {
+        return wide.into_iter().chain(Some(0)).collect();
+    }
+    let unc = wide.starts_with(&[92, 92]);
+    let prefix = if unc { r"\\?\UNC\" } else { r"\\?\" };
+    let mut result: Vec<u16> = prefix.encode_utf16().collect();
+    result.extend_from_slice(&wide[if unc { 2 } else { 0 }..]);
+    result.push(0);
+    result
+}
 fn rename(from: &Path, to: &Path, replace: bool) -> Result<()> {
     plain(from)?;
     plain(to)?;
@@ -465,12 +485,11 @@ fn rename(from: &Path, to: &Path, replace: bool) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{
             MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
         };
-        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        let from = move_path(from);
+        let to = move_path(to);
         if unsafe {
             MoveFileExW(
                 from.as_ptr(),

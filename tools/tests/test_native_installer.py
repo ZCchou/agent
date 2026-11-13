@@ -46,6 +46,23 @@ def ok(result):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_long_staging_paths_publish_rollback_and_uninstall(tmp_path):
+    root = tmp_path / 'installed'
+    name = 'rag-runtime/' + '/'.join(['long-package-name'] * 6) + '/checkpoint_conversion_helper_with_long_name.py'
+    assert len(str(root / '.managed-runtime/native-transaction/stage' / name)) > 260
+    old = package(tmp_path, {name: b'old'}, 'long-old')
+    ok(run(root, old))
+    assert (root / name).read_bytes() == b'old'
+    new = package(tmp_path, {name: b'new'}, 'long-new')
+    assert run(root, new, extra=['--fault', 'before-commit']).returncode == 97
+    ok(run(root, action='recover'))
+    assert (root / name).read_bytes() == b'old'
+    ok(run(root, new))
+    assert (root / name).read_bytes() == b'new'
+    ok(run(root, action='uninstall'))
+    assert not (root / name).exists()
+
+
 def test_verified_unchanged_file_keeps_identity_and_never_reads_its_volume(tmp_path):
     root = tmp_path / 'installed'
     old = package(tmp_path, {'rag-runtime/same': b'same', 'agent-core.exe': b'old'}, 'old')
