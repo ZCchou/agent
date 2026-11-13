@@ -193,7 +193,7 @@ const chat = {
     purposeLabel: 'Purpose of {{name}}',
     referencePurpose: 'Reference material',
     templatePurpose: 'Template to fill',
-    processing: { modelLoading: "Loading document model {{completed}}/{{total}}", reranking: "Reranking document evidence {{completed}}/{{total}}", parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
+    processing: { templatePlanning: "Planning template {{completed}}/{{total}}", templateFilling: "Filling template {{completed}}/{{total}}", modelLoading: "Loading document model {{completed}}/{{total}}", reranking: "Reranking document evidence {{completed}}/{{total}}", parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
     referenceSelection: "Reference selected text",
     reference: "Reference this attachment", referenceNamed: "Reference {{name}}",
     references: "Referenced attachments", fromHistory: "From this conversation",

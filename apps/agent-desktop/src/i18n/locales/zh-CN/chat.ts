@@ -193,7 +193,7 @@ const chat = {
     purposeLabel: '{{name}} 的用途',
     referencePurpose: '参考资料',
     templatePurpose: '待填写模板',
-    processing: { modelLoading: "正在加载文档模型 {{completed}}/{{total}}", reranking: "正在重排文档证据 {{completed}}/{{total}}", parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
+    processing: { templatePlanning: "正在规划模板 {{completed}}/{{total}}", templateFilling: "正在填充模板 {{completed}}/{{total}}", modelLoading: "正在加载文档模型 {{completed}}/{{total}}", reranking: "正在重排文档证据 {{completed}}/{{total}}", parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
     referenceSelection: "引用所选文本",
     reference: "引用此附件", referenceNamed: "引用 {{name}}",
     references: "本轮引用的附件", fromHistory: "来自当前会话",

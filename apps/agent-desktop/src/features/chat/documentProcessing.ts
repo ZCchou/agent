@@ -1,3 +1,10 @@
+const countedProgressKeys = new Map([
+  ["reranking", "attachments.processing.reranking"],
+  ["model_loading", "attachments.processing.modelLoading"],
+  ["template_planning", "attachments.processing.templatePlanning"],
+  ["template_filling", "attachments.processing.templateFilling"],
+]);
+
 export function documentProcessingLabel(
   data: Record<string, unknown>,
   translate: (key: string, values: Record<string, string | number>) => string,
@@ -10,8 +17,9 @@ export function documentProcessingLabel(
       page: Number(data.page ?? 0), total: Number(data.total_pages ?? 0),
     });
   }
-  if (data.phase === "reranking" || data.phase === "model_loading") {
-    return translate(data.phase === "reranking" ? "attachments.processing.reranking" : "attachments.processing.modelLoading", {
+  const progressKey = countedProgressKeys.get(String(data.phase));
+  if (progressKey) {
+    return translate(progressKey, {
       completed: Number(data.completed ?? 0), total: Number(data.total ?? 0),
     });
   }

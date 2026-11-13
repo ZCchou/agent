@@ -48,3 +48,12 @@
 - GREEN verification passed for `npx playwright test intent-send-recovery.spec.mjs intent-dialog.spec.mjs --config=.artifacts/intent-playwright.config.mjs --reporter=line --output=.artifacts/intent-recovery-tests` with `AGENT_UI_BASE_URL=http://127.0.0.1:5197`. All eight tests passed.
 - `npx vitest run src --configLoader runner` passed 49 files and 220 tests. `npx tsc --noEmit` passed. `npx vite build --configLoader runner` passed with the existing large-chunk warning. `git diff --check -- apps/agent-desktop` passed.
 - Browser tests emulate the Tauri command boundary and execute the actual frontend entry points. Core retry classification and persisted budget accounting are coordinated by root.
+
+
+## Template progress completion
+
+- Added localized counted labels for `template_planning` and `template_filling` in the shared document-processing formatter. Counts use Core's `completed` and `total` values.
+- AssistantRunMessage already displays elapsed duration alongside every activity label, so these labels use that existing duration display.
+- English and Chinese template-label tests reproduced RED with null output and then passed after phase mapping/localization.
+- Full frontend unit verification passed 49 files and 222 tests using `npx vitest run src --configLoader runner`. The focused document progress suite passed five tests. `npx tsc --noEmit` and scoped `git diff --check` passed.
+- Existing browser integration forwards `run.document_processing` through this formatter. Root's full browser verification continues on its existing server.
