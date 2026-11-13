@@ -1727,8 +1727,10 @@ mod tests {
 
     #[test]
     fn intent_timeout_and_residency_defaults_migrate_and_validate() {
-        let mut original = AppSettings::default();
-        original.schema_version = 18;
+        let original = AppSettings {
+            schema_version: 18,
+            ..AppSettings::default()
+        };
         let manager =
             SettingsManager::new(Arc::new(MemorySettingsRepository::with_settings(original)));
         let loaded = manager.get_settings().unwrap();

@@ -1005,7 +1005,7 @@ mod tests {
         drop(store);
         let mut store = AttachmentStore::new(root.clone()).unwrap();
         assert_eq!(
-            store.resolve(&[manifest.id.clone()]).unwrap()[0].id,
+            store.resolve(std::slice::from_ref(&manifest.id)).unwrap()[0].id,
             manifest.id
         );
         let mut task =
