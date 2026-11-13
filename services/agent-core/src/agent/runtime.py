@@ -3219,9 +3219,13 @@ class ChatRunService:
             '只有明确要求整份/全部章节时才选 task_scope:"full"。'
             '处理模板或提取附件时，从 attachments 选择对应真实 id 放入 read_attachment_ids。'
             '范围与模拟授权已明确时 clarification:null，不重复询问。示例仅演示格式，按本轮实际请求决定每个值。'
+            'Honor task_scope_constraint when supplied by the application from the user request.'
         )
-        from agent.rag.routing import intent_payload, intent_tokens, routing_intent_schema
+        from agent.rag.routing import intent_payload, intent_tokens, routing_intent_schema, explicit_document_scope
         schema = routing_intent_schema([item['id'] for item in attachments], pending_action=pending_action)
+        scope_constraint = explicit_document_scope(content)
+        if scope_constraint:
+            schema['properties']['task_scope']['enum'] = [scope_constraint]
         strict_format = profile.kind in {'openai_compatible', 'ollama'}
         output_reserve = 1024
         window = (profile.model_capabilities or {}).get(model_id, {}).get('context_length') or 8192
@@ -3270,6 +3274,9 @@ class ChatRunService:
                                 del request[key]
                 text = json.dumps(value, ensure_ascii=False)
             parsed = self.execution_coordinator.parse_routing_intent(text)
+            if scope_constraint:
+                parsed['task_scope'] = scope_constraint
+                parsed['task_scope_source'] = 'user_explicit'
             return self.execution_coordinator.constrain_follow_up(
                 parsed, pending_action=pending_action,
             )
@@ -4985,12 +4992,17 @@ class ChatRunService:
 
     async def _fill_template_planned(self, run, attempt_id, template_id, request):
         decision = run.get('rag_decision') or {}
+        from agent.rag.routing import explicit_document_scope
+        scope_constraint = explicit_document_scope(request)
+        if scope_constraint and (decision.get('task_scope') != scope_constraint
+                                 or decision.get('task_scope_source') != 'user_explicit'):
+            decision = {**decision, 'task_scope': scope_constraint, 'task_scope_source': 'user_explicit'}
+            self.repository.record_rag_decision(run['id'], decision)
+            run['rag_decision'] = decision
         scope = 'section' if decision.get('task_scope') == 'section' else 'full'
         section_id = None
         if scope == 'section':
-            target = self.documents.select_section(run['id'], template_id, request)
-            structure = self.documents.inspect_structure(run['id'], template_id, limit=None)
-            section_id = next(field['section_id'] for field in structure['fields'] if field['id'] == target)
+            section_id = self.documents.select_section(run['id'], template_id, request, section_identity=True)
         profile = self._profile(run['provider_profile_id'])
         window = (profile.model_capabilities or {}).get(run['model_id'], {}).get('context_length') or 8192
         # Leave room for instructions, evidence and output before paging the inventory.

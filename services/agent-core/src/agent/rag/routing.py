@@ -73,6 +73,32 @@ def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evide
             'task_type': 'document_export' if export else 'evidence_answer' if required else 'chat'}
 
 
+def explicit_document_scope(text):
+    """Retain literal user range declarations while leaving other intent to the model."""
+    original, separator, supplement = text.partition('\n\n补充信息\n')
+    if separator:
+        try:
+            answers = json.loads(supplement)
+        except (ValueError, TypeError):
+            answers = {}
+        choices = {'整份模板': 'full', '整份': 'full', '指定章节': 'section', '具体章节': 'section'}
+        selected = {choices[value] for value in answers.values() if isinstance(value, str) and value in choices} \
+            if isinstance(answers, dict) else set()
+        if selected:
+            return next(iter(selected)) if len(selected) == 1 else None
+    patterns = [
+        (r'(?:填写|回填|填好|完成)\s*(?:整份|整个|完整的?|所有章节|全部章节)(?:模板|文档)?', 'full'),
+        (r'(?:填写|回填|填好)\s*(?:此|该|这个|这份|本)?(?:附件|模板|文档|《[^》\r\n]{1,100}》)'
+         r'\s*(?:中|内)[^\r\n]{0,160}[”"」』]\s*一[章节]', 'section'),
+    ]
+    for pattern, scope in patterns:
+        for match in re.finditer(pattern, original):
+            prefix = original[max(0, match.start() - 4):match.start()].strip()
+            if not prefix.endswith(('不要', '无需', '禁止', '不必', '不是', '不需要')):
+                return scope
+    return None
+
+
 def merge_evidence_intent(decision, intent, *, error_code=None):
     """Apply descriptive model intent while retaining executor evidence obligations."""
     result = {**decision, 'source': 'rules'}
@@ -100,6 +126,8 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
     for key in ('read_attachment_ids', 'read_requests', 'task_scope', 'retrieval_scope', 'allow_simulated_data', 'clarification'):
         if key in intent:
             result[key] = intent[key]
+    if intent.get('task_scope_source') == 'user_explicit':
+        result['task_scope_source'] = 'user_explicit'
     return result
 
 
@@ -159,6 +187,9 @@ def intent_payload(content, attachments, recent_messages, conversation_kind, *, 
     budget = budget_tokens if budget_tokens is not None else budget_bytes
     value = {'request': '', 'request_truncated': False, 'attachments': [],
              'work_kind': conversation_kind, 'recent_conversation': []}
+    scope = explicit_document_scope(content)
+    if scope:
+        value['task_scope_constraint'] = scope
     if pending_task:
         value['pending_task'] = {'task_type': pending_task.get('task_type'), 'required': bool(pending_task.get('required')),
                                  'request': clip(pending_task.get('request', ''), 256)}

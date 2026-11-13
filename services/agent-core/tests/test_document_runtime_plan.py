@@ -107,12 +107,15 @@ def test_template_registration_reuses_same_run_identity_after_verifying_bytes(tm
     assert first['id'] == second['id']
 
 
-def test_application_full_template_uses_batched_plan_for_repeated_headings(tmp_path):
+@pytest.mark.parametrize('requested_scope', ['full', 'section'])
+def test_application_full_template_uses_batched_plan_for_repeated_headings(tmp_path, requested_scope):
     async def scenario():
         core = CoreRepository(tmp_path / 'agent.db')
         project = core.create_project('P', 'work')
         conversation = core.create_conversation('project_work', 'C', project_id=project['id'])
-        run = core.start_model_run(content='填写整份模板，允许模拟数据', idempotency_key='full',
+        user_request = ('填写整份模板，允许模拟数据' if requested_scope == 'full' else
+                        '请填写此模板中“振动试验”的“试验目的”一节，允许模拟数据。')
+        run = core.start_model_run(content=user_request, idempotency_key='full',
             provider_profile_id='p', model_id='m', conversation_id=conversation['id'])
         run['rag_decision'] = {'task_scope': 'full', 'allow_simulated_data': True}
         document = Document()
@@ -141,14 +144,18 @@ def test_application_full_template_uses_batched_plan_for_repeated_headings(tmp_p
             return {'fields': [{'target_id': f['target_id'], 'text': f['chapter_path'][0] + '完成稿',
                 'evidence': [], 'missing': ['实际设备资料待补充']} for f in task['fields']]}
         service._generate_document_batch = generate
-        result = await service._fill_template_planned(run, 'attempt', template['id'], '填写整份模板，允许模拟数据')
+        result = await service._fill_template_planned(run, 'attempt', template['id'], user_request)
         generated = Document(service.documents.path_for(run['id'], result['id']))
         completed = [p.text for p in generated.paragraphs if '完成稿' in p.text]
-        assert len(completed) == 2
+        expected_count = 2 if requested_scope == 'full' else 1
+        assert len(completed) == expected_count
         assert completed[0].startswith('振动试验完成稿')
-        assert completed[1].startswith('温度试验完成稿')
+        if requested_scope == 'full':
+            assert completed[1].startswith('温度试验完成稿')
         assert all('实际设备资料待补充' in text for text in completed)
-        assert result['manifest']['coverage']['completed'] == 2
+        assert result['manifest']['coverage']['completed'] == expected_count
+        assert core.get_model_run(run['id'])['rag_decision']['task_scope'] == requested_scope
+        assert core.get_model_run(run['id'])['rag_decision']['task_scope_source'] == 'user_explicit'
         assert all(task['allow_simulated'] for task in calls)
         assert all(len(task['fields']) <= 10 for task in calls if task['stage'] == 'fill')
     asyncio.run(scenario())

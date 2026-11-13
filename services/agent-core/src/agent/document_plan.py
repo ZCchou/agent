@@ -447,15 +447,19 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
                        token_allowance=12000, allow_simulated=False, source_context=None):
     template = workflow.get(run_id, template_id)
     workflow.path_for(run_id, template_id)
-    if scope not in {'full', 'section'} or scope == 'section' and not section_id \
+    if scope not in {'full', 'section'} or scope == 'section' and (not isinstance(section_id, str) or not section_id) \
             or not isinstance(request, str) or not request.strip() or len(request) > 32000 \
             or type(allow_simulated) is not bool or len(str(revision)) > 128:
         raise invalid()
     structure = workflow.inspect_structure(run_id, template_id, limit=None)
     available = {field['id']: field for field in structure['fields']}
-    if scope == 'section' and section_id not in {section['id'] for section in structure['sections']}:
+    selected_field = section_id.removeprefix('field:') if scope == 'section' and section_id.startswith('field:') else None
+    if selected_field and (selected_field not in available or available[selected_field]['field_type'] in {'heading', 'container'}):
+        raise invalid('请选择可填写的位置。')
+    if scope == 'section' and not selected_field and section_id not in {section['id'] for section in structure['sections']}:
         raise invalid('请选择完整章节标识。')
     eligible = [field for field in structure['fields'] if scope == 'full'
+                or selected_field and field['id'] == selected_field
                 or field['section_id'] == section_id or field['section_id'].startswith(section_id + '/')]
     key, identity = checkpoint_identity(run_id, template, request, scope, section_id, revision)
     path = workflow.root / (key + '.plan.json')

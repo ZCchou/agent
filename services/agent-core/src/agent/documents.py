@@ -181,34 +181,46 @@ class DocumentWorkflow:
     def inherit_plan(self, run_id, template_id, request, parent_run_id, parent_template_id, **options):
         return inherit_plan(self, run_id, template_id, request, parent_run_id, parent_template_id, **options)
 
-    def select_section(self, run_id, template_id, request):
+    def select_section(self, run_id, template_id, request, *, section_identity=False):
         """Resolve an explicitly named, unique section for application-owned filling."""
         document = load_docx(self.path_for(run_id, template_id).read_bytes())
+        structured, _ = document_structure(document, targets)
+        positions = {field['id']: field for field in structured}
+        def normalized_title(text):
+            return re.sub(r'^\s*\d+(?:[.．]\d+)*[.、．]?\s*', '', text).strip()
         candidates = []
         for index, paragraph in enumerate(document.paragraphs[:-1]):
-            title = paragraph.text.strip()
+            title = normalized_title(paragraph.text)
             if not 2 <= len(title) <= 30 or title not in request:
                 continue
-            context = [item.text.strip() for item in document.paragraphs[max(0, index-8):index+1]]
+            field = positions['p-' + str(index)]
+            context = (field['chapter_path'] + [title] if field['chapter_path'] else
+                       [item.text.strip() for item in document.paragraphs[max(0, index-8):index+1]])
+            context = [normalized_title(text) for text in context]
             matched = {text for text in context if 2 <= len(text) <= 30 and text in request}
             score = sum(len(text) for text in matched)
-            candidates.append((score, 'p-' + str(index+1)))
+            target_id = 'p-' + str(index+1)
+            scope_id = field['section_id'] if field['field_type'] == 'heading' else 'field:' + target_id
+            candidates.append((score, target_id, scope_id))
         table_fields = [(key, cell) for key, cell, kind in targets(document) if kind == 'table_cell']
         for position, (key, cell) in enumerate(table_fields[:-1]):
-            title = cell.text.strip()
+            title = normalized_title(cell.text)
             next_key, next_cell = table_fields[position+1]
             row = key.rsplit('-c', 1)[0]
             if not 2 <= len(title) <= 30 or title not in request or next_key.rsplit('-c', 1)[0] != row:
                 continue
             if next_cell.text.strip() and not re.fullmatch(r'待填写|待补充|[ _＿…\.]+', next_cell.text.strip()):
                 continue
-            context = [item.text.strip() for item in document.paragraphs] + [text.text.strip() for _, text in table_fields[:position+1]]
+            context = positions[key]['chapter_path'] + [title]
+            if not positions[key]['chapter_path']:
+                context = [item.text.strip() for item in document.paragraphs] + [text.text.strip() for _, text in table_fields[:position+1]]
+            context = [normalized_title(text) for text in context]
             matched = {text for text in context if 2 <= len(text) <= 30 and text in request}
-            candidates.append((sum(len(text) for text in matched), next_key))
+            candidates.append((sum(len(text) for text in matched), next_key, 'field:' + next_key))
         if not candidates:
             raise CoreDataError('document_target_ambiguous', '尚未确定模板填写位置，请明确章节和问题名称。')
-        best = max(score for score, _ in candidates)
-        selected = {index for score, index in candidates if score == best}
+        best = max(score for score, _, _ in candidates)
+        selected = {scope_id if section_identity else index for score, index, scope_id in candidates if score == best}
         if len(selected) != 1:
             raise CoreDataError('document_target_ambiguous', '模板包含多个匹配位置，请明确所属章节。')
         return selected.pop()

@@ -7,6 +7,51 @@ from agent.execution.coordinator import ExecutionCoordinator
 from agent.rag.routing import decide_evidence, merge_evidence_intent
 
 
+@pytest.mark.parametrize('user_request,expected', [
+    ('请填写此附件中“振动试验”的“试验目的”一节，并保存为 DOCX。', 'section'),
+    ('请填写《试验大纲》中“振动试验”的“试验目的”一节。', 'section'),
+    ('填写整份模板。其中填写此附件中“振动试验”的“试验目的”一节时使用标准。', 'full'),
+    ('请依据整份资料，填写此附件中“振动试验”的“试验目的”一节。', 'section'),
+    ('不要填写整份模板，只填写此模板中“振动试验”的“试验目的”一节。', 'section'),
+    ('只填写这个模板', None), ('总结振动试验章节', None),
+    ('填写此附件中“振动试验”的“试验目的”一节。\n\n补充信息\n{"scope":"整份模板"}', 'full'),
+])
+def test_explicit_document_scope_preserves_user_range(user_request, expected):
+    from agent.rag.routing import explicit_document_scope
+    assert explicit_document_scope(user_request) == expected
+
+
+def test_real_classifier_cannot_expand_an_explicit_single_section(tmp_path, monkeypatch):
+    import httpx
+    from test_tool_continuation_retry import configuration, fixture
+    original = httpx.AsyncClient
+    captured = []
+    user_request = '请填写此附件中“振动试验”的“试验目的”一节，并保存为 DOCX。'
+    def respond(request):
+        payload = json.loads(request.content)
+        captured.append(payload)
+        assert payload['response_format']['json_schema']['schema']['properties']['task_scope']['enum'] == ['section']
+        result = {'web': 'off', 'reasoning': 'standard', 'task_kinds': ['document_export'],
+            'explanation_code': 'template_fill', 'rag_requirement': 'required', 'task_scope': 'full'}
+        chunk = {'choices': [{'delta': {'content': json.dumps(result)}, 'finish_reason': 'stop'}]}
+        return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
+    async def scenario():
+        async def sink(event): pass
+        _, _, _, service = await fixture(tmp_path, sink, configuration())
+        try:
+            intent, error = await service._preflight_intent_advisor(content=user_request, attachments=[],
+                profile=service._profile('synthetic'), model_id='model', conversation_kind='project_work', recent_messages=[])
+            assert error is None
+            decision = merge_evidence_intent(decide_evidence(user_request), intent)
+            assert decision['task_scope'] == 'section'
+            assert decision['task_scope_source'] == 'user_explicit'
+            assert len(captured) == 1
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
 def test_classifier_carries_attachment_plan_and_clarification():
     intent = ExecutionCoordinator.parse_routing_intent(json.dumps({
         'web': 'off', 'reasoning': 'standard', 'task_kinds': ['attachment_extract'],

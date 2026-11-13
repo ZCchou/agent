@@ -283,6 +283,42 @@ def test_existing_inspection_exposes_chapter_identity_and_section_fill_avoids_le
     assert document.paragraphs[5].text == '振动目标'
 
 
+def test_planned_table_question_keeps_other_answer_cells_untouched(tmp_path):
+    _, run, service = workflow(tmp_path)
+    document = Document()
+    document.add_heading('振动试验', 1)
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text, table.cell(0, 1).text = '试验目的', '待填写'
+    table.cell(1, 0).text, table.cell(1, 1).text = '试验类别', '待填写'
+    payload = io.BytesIO()
+    document.save(payload)
+    source = service.register_template(run['id'], payload.getvalue(), 'table.docx')
+    selected = service.select_section(run['id'], source['id'], '填写振动试验的试验目的', section_identity=True)
+    assert selected == 'field:t-0-r0-c1'
+    def generate(task):
+        assert [field.get('id', field.get('target_id')) for field in task['fields']] == ['t-0-r0-c1']
+        if task['stage'] == 'plan':
+            return {'targets': [{'target_id': 't-0-r0-c1', 'field_type': 'placeholder', 'parameter_keys': []}]}
+        return {'fields': [{'target_id': 't-0-r0-c1', 'text': '验证设备性能', 'evidence': []}]}
+    artifact = asyncio.run(service.fill_planned(run['id'], source['id'], '填写振动试验的试验目的', generate,
+                                              scope='section', section_id=selected))
+    result = Document(service.path_for(run['id'], artifact['id']))
+    assert '验证设备性能' in result.tables[0].cell(0, 1).text
+    assert result.tables[0].cell(1, 1).text == '待填写'
+    assert artifact['manifest']['coverage']['completed'] == 1
+
+
+@pytest.mark.parametrize('section_id', [123, 'field:p-0', 'field:not-found'])
+def test_planned_field_scope_rejects_unavailable_or_readonly_targets(tmp_path, section_id):
+    _, run, service = workflow(tmp_path)
+    source = source_document(service, run)
+    def generate(task):
+        raise AssertionError('Invalid range must fail before a model call')
+    with pytest.raises(CoreDataError) as error:
+        asyncio.run(service.fill_planned(run['id'], source['id'], 'fill', generate, scope='section', section_id=section_id))
+    assert error.value.code == 'document_plan_invalid'
+
+
 @pytest.mark.parametrize('claim', ['Section 8.2 requires testing', 'DO-160H section 8.2'])
 def test_english_source_claims_cannot_bypass_empty_evidence_resolver(tmp_path, claim):
     _, run, service = workflow(tmp_path)
