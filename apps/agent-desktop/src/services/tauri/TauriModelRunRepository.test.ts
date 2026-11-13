@@ -38,6 +38,7 @@ describe("TauriModelRunRepository", () => {
       idempotencyKey: "once",
     });
     expect(invoke).toHaveBeenCalledWith("start_model_run", { request: {
+      intent_async: true, intent_scope: "c1",
       conversation_id: "c1", kind: null, category: null, chat_group_id: null,
       project_id: null, content: "hello", provider_profile_id: "ollama",
       model_id: "qwen", idempotency_key: "once", attachment_staging_ids: [],

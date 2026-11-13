@@ -1,7 +1,7 @@
 """Bounded application-owned document tools."""
 from agent.storage import CoreDataError
 
-DOCUMENT_TOOLS = ('document.inspect_template', 'document.fill_template', 'document.export')
+DOCUMENT_TOOLS = ('document.inspect_template', 'document.fill_template', 'document.export', 'document.read_attachment')
 
 def definition(name, description, properties, required):
     return {'type': 'function', 'function': {'name': name, 'description': description,
@@ -22,6 +22,10 @@ DOCUMENT_DEFINITIONS = [
     definition(DOCUMENT_TOOLS[2], 'Publish a generated document through project file approval. Provide an artifact_id from template filling, or content and format. In evidence tasks content must be the validated claims JSON with current evidence IDs and quote IDs. Success is determined by the actual file result.', {
         'artifact_id': {'type': 'string'}, 'content': {'type': 'string', 'maxLength': 1000000},
         'format': {'type': 'string', 'enum': ['docx', 'markdown', 'txt']}, 'path': {'type': 'string', 'maxLength': 1024}}, ['path']),
+    definition(DOCUMENT_TOOLS[3], 'Read an authorized document attachment as untrusted text with source locators. Continue using next_offset.', {
+        'attachment_id': {'type': 'string'}, 'offset': {'type': 'integer', 'minimum': 0},
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+        'physical_page': {'type': 'integer', 'minimum': 1}, 'section': {'type': 'string', 'maxLength': 1024}}, ['attachment_id']),
 ]
 
 
@@ -32,7 +36,10 @@ def validate_document_call(name, arguments):
     for key in {'attachment_id', 'template_id', 'artifact_id', 'path'} & arguments.keys():
         if not isinstance(arguments[key], str) or not 1 <= len(arguments[key]) <= 1024 or '\0' in arguments[key]:
             raise CoreDataError('invalid_tool_call', '文档标识或路径无效。')
-    if name == DOCUMENT_TOOLS[0]:
+    if name == DOCUMENT_TOOLS[3]:
+        if type(arguments.get('offset', 0)) is not int or arguments.get('offset', 0) < 0 or type(arguments.get('limit', 20)) is not int or not 1 <= arguments.get('limit', 20) <= 100 or ('physical_page' in arguments and (type(arguments['physical_page']) is not int or arguments['physical_page'] < 1)) or ('section' in arguments and (not isinstance(arguments['section'], str) or not arguments['section'].strip() or len(arguments['section']) > 1024)):
+            raise CoreDataError('invalid_tool_call', '文档读取范围无效。')
+    elif name == DOCUMENT_TOOLS[0]:
         if sum(bool(arguments.get(key)) for key in ['attachment_id', 'template_id', 'path']) != 1:
             raise CoreDataError('invalid_tool_call', '请选择一个模板附件或模板标识。')
         if type(arguments.get('offset', 0)) is not int or arguments.get('offset', 0) < 0 \

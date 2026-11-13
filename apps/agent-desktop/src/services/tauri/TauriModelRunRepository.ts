@@ -3,9 +3,14 @@ import { listen } from "@tauri-apps/api/event";
 import type { ModelRunRepository, StartedModelRun, StartModelRunInput } from "../repositories/ModelRunRepository";
 import type { ContextSnapshot, ExecutionPlan, ModelRun, ModelRunEvent, ProjectKnowledge } from "../../types/domain";
 
+import { intentTasks, type IntentTask } from "./intentTasks";
+
 export class TauriModelRunRepository implements ModelRunRepository {
-  start(input: StartModelRunInput): Promise<StartedModelRun> {
-    return invoke("start_model_run", { request: {
+  async start(input: StartModelRunInput): Promise<StartedModelRun> {
+    const scope = input.intentScope ?? input.conversationId ?? input.idempotencyKey ?? crypto.randomUUID();
+    intentTasks.begin(scope);
+    const response = await invoke<StartedModelRun | { task: IntentTask }>("start_model_run", { request: {
+      intent_async: true, intent_scope: scope,
       conversation_id: input.conversationId ?? null, kind: input.kind ?? null,
       category: input.category ?? null, chat_group_id: input.chatGroupId ?? null,
       project_id: input.projectId ?? null, content: input.content,
@@ -24,6 +29,7 @@ export class TauriModelRunRepository implements ModelRunRepository {
       ...(input.webSearchRequestMode ? { web_search_request_mode: input.webSearchRequestMode } : {}),
       ...(input.selection ? { selection: input.selection } : {}),
     } });
+    return "task" in response ? intentTasks.wait(response.task) : response;
   }
   async get(runId: string): Promise<ModelRun> { return (await invoke<{ run: ModelRun }>("get_model_run", { runId })).run; }
   async latest(conversationId: string): Promise<ModelRun | null> {

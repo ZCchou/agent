@@ -18,4 +18,11 @@ describe("document processing activity", () => {
     expect(documentProcessingLabel({ phase: "ocr", page: 2, total_pages: 8 }, translate)).toBe(ocr);
     expect(documentProcessingLabel({ phase: "other" }, translate)).toBeNull();
   });
+  it("shows model loading and reranking counts", () => {
+    const translate = (key: string, values: Record<string, string | number>) => `${key} ${values.completed}/${values.total}`;
+    expect(documentProcessingLabel({ phase: "reranking", completed: 4, total: 9 }, translate))
+      .toBe("attachments.processing.reranking 4/9");
+    expect(documentProcessingLabel({ phase: "model_loading", completed: 0, total: 1 }, translate))
+      .toBe("attachments.processing.modelLoading 0/1");
+  });
 });

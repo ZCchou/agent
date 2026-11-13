@@ -10,7 +10,7 @@ TRANSIENT_GENERATION_ERRORS = frozenset({
     "provider_unavailable",
     "network_unavailable",
 })
-READ_ONLY_TOOL_NAMES = frozenset({"fs.list", "fs.search", "fs.read", "rag.search", "rag.read"})
+READ_ONLY_TOOL_NAMES = frozenset({"fs.list", "fs.search", "fs.read", "rag.search", "rag.read", "document.read_attachment"})
 MAX_TRANSIENT_RETRIES = 2
 
 

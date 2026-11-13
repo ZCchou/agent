@@ -1,5 +1,6 @@
 import rag from "./rag";
 const common = {
+  routingDuration: { timeout: "Intent recognition timeout (seconds)", budget: "Up to 3 attempts, {{seconds}} seconds total recognition budget.", main: "Main model idle residence", auxiliary: "Auxiliary model idle residence", manual: "Until manually unloaded", custom: "Custom", customMinutes: "Custom minutes (1–1440)", minutes: "{{count}} minutes", residenceHint: "Changes apply immediately and restart idle timers. Active and pinned models stay loaded. Auxiliary models may be reclaimed under memory pressure." },
   rag,
   buttonAudit: {
     actionFailed: "The action failed. Try again.",

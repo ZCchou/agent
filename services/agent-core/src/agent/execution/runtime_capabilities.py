@@ -114,7 +114,7 @@ def render_snapshot(*, budgets: dict[str, Any], host: dict[str, Any], allowed_to
         status = observed.get("status", "unknown") if name.startswith(("fs.", "terminal.")) or name == 'document.export' else "available"
         reason = observed.get("reason_code")
         quota_names = ["calls"]
-        if name in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template"}: quota_names.append("reads")
+        if name in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment"}: quota_names.append("reads")
         if name in {"fs.propose_changes", "skills.save", "document.fill_template", "document.export"}: quota_names.append("mutations")
         if name == "web.search": quota_names.extend(("web_searches", "web_characters"))
         if name == "web.open": quota_names.extend(("web_opens", "web_characters"))

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 ///
 /// 后续设置结构发生不兼容变化时，应通过版本迁移处理，
 /// 而不是让新代码直接猜测旧数据结构。
-pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 18;
+pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 19;
 
 pub const DEFAULT_SIDEBAR_WIDTH_PX: u16 = 280;
 
@@ -997,6 +997,19 @@ pub struct RoutingPreferences {
     pub max_extra_online_cost_usd: String,
     #[serde(default)]
     pub allow_unknown_price_automatic: bool,
+    #[serde(default = "default_intent_timeout")]
+    pub intent_timeout_seconds: u32,
+    #[serde(default = "default_model_idle")]
+    pub main_model_idle_seconds: u32,
+    #[serde(default = "default_model_idle")]
+    pub auxiliary_model_idle_seconds: u32,
+}
+
+const fn default_intent_timeout() -> u32 {
+    90
+}
+const fn default_model_idle() -> u32 {
+    1800
 }
 
 fn automatic_conversation_mode() -> String {
@@ -1024,6 +1037,9 @@ impl Default for RoutingPreferences {
             max_specialist_steps: default_specialist_budget(),
             max_extra_online_cost_usd: default_extra_online_cost(),
             allow_unknown_price_automatic: false,
+            intent_timeout_seconds: default_intent_timeout(),
+            main_model_idle_seconds: default_model_idle(),
+            auxiliary_model_idle_seconds: default_model_idle(),
         }
     }
 }

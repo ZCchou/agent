@@ -198,7 +198,7 @@ class ToolLoopService:
         mutations += sum(item["tool_name"] in {"skills.save", "document.fill_template", "document.export"} for item in operations if item["status"] != "rejected")
         return {
             "calls": quota(self.MAX_ROUNDS, len(current), "attempt"),
-            "reads": quota(self.MAX_READ_OPERATIONS, sum(item["tool_name"] in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template"} for item in current), "attempt"),
+            "reads": quota(self.MAX_READ_OPERATIONS, sum(item["tool_name"] in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment"} for item in current), "attempt"),
             "mutations": quota(self.MAX_FILE_MUTATIONS, mutations, "run"),
             "web_searches": quota(self.MAX_WEB_SEARCHES, sum(item["tool_name"] == "web.search" for item in operations), "run"),
             "web_opens": quota(self.MAX_WEB_OPENS, sum(item["tool_name"] == "web.open" for item in operations), "run"),
@@ -217,7 +217,7 @@ class ToolLoopService:
                 f"This attempt reached its {self.MAX_ROUNDS}-call tool limit. Retry starts a new allowance.",
                 {key: budget["calls"][key] for key in ("limit", "used", "scope")},
             )
-        if call.name in {"fs.list", "fs.search", "fs.read", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template"} and not budget["reads"]["remaining"]:
+        if call.name in {"fs.list", "fs.search", "fs.read", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment"} and not budget["reads"]["remaining"]:
             raise CoreDataError(
                 "tool_read_limit_exceeded",
                 f"This attempt reached its {self.MAX_READ_OPERATIONS}-operation read/search limit.",

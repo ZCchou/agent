@@ -48,6 +48,8 @@ import { useConversationScroll } from "./useConversationScroll";
 import type { ProjectDirectoryTarget, ProjectFileTarget } from "./markdown/markdownPolicy";
 import { useWebSearchController } from "../web-search/useWebSearchController";
 import { VisionCapabilityPrompt } from "./VisionCapabilityPrompt";
+import { IntentTaskDialog } from "./IntentTaskDialog";
+import { intentTasks } from "../../services/tauri/intentTasks";
 import { RoutingBudgetPrompt } from "./RoutingBudgetPrompt";
 import { ConversationRoutingControl, type RoutingModelOption } from "./ConversationRoutingControl";
 import { applyRunFailure, runErrorTranslationKey } from "./runErrors";
@@ -607,6 +609,7 @@ export function ChatPage() {
         pendingSendRef.current = { signature: sendSignature, idempotencyKey: crypto.randomUUID() };
       }
       const started = await modelRunRepository.start({
+        intentScope: inspectorKey,
         conversationId: conversation?.id, kind: conversation ? undefined : draft.kind,
         category: !conversation && draft.kind === "standard_chat" ? draft.category : undefined,
         chatGroupId: !conversation && draft.kind === "standard_chat" ? draft.chatGroupId ?? undefined : undefined,
@@ -836,6 +839,8 @@ export function ChatPage() {
     if (submission) submission.stopRequested = true;
     if (preparingRetryRef.current) { preparingRetryRef.current.cancelled = true; return; }
     if (runIdRef.current) return cancelGeneration(runIdRef.current);
+    try { await intentTasks.cancelScope(inspectorKey); }
+    catch (value) { setErrorDetail(String(value)); stoppingRef.current = false; setStopping(false); }
   }
 
   async function retryWithModel(runId: string, strategy: "default" | "expanded_retry" = "default", web?: "off", operation?: () => Promise<ModelRun>) {
@@ -1273,6 +1278,23 @@ export function ChatPage() {
         </button> : null}
       </div>
 
+      <IntentTaskDialog scope={inspectorKey} enabled={currentPage === "chat" && coreOnline}
+        onModelSettings={() => setCurrentPage("models")}
+        onAccepted={(started) => {
+          const scope = inspectorKey;
+          if (sendScopeRef.current !== scope) return;
+          runIdRef.current = started.run.id;
+          void Promise.all([conversationRepository.get(started.conversation.id), modelRunRepository.get(started.run.id)])
+            .then(async ([acceptedConversation, run]) => {
+              if (sendScopeRef.current !== scope || runIdRef.current !== run.id) return;
+              setConversation(acceptedConversation); setMessages(acceptedConversation.messages);
+              setActiveRun(run); setLastRunId(run.id);
+              setSending(!["completed", "failed", "cancelled", "interrupted", "waiting_budget"].includes(run.status));
+              if (started.execution_plan && run.status === "waiting_budget") setPendingBudgetPlan(started.execution_plan);
+              if (acceptedConversation.id !== scope) adoptedScopeRef.current = acceptedConversation.id;
+              await conversationCreated(acceptedConversation);
+            }).catch((value) => { if (sendScopeRef.current === scope) { setError(true); setErrorDetail(String(value)); } });
+        }} />
       <ComposerDock
         ragControl={<Button size="composer" variant={ragMode === 'required' ? 'primary' : 'secondary'} icon={<Database />} aria-pressed={ragMode === 'required'}
           disabled={!coreOnline || ragModeBusy || sending || loading}

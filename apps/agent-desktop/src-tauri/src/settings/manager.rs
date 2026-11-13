@@ -1183,6 +1183,10 @@ impl SettingsManager {
                     Self::migrate_capability_contract(&mut settings);
                     self.repository.save(&settings)?;
                 }
+                if settings.schema_version == 18 {
+                    settings.schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+                    self.repository.save(&settings)?;
+                }
                 if Self::repair_automatic_routing_authorization(&mut settings) {
                     self.repository.save(&settings)?;
                 }
@@ -1591,6 +1595,13 @@ impl SettingsManager {
             )
             || !(1..=6).contains(&settings.routing.max_model_calls_per_message)
             || settings.routing.max_specialist_steps > 2
+            || !(30..=180).contains(&settings.routing.intent_timeout_seconds)
+            || [
+                settings.routing.main_model_idle_seconds,
+                settings.routing.auxiliary_model_idle_seconds,
+            ]
+            .iter()
+            .any(|value| *value != 0 && !(60..=86400).contains(value))
             || settings
                 .routing
                 .max_extra_online_cost_usd
@@ -1712,6 +1723,37 @@ mod tests {
         fn save(&self, _settings: &AppSettings) -> Result<(), SettingsError> {
             Err(SettingsError::Storage("simulated save failure".to_string()))
         }
+    }
+
+    #[test]
+    fn intent_timeout_and_residency_defaults_migrate_and_validate() {
+        let mut original = AppSettings::default();
+        original.schema_version = 18;
+        let manager =
+            SettingsManager::new(Arc::new(MemorySettingsRepository::with_settings(original)));
+        let loaded = manager.get_settings().unwrap();
+        assert_eq!(loaded.schema_version, 19);
+        let value = serde_json::to_value(&loaded.routing).unwrap();
+        assert_eq!(value["intent_timeout_seconds"], 90);
+        assert_eq!(value["main_model_idle_seconds"], 1800);
+        assert_eq!(value["auxiliary_model_idle_seconds"], 1800);
+        for (field, invalid) in [
+            ("intent_timeout_seconds", 29),
+            ("intent_timeout_seconds", 181),
+            ("main_model_idle_seconds", 59),
+            ("auxiliary_model_idle_seconds", 86401),
+        ] {
+            let mut changed = value.clone();
+            changed[field] = serde_json::json!(invalid);
+            let preferences = serde_json::from_value(changed).unwrap();
+            assert!(manager.update_routing_preferences(preferences).is_err());
+        }
+        let mut manual = value;
+        manual["main_model_idle_seconds"] = serde_json::json!(0);
+        manual["auxiliary_model_idle_seconds"] = serde_json::json!(0);
+        assert!(manager
+            .update_routing_preferences(serde_json::from_value(manual).unwrap())
+            .is_ok());
     }
 
     #[test]

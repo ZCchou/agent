@@ -1,4 +1,5 @@
 const chat = {
+  intent: { title: "A little more information", timeoutTitle: "Intent recognition is taking longer", timeoutDescription: "Review the current attempt before continuing.", resumeInput: "Continue providing information", review: "Review intent task", freeText: "Your answer", close: "Close", cancel: "Cancel request", confirm: "Confirm and continue", extend: "Continue waiting", retry: "Retry", technicalError: "Technical details", modelSettings: "Model settings", timing: "Elapsed {{elapsed}}s · Attempt {{attempts}}/3 · Current deadline {{remaining}}s · Remaining budget {{budget}}s" },
   ragMode: { button: 'Force RAG', required: 'Force RAG · On', hint: 'Require project evidence for this conversation until switched off. Otherwise retrieval is automatic.', chooseProject: 'Choose a project and its libraries', projectRequired: 'rag_library_required Choose a project and enable its libraries, or switch off Force RAG. Your message and attachments are retained.' },
   process: { title: "Work process" },
   messages: { edit: "Edit message", editQuestion: "Edit question", cancelEdit: "Cancel edit", saveEdit: "Save and regenerate",
@@ -192,7 +193,7 @@ const chat = {
     purposeLabel: 'Purpose of {{name}}',
     referencePurpose: 'Reference material',
     templatePurpose: 'Template to fill',
-    processing: { parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
+    processing: { modelLoading: "Loading document model {{completed}}/{{total}}", reranking: "Reranking document evidence {{completed}}/{{total}}", parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
     referenceSelection: "Reference selected text",
     reference: "Reference this attachment", referenceNamed: "Reference {{name}}",
     references: "Referenced attachments", fromHistory: "From this conversation",
