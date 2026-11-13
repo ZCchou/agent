@@ -4695,7 +4695,7 @@ class ChatRunService:
                         read_plan = json.loads(turn_content)
                     except ValueError:
                         read_plan = None
-                    if isinstance(read_plan, dict) and 'response' in read_plan:
+                    if grounded_document_plan and isinstance(read_plan, dict) and 'response' in read_plan:
                         if set(read_plan) != {'response'} or not isinstance(read_plan['response'], dict):
                             raise CoreDataError('invalid_tool_call', '文档读取或证据回答格式无效。')
                         read_plan = read_plan['response']

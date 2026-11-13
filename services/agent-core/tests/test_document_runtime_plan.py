@@ -24,7 +24,7 @@ def runtime_attachment(root, identity, text, name='reference.docx'):
     return attachment
 
 
-@pytest.mark.parametrize('mode', ['selected_one', 'native_deferred', 'text_continuation'])
+@pytest.mark.parametrize('mode', ['selected_one', 'native_deferred', 'text_continuation', 'json_string', 'json_object'])
 def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_path, monkeypatch, mode):
     import json
     import httpx
@@ -42,6 +42,9 @@ def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_pat
         elif mode == 'text_continuation' and len(payloads) == 1:
             delta = {'content': json.dumps({'read_requests': [{'attachment_id': 'selected', 'physical_page': 2, 'offset': 1, 'limit': 1}]})}
             finish = 'stop'
+        elif mode in {'json_string', 'json_object'}:
+            result = {'response': 'Equipment summary' if mode == 'json_string' else {'model': 'EQ-REAL'}}
+            delta, finish = {'content': json.dumps(result)}, 'stop'
         else:
             delta, finish = {'content': 'Completed with LATE-PAGE-SECOND.'}, 'stop'
         chunk = {'choices': [{'delta': delta, 'finish_reason': finish}]}
@@ -86,6 +89,11 @@ def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_pat
                 reads = run['rag_decision']['document_reads']
                 assert reads[-1]['request']['offset'] == 1
                 assert reads[-1]['result']['blocks'][0]['locator']['page'] == 2
+            if mode in {'json_string', 'json_object'}:
+                expected = {'response': 'Equipment summary' if mode == 'json_string' else {'model': 'EQ-REAL'}}
+                answer = next(item['content'] for item in reversed(core.get_conversation(run['conversation_id'])['messages']) if item['role'] == 'assistant')
+                assert answer == json.dumps(expected)
+                assert len(payloads) == 1
         finally:
             await service.shutdown()
     asyncio.run(scenario())
