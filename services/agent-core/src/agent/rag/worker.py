@@ -215,7 +215,7 @@ def _onnx_batch(params, tokenizer, model, metadata, texts):
 
 def dispatch(request, cache):
     action = request.get("action")
-    if action not in {"probe", "embed", "rerank"}:
+    if action not in {"probe", "embed", "rerank", "rerank_lengths"}:
         raise ValueError("Unsupported worker action")
     params = request["params"]
     if params.get("profile") not in PROFILES:
@@ -233,7 +233,7 @@ def dispatch(request, cache):
     profile = PROFILES[params["profile"]]
     if (action == "embed") != (profile.role == "embedding"):
         raise ValueError("Requested action does not match model role")
-    if progress:
+    if progress and action != 'rerank_lengths':
         progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
                   'completed': 0, 'total': len(params.get('texts', []))})
     texts = params["texts"]
@@ -247,6 +247,8 @@ def dispatch(request, cache):
     # scoring truncation applies only to these worker-local inputs.
     lengths = tokenizer(texts, padding=False, truncation=True,
                         max_length=_token_limit(params, metadata))['input_ids'] if texts else []
+    if action == 'rerank_lengths':
+        return [len(row) for row in lengths]
     ordered = sorted(range(len(texts)), key=lambda index: len(lengths[index]))
     batch_size = 2 if params['backend'] == 'onnx' else 8
     results = [None] * len(texts)

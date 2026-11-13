@@ -13,6 +13,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from contextlib import nullcontext
@@ -153,6 +154,9 @@ class ModelStore:
         self._verified_files = {}
         self._loaded_models = {}
         self._resident_workers = OrderedDict()
+        self.idle_timeout = 1800
+        self._worker_last_used = {}
+        self._idle_task = None
         self._retired_workers = set()
         self._model_peaks = {}
         self._rerank_partial = OrderedDict()
@@ -478,10 +482,43 @@ class ModelStore:
                 self._verified_files[key] = after
         return path
 
+    def set_idle_timeout(self, seconds):
+        if type(seconds) is not int or seconds != 0 and not 60 <= seconds <= 86400:
+            raise CoreDataError('invalid_settings', '辅助模型驻留时间须为 1 至 1440 分钟，或选择手动卸载。')
+        self.idle_timeout = seconds
+        self._worker_last_used = {key: time.monotonic() for key in self._resident_workers}
+
+    def _touch_cached(self, key):
+        self._worker_last_used[key] = time.monotonic()
+        if self._idle_task is None or self._idle_task.done():
+            self._idle_task = asyncio.create_task(self._watch_idle())
+
+    async def _watch_idle(self):
+        try:
+            while not self._closed and self._resident_workers:
+                await asyncio.sleep(1)
+                await self._release_idle_workers()
+        finally:
+            if self._idle_task is asyncio.current_task():
+                self._idle_task = None
+
+    async def _release_idle_workers(self, now=None):
+        if not self.idle_timeout:
+            return
+        now = time.monotonic() if now is None else now
+        for device, lock in self._device_locks.items():
+            if lock.locked():
+                continue
+            async with lock:
+                for key in list(self._resident_workers):
+                    if key[2] == device and now - self._worker_last_used.get(key, now) >= self.idle_timeout:
+                        await self._discard_worker(key)
+
     def _invalidate_cached(self, model_id=None):
         for key in list(self._resident_workers):
             if model_id is None or key[0] == model_id:
                 worker = self._resident_workers.pop(key, None)
+                self._worker_last_used.pop(key, None)
                 if worker is None:
                     continue
                 worker.invalidate()
@@ -494,6 +531,7 @@ class ModelStore:
 
     async def _discard_worker(self, key):
         worker = self._resident_workers.pop(key, None)
+        self._worker_last_used.pop(key, None)
         if worker is None:
             return
         device = key[2]
@@ -574,6 +612,7 @@ class ModelStore:
                     worker.model_root = str(root)
                     self._resident_workers[key] = worker
                 self._resident_workers.move_to_end(key)
+                self._touch_cached(key)
                 self._workers[device] = worker
                 self._loaded_models[device] = (worker, identity)
                 request_params = {"path": str(path), "profile": record["profile"], "backend": record["backend"],
@@ -583,21 +622,31 @@ class ModelStore:
                 else:
                     texts = params['texts']
                     batch_size = 2 if record['backend'] == 'onnx' else (4 if action == 'rerank' else 8)
-                    result = partial if partial is not None else []
-                    offset = len(result)
+                    checkpoint = partial if partial is not None else {}
+                    pending_indices = [index for index in range(len(texts)) if index not in checkpoint]
+                    completed = len(checkpoint)
                     if progress:
                         event = {'stage': 'reranking' if is_resident() else 'model_loading',
-                                 'completed': offset, 'total': len(texts)}
+                                 'completed': completed, 'total': len(texts)}
                         pending = progress(event)
                         if inspect.isawaitable(pending):
                             await pending
-                    while offset < len(texts):
-                        batch = texts[offset:offset + batch_size]
-                        async def worker_progress(event):
-                            if progress:
-                                pending = progress({**event, 'completed': offset, 'total': len(texts)})
-                                if inspect.isawaitable(pending):
-                                    await pending
+                    async def worker_progress(event):
+                        if progress:
+                            pending = progress({**event, 'completed': completed, 'total': len(texts)})
+                            if inspect.isawaitable(pending):
+                                await pending
+                    if action == 'rerank' and len(pending_indices) > 1:
+                        lengths = await worker.request('rerank_lengths', {
+                            **request_params, 'texts': [texts[index] for index in pending_indices],
+                            'report_progress': progress is not None}, progress=worker_progress if progress else None)
+                        if (not isinstance(lengths, list) or len(lengths) != len(pending_indices)
+                                or any(type(length) is not int or length < 0 for length in lengths)):
+                            raise CoreDataError('rag_model_error', 'Inference returned invalid token lengths')
+                        pending_indices = [index for _, index in sorted(zip(lengths, pending_indices))]
+                    while pending_indices:
+                        batch_indices = pending_indices[:batch_size]
+                        batch = [texts[index] for index in batch_indices]
                         try:
                             batch_result = await worker.request(action, {**request_params, 'texts': batch,
                                                                          'report_progress': progress is not None},
@@ -613,19 +662,22 @@ class ModelStore:
                         if action == 'rerank' and any(type(value) not in (int, float) or not math.isfinite(value)
                                                       or not 0 <= value <= 1 for value in batch_result):
                             raise CoreDataError('rag_model_error', 'Inference returned invalid reranker scores')
-                        result.extend(batch_result)
-                        offset += len(batch)
+                        checkpoint.update(zip(batch_indices, batch_result))
+                        del pending_indices[:len(batch_indices)]
+                        completed = len(checkpoint)
                         if progress:
                             pending = progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
-                                                'completed': offset, 'total': len(texts)})
+                                                'completed': completed, 'total': len(texts)})
                             if inspect.isawaitable(pending):
                                 await pending
+                    result = [checkpoint[index] for index in range(len(texts))]
                 self._model_peaks[(record['id'], record['digest'])] = max(
                     self._model_peaks.get((record['id'], record['digest']), 0),
                     getattr(worker, 'peak_memory_bytes', 0))
                 if self._resident_workers.get(key) is not worker:
                     raise CoreDataError('rag_model_changed', 'The selected model changed during inference.')
                 self._loaded_models[device] = (worker, identity)
+                self._touch_cached(key)
                 return result
             except asyncio.CancelledError:
                 await self._discard_worker(key)
@@ -665,14 +717,14 @@ class ModelStore:
     async def rerank(self, model_id, query, texts, *, token_budget=2048, progress=None, cache_key=None, timeout=90):
         if not isinstance(query, str) or not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
             raise CoreDataError("rag_model_error", "Reranking requires a query and list of strings")
-        partial = []
+        partial = {}
         try:
             async with asyncio.timeout(timeout):
                 record = dict(self._record(model_id))
                 fingerprint = await asyncio.to_thread(self._stat_identity, self.root / model_id)
                 identity = (str(self.root), model_id, record['digest'], record['device'], fingerprint,
                             query, tuple(texts), token_budget, cache_key)
-                partial = self._rerank_partial.setdefault(identity, [])
+                partial = self._rerank_partial.setdefault(identity, {})
                 self._rerank_partial.move_to_end(identity)
                 while len(self._rerank_partial) > 8:
                     self._rerank_partial.popitem(last=False)
@@ -688,6 +740,11 @@ class ModelStore:
 
     async def close(self):
         self._closed = True
+        idle, self._idle_task = self._idle_task, None
+        if idle is not None and idle is not asyncio.current_task():
+            idle.cancel()
+            await asyncio.gather(idle, return_exceptions=True)
+        self._worker_last_used.clear()
         workers, self._resident_workers = self._resident_workers, OrderedDict()
         self._workers.clear()
         self._loaded_models.clear()

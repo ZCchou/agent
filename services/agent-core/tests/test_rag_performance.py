@@ -23,7 +23,7 @@ def store_with_models(tmp_path, monkeypatch, count=3, reranker=False):
                 'architectures': ['XLMRobertaForSequenceClassification'], 'hidden_size': 1024}))
         records.append(asyncio.run(store.import_model(source, profile)))
     script = tmp_path / 'worker.py'
-    script.write_text("import sys,json,os\nfor line in sys.stdin:\n r=json.loads(line);p=r['params'];v={'available':True,'pid':os.getpid()} if r['action']=='probe' else [float(t)/100 for t in p['texts']];print(json.dumps({'id':r['id'],'result':v}),flush=True)\n")
+    script.write_text("import sys,json,os\nfor line in sys.stdin:\n r=json.loads(line);p=r['params'];v={'available':True,'pid':os.getpid()} if r['action']=='probe' else [len(t) for t in p['texts']] if r['action']=='rerank_lengths' else [float(t)/100 for t in p['texts']];print(json.dumps({'id':r['id'],'result':v}),flush=True)\n")
     monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
     return store, records
 
@@ -121,12 +121,70 @@ def test_length_aware_batches_use_tokenizer_and_preserve_score_order(monkeypatch
     assert batches == [['2', '3'], ['900', '1000']]
 
 
+@pytest.mark.parametrize('backend,fail_pairs', [('onnx', False), ('onnx', True), ('transformers', False)])
+def test_model_store_groups_actual_token_lengths_and_resumes_original_score_positions(tmp_path, monkeypatch, backend, fail_pairs):
+    store, records = store_with_models(tmp_path, monkeypatch, count=1, reranker=True)
+    store._state['models'][0]['backend'] = backend
+    log = tmp_path / 'actual-batches.jsonl'
+    script = tmp_path / 'length_worker.py'
+    script.write_text(f'''import json
+from pathlib import Path
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import PreTrainedTokenizerFast
+from types import SimpleNamespace
+import torch
+from agent.rag import worker
+backend = Tokenizer(WordLevel({{'[UNK]': 0, '[PAD]': 1, 'query': 2, 'document': 3}}, unk_token='[UNK]'))
+backend.pre_tokenizer = Whitespace()
+tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token='[UNK]', pad_token='[PAD]')
+worker._engine = lambda *args: {{}}
+def score_lengths(lengths):
+    with Path({str(log)!r}).open('a') as stream:
+        stream.write(json.dumps(lengths) + '\\n')
+    if {fail_pairs!r} and len(lengths) > 1:
+        raise RuntimeError('Failed to allocate memory')
+    return [length / 10000 for length in lengths]
+def score(params, tokenizer, model, metadata, texts):
+    return score_lengths([len(text.split()) for text in texts])
+class Classifier:
+    def __call__(self, **inputs):
+        lengths = (inputs['input_ids'] == 3).sum(dim=1).tolist()
+        scores = torch.tensor(score_lengths(lengths), dtype=torch.float32)
+        return SimpleNamespace(logits=torch.logit(scores).reshape(-1, 1))
+worker._load = lambda *args: (tokenizer, Classifier(), {{'max_length': 8192}})
+worker._onnx_batch = score
+worker.main()
+''', encoding='utf-8')
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+    async def exercise():
+        lengths = [1000, 2, 900, 3] if backend == 'onnx' else [1000, 2, 900, 3, 800, 4, 700, 1]
+        texts = ['document ' * length for length in lengths]
+        async def cancel_checkpoint(event):
+            if event['completed'] == (2 if backend == 'onnx' else 4):
+                raise asyncio.CancelledError()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await store.rerank(records[0]['id'], 'query', texts, progress=cancel_checkpoint)
+            assert await store.rerank(records[0]['id'], 'query', texts) == pytest.approx([length / 10000 for length in lengths])
+            batches = [json.loads(line) for line in log.read_text().splitlines()]
+            expected = ([[2, 3], [2], [3], [900, 1000], [900], [1000]] if fail_pairs
+                        else [[2, 3], [900, 1000]])
+            if backend == 'transformers':
+                expected = [[1, 2, 3, 4], [700, 800, 900, 1000]]
+            assert batches == expected
+        finally:
+            await store.close()
+    asyncio.run(exercise())
+
+
 def test_rerank_retry_reuses_only_completed_current_identity_batches(tmp_path, monkeypatch):
     store, records = store_with_models(tmp_path, monkeypatch, count=1, reranker=True)
     store._state['models'][0]['backend'] = 'onnx'
     log = tmp_path / 'calls.jsonl'
     script = tmp_path / 'resume.py'
-    script.write_text(f"import sys,json\nfrom pathlib import Path\nfor line in sys.stdin:\n r=json.loads(line);texts=r['params']['texts'];p=Path({str(log)!r});p.open('a').write(json.dumps(texts)+'\\n');print(json.dumps({{'id':r['id'],'result':[float(t)/100 for t in texts]}}),flush=True)\n")
+    script.write_text(f"import sys,json\nfrom pathlib import Path\nfor line in sys.stdin:\n r=json.loads(line);texts=r['params']['texts']\n if r['action']=='rerank_lengths':\n  print(json.dumps({{'id':r['id'],'result':[len(t) for t in texts]}}),flush=True);continue\n p=Path({str(log)!r});p.open('a').write(json.dumps(texts)+'\\n');print(json.dumps({{'id':r['id'],'result':[float(t)/100 for t in texts]}}),flush=True)\n")
     monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
     async def exercise():
         events = []

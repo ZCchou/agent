@@ -23,6 +23,9 @@ from pathlib import Path
 for line in sys.stdin:
     request = json.loads(line)
     texts = request['params'].get('texts', [])
+    if request['action'] == 'rerank_lengths':
+        print(json.dumps({{'id': request['id'], 'result': [len(text) for text in texts]}}), flush=True)
+        continue
     with Path({str(log)!r}).open('a') as stream:
         stream.write(json.dumps(texts) + '\\n')
     if {fail_pairs!r} and len(texts) > 1:
