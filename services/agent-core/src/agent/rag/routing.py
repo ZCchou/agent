@@ -83,22 +83,24 @@ def explicit_document_scope(text):
             answers = dict(line.split(' ', 1) for line in supplement.splitlines() if ' ' in line)
         choices = {'整份模板': 'full', '整份': 'full', '指定章节': 'section', '具体章节': 'section'}
         scope_keys = {'scope', 'task_scope', 'document_scope', 'fill_scope', 'template_scope'}
-        selected = {choices[value.strip()] for key, value in answers.items()
-                    if key.casefold() in scope_keys and isinstance(value, str) and value.strip() in choices} \
-            if isinstance(answers, dict) else set()
-        if selected:
+        scope_answers = [value.strip() for key, value in answers.items()
+                         if key.casefold() in scope_keys and isinstance(value, str)] \
+            if isinstance(answers, dict) else []
+        if scope_answers:
+            selected = {choices.get(value) for value in scope_answers}
             return next(iter(selected)) if len(selected) == 1 else None
     patterns = [
-        (r'(?:填写|回填|填好|完成)\s*(?:整份|整个|完整的?|所有章节|全部章节)(?:模板|文档)?', 'full'),
-        (r'(?:填写|回填|填好)\s*(?:此|该|这个|这份|本)?(?:附件|模板|文档|《[^》\r\n]{1,100}》)'
+        (r'(?:填写|回填|填好)\s*(?:此|该|这个|这份|本|整份|整个|完整的?)?(?:附件|模板|文档|《[^》\r\n]{1,100}》)'
          r'\s*(?:中|内)[^\r\n]{0,160}[”"」』]\s*一[章节]', 'section'),
+        (r'(?:填写|回填|填好|完成)\s*(?:(?:整份|整个|完整的?)\s*(?:模板|文档|试验大纲)|所有章节|全部章节)', 'full'),
     ]
+    matches = []
     for pattern, scope in patterns:
         for match in re.finditer(pattern, original):
             prefix = original[max(0, match.start() - 4):match.start()].strip()
             if not prefix.endswith(('不要', '无需', '禁止', '不必', '不是', '不需要')):
-                return scope
-    return None
+                matches.append((match.start(), scope))
+    return min(matches, key=lambda item: item[0])[1] if matches else None
 
 
 def merge_evidence_intent(decision, intent, *, error_code=None):

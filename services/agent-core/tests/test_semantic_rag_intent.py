@@ -14,9 +14,12 @@ from agent.rag.routing import decide_evidence, merge_evidence_intent
     ('请依据整份资料，填写此附件中“振动试验”的“试验目的”一节。', 'section'),
     ('不要填写整份模板，只填写此模板中“振动试验”的“试验目的”一节。', 'section'),
     ('只填写这个模板', None), ('总结振动试验章节', None),
+    ('请填写整个振动试验章节。', None), ('请填写完整的振动试验章节。', None),
+    ('请填写整份模板中“振动试验”的“试验目的”一节。', 'section'),
     ('填写此附件中“振动试验”的“试验目的”一节。\n\n补充信息\n{"scope":"整份模板"}', 'full'),
     ('填写此附件中“振动试验”的“试验目的”一节。\n\n补充信息\nscope 整份模板', 'full'),
     ('填写此附件中“振动试验”的“试验目的”一节。\n\n补充信息\nfile 整份模板', 'section'),
+    ('填写整份模板。\n\n补充信息\n{"scope":"只填写振动试验的试验目的"}', None),
 ])
 def test_explicit_document_scope_preserves_user_range(user_request, expected):
     from agent.rag.routing import explicit_document_scope

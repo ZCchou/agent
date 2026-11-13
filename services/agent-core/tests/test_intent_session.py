@@ -73,6 +73,35 @@ def test_two_timeout_calls_wait_for_manual_third_attempt(tmp_path):
     asyncio.run(scenario())
 
 
+def test_scope_clarification_overrides_original_full_request(tmp_path):
+    from agent.execution.intent_session import IntentService, IntentClarification
+    from agent.rag.routing import explicit_document_scope
+
+    async def scenario():
+        async def start(params):
+            if not params.get('_intent_answers'):
+                raise IntentClarification('确认填写范围', [
+                    {'id': 'scope', 'question': '填写范围？', 'options': ['整份模板', '指定章节']}
+                ])
+            supplement = '\n'.join(f'{question} {answer}' for question, answer in params['_intent_answers'].items())
+            return {'scope': explicit_document_scope(params['content'] + '\n\n补充信息\n' + supplement)}
+
+        service = IntentService(CoreRepository(tmp_path / 'agent.db'), start)
+        try:
+            task = (await service.handle('start', {'scope': 'draft', 'request': {
+                'content': '填写整份模板。', 'idempotency_key': 'scope-clarification'
+            }}))['task']
+            await service.wait(task['id'])
+            await service.handle('respond', {'task_id': task['id'], 'revision': 1,
+                'answers': {'scope': '指定章节'}})
+            await service.wait(task['id'])
+            assert service.get(task['id'])['result']['scope'] == 'section'
+        finally:
+            await service.close()
+
+    asyncio.run(scenario())
+
+
 def test_clarification_revision_and_cancel_isolate_stale_results(tmp_path):
     from agent.execution.intent_session import IntentService, IntentClarification
 

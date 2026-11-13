@@ -326,6 +326,8 @@ class IntentService:
         recorded = dict(state.get('answers', {}))
         for question in questions:
             recorded[question['question']] = answers[question['id']].strip()
+            if question['id'] == 'scope':
+                recorded['scope'] = answers[question['id']].strip()
         self._patch(identity, state['revision'], revision=state['revision'] + 1, status='queued',
                     attempts=0, active_seconds=0, answers=recorded, clarification=None, error=None, result=None)
         self._launch(identity)
