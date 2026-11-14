@@ -63,7 +63,7 @@ def test_execution_contract_matches_core_domain() -> None:
     assert contract["ipc_version"] == 24
     assert contract["core_schema_version"] == 31
     assert contract["settings_schema_version"] == 19
-    assert contract["core_version"] == "0.16.0-preview.3"
+    assert contract["core_version"] == "0.16.0-preview.4"
     assert contract["build_id"] == "schema31-agent-unified-v1"
     assert set(contract["capability_keys"]) == {
         "text_generation", "vision_input", "reasoning", "function_calling",

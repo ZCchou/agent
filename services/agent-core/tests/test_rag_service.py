@@ -26,6 +26,94 @@ class Engines:
         pass
 
 
+def test_reranking_preparation_does_not_claim_that_a_model_is_loading(tmp_path):
+    async def scenario():
+        service = RagService(CoreRepository(tmp_path / 'agent.db'), Engines())
+        project = service.repository.core.create_project('Progress', 'work')['id']
+        phases = []
+
+        async def progress(event):
+            phases.append(event['stage'] if isinstance(event, dict) else event)
+
+        try:
+            library = (await service.handle('library.create', {
+                'name': 'Progress', 'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await ready(service, library, content='8.1 设备失效时的试验要求。')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            await service.search(project, '失效', progress=progress)
+            assert 'preparing_rerank' in phases
+            assert 'model_loading' not in phases
+        finally:
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_library_search_reports_cold_and_resident_embedding_progress(tmp_path, monkeypatch):
+    import json
+    import sys
+    from agent.rag.models import ModelStore
+    import agent.rag.models as model_module
+    from test_rag_models import model_directory
+    monkeypatch.setattr(model_module, 'system_memory', lambda: {'available_physical_bytes': 16 * 1024**3})
+
+    script = tmp_path / 'search_worker.py'
+    script.write_text('''import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    texts = request['params'].get('texts', [])
+    if request['action'] == 'probe':
+        result = {'available': True}
+    elif request['action'] == 'rerank_lengths':
+        result = [len(text) for text in texts]
+    elif request['action'] == 'embed':
+        result = [[1.0] + [0.0] * 1023 for text in texts]
+    else:
+        result = [0.9 for text in texts]
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+''', encoding='utf-8')
+
+    async def scenario():
+        models = ModelStore(tmp_path / 'models')
+        embedding = await models.import_model(model_directory(tmp_path / 'embedding'), 'bge-m3')
+        rank_source = model_directory(tmp_path / 'reranker')
+        (rank_source / 'config.json').write_text(json.dumps({'model_type': 'xlm-roberta',
+            'architectures': ['XLMRobertaForSequenceClassification'], 'hidden_size': 1024, 'num_labels': 1}))
+        reranker = await models.import_model(rank_source, 'bge-reranker-v2-m3')
+        monkeypatch.setattr(models, '_command', lambda: [sys.executable, str(script)])
+        core = CoreRepository(tmp_path / 'agent.db')
+        service = RagService(core, models)
+        events = []
+
+        async def progress(event):
+            events.append(event)
+
+        try:
+            for record in (embedding, reranker):
+                probe = await models.probe(record['id'])
+                assert probe['available'], probe
+            project = core.create_project('Progress', 'work')['id']
+            library = (await service.handle('library.create', {'name': 'Progress',
+                'embedding_model_id': embedding['id'], 'reranker_model_id': reranker['id']}))['library']['id']
+            await ready(service, library, content='8.1 设备失效时的试验要求。')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            await models.invalidate()
+            await service.search(project, '失效', progress=progress)
+            assert any(isinstance(event, dict) and event.get('stage') == 'model_loading'
+                       and event.get('model_role') == 'embedding' for event in events)
+            events.clear()
+            await service.search(project, '失效', progress=progress)
+            assert any(isinstance(event, dict) and event.get('stage') == 'embedding' for event in events)
+            assert not any(isinstance(event, dict) and event.get('stage') == 'model_loading' for event in events)
+        finally:
+            await service.close()
+
+    asyncio.run(scenario())
+
+
 def test_explicit_subject_retrieval_excludes_preface_and_contents(tmp_path):
     class MisleadingScores(Engines):
         queries = []

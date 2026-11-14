@@ -72,6 +72,61 @@ def model_directory(root, profile="bge-m3"):
     return root
 
 
+def test_permission_denied_directory_reports_actual_path_and_retries_after_access_restored(tmp_path, monkeypatch):
+    import agent.rag.models as model_module
+
+    store = ModelStore(tmp_path / 'data')
+    record = asyncio.run(store.import_model(model_directory(tmp_path / 'source'), 'bge-m3'))
+    managed = store.root / record['id']
+    original_walk = model_module.os.walk
+
+    def denied_walk(root, **kwargs):
+        error = PermissionError(13, 'Access is denied', str(managed))
+        error.winerror = 5
+        if kwargs.get('onerror'):
+            kwargs['onerror'](error)
+        return iter(())
+
+    monkeypatch.setattr(model_module.os, 'walk', denied_walk)
+    with pytest.raises(CoreDataError) as failure:
+        store._verified_path(record, store.root, True)
+    assert failure.value.code == 'rag_model_access_denied'
+    assert failure.value.details['path'] == str(managed)
+    assert failure.value.details['winerror'] == 5
+    monkeypatch.setattr(model_module.os, 'walk', original_walk)
+    assert store._verified_path(record, store.root, True) == managed
+
+
+def test_embedding_progress_distinguishes_loading_from_resident_inference(tmp_path, monkeypatch):
+    import sys
+    script = tmp_path / 'progress_worker.py'
+    script.write_text('''import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    vectors = [[1.0] + [0.0] * 1023 for text in request['params']['texts']]
+    print(json.dumps({'id': request['id'], 'result': vectors}), flush=True)
+''', encoding='utf-8')
+    store = ModelStore(tmp_path / 'data')
+    record = asyncio.run(store.import_model(model_directory(tmp_path / 'source'), 'bge-m3'))
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+
+    async def scenario():
+        try:
+            cold = []
+            await store._request(record['id'], 'embed', texts=['first'], progress=cold.append)
+            assert cold[0]['stage'] == 'model_loading'
+            assert cold[0]['model_role'] == 'embedding'
+            warm = []
+            await store._request(record['id'], 'embed', texts=['second'], progress=warm.append)
+            assert warm[0]['stage'] == 'embedding'
+            assert all(event['stage'] != 'reranking' for event in warm)
+        finally:
+            await store.close()
+
+    asyncio.run(scenario())
+
+
 def test_inspect_validates_supported_directory_and_import_is_owned_copy(tmp_path):
     source = model_directory(tmp_path / "source")
     store = ModelStore(tmp_path / "data")

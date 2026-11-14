@@ -31,6 +31,7 @@ REASONS = {
     "attachment_changed": "附件原件不可用或完整性校验失败，请重新添加附件",
     "rag_resource_exhausted": "辅助检索模型内存不足，请释放内存或调整辅助模型设备后重试",
     "rag_model_error": "辅助检索模型运行失败，请检查模型状态",
+    "rag_model_access_denied": "辅助模型目录或文件的访问权限受限，请确认当前 Windows 账户的读取权限后重新检测模型",
     "rag_answer_invalid": "回答结构不符合要求，检索证据已保留",
     "rag_citation_invalid": "回答引用了本轮不可用的证据",
     "rag_quote_invalid": "引用摘录与资料原文不一致",
