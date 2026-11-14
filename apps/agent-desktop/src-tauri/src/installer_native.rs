@@ -616,29 +616,34 @@ fn normalize_root(root: &Path) -> Result<PathBuf> {
     }
     Ok(canonical)
 }
+#[cfg(windows)]
+#[derive(Deserialize)]
+struct RunningProcess {
+    pid: u32,
+    path: Option<String>,
+}
+
 fn assert_idle(root: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let output = std::process::Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
-            "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); ConvertTo-Json -Compress -InputObject @(Get-Process | Where-Object { $_.Path } | ForEach-Object { @{pid=$_.Id;path=$_.Path} })"])
+            "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); ConvertTo-Json -Compress -InputObject @(Get-Process | ForEach-Object { $processPath=$_.Path; if ($processPath) { @{pid=$_.Id;path=$processPath} } })"])
             .creation_flags(0x08000000).output()?;
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
         }
-        #[derive(Deserialize)]
-        struct Process {
-            pid: u32,
-            path: String,
-        }
-        let processes: Vec<Process> = serde_json::from_slice(&output.stdout)?;
+        let processes: Vec<RunningProcess> = serde_json::from_slice(&output.stdout)?;
         let prefix = format!(
             "{}\\",
             root.to_string_lossy().trim_end_matches('\\').to_lowercase()
         );
         for process in processes {
-            let path = canonical_path(Path::new(&process.path))
-                .unwrap_or_else(|_| PathBuf::from(&process.path));
+            let Some(process_path) = process.path else {
+                continue;
+            };
+            let path = canonical_path(Path::new(&process_path))
+                .unwrap_or_else(|_| PathBuf::from(&process_path));
             if path.to_string_lossy().to_lowercase().starts_with(&prefix) {
                 return Err(format!(
                     "Close application and managed workers; busy PID {}",
@@ -649,6 +654,21 @@ fn assert_idle(root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod process_snapshot_tests {
+    use super::RunningProcess;
+
+    #[test]
+    fn process_snapshot_accepts_paths_that_disappear_during_enumeration() {
+        let snapshot = br#"[{"pid":123,"path":null},{"pid":456,"path":"C:\\other\\app.exe"}]"#;
+        let processes: Vec<RunningProcess> = serde_json::from_slice(snapshot).unwrap();
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 123);
+        assert!(processes[0].path.is_none());
+        assert_eq!(processes[1].path.as_deref(), Some("C:\\other\\app.exe"));
+    }
 }
 fn lock(managed: &Path) -> Result<File> {
     // Share the legacy installer's exclusive lock as well as the NSIS lifecycle mutex.
