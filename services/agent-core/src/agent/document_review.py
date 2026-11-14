@@ -153,6 +153,63 @@ def _call_count(activity, identity):
             (activity.task_id, identity)).fetchone()[0]
 
 
+def _review_parent(workflow, run_id, template, activity, parent_task_id):
+    if parent_task_id is None:
+        return None
+    if not isinstance(parent_task_id, str) or not parent_task_id or parent_task_id == activity.task_id:
+        raise CoreDataError('document_review_lineage_invalid', '审阅重试来源身份无效。')
+    current = workflow.repository.get_model_run(run_id)
+    root = activity.monitor.get_task(activity.task_id)
+    parent = activity.monitor.get_task(parent_task_id)
+    if root['run_id'] != run_id or parent['status'] not in {'completed', 'failed', 'cancelled', 'interrupted'}:
+        raise CoreDataError('document_review_lineage_invalid', '审阅重试需要已结束的关联运行。')
+    ancestor_id, seen = current.get('parent_run_id'), {run_id}
+    while ancestor_id and ancestor_id not in seen:
+        ancestor = workflow.repository.get_model_run(ancestor_id)
+        if any(ancestor[key] != current[key] for key in ('conversation_id', 'user_message_id')):
+            break
+        if ancestor_id == parent['run_id']:
+            project = workflow.repository.get_run_conversation(ancestor_id).get('project_id')
+            if project == template['project_id']:
+                return {'task_id': parent_task_id, 'run_id': ancestor_id}
+            break
+        seen.add(ancestor_id)
+        ancestor_id = ancestor.get('parent_run_id')
+    raise CoreDataError('document_review_lineage_invalid', '审阅检查点不属于当前请求的关联重试链。')
+
+
+def _parent_checkpoint(workflow, activity, parent, key, identity, fields):
+    if parent is None:
+        return None
+    with activity.monitor.repository._connect() as connection:
+        row = connection.execute(
+            '''SELECT c.identity_json,c.payload_json FROM execution_wait_checkpoints c
+               JOIN execution_wait_tasks t ON t.id=c.task_id
+               WHERE c.task_id=? AND c.stage=? AND c.checkpoint_key=?
+                 AND t.status IN ('completed','failed','cancelled','interrupted')''',
+            (parent['task_id'], activity.stage, key)).fetchone()
+    if row is None:
+        return None
+    try:
+        saved_identity, payload = json.loads(row['identity_json']), json.loads(row['payload_json'])
+        comparable = {key: value for key, value in identity.items() if key != 'template_id'}
+        previous = {key: value for key, value in saved_identity.items() if key != 'template_id'}
+        if previous != comparable or payload.get('format_version') != 1:
+            return None
+        prior_fields = payload.get('results', [])
+        if len(prior_fields) != len(fields) or any(
+                any(prior_field.get(key) != value for key, value in field.items() if key != 'status')
+                for field, prior_field in zip(fields, prior_fields)):
+            return None
+        template = workflow.get(parent['run_id'], saved_identity['template_id'])
+        if template['sha256'] != identity['template_sha256'] or template['project_id'] != identity['project_id']:
+            return None
+        workflow.path_for(parent['run_id'], template['id'])
+        return payload
+    except (CoreDataError, KeyError, TypeError, ValueError):
+        return None
+
+
 def _markdown(report):
     coverage = report['coverage']
     lines = ['# 全文非空内容审阅', '', '适航资料分析草案，待人工复核。', '',
@@ -176,13 +233,16 @@ def _markdown(report):
 
 
 async def review_template(workflow, run_id, template_id, request, generate, evidence,
-                          evidence_resolver, *, activity=None, identity=None, token_allowance=12000):
+                          evidence_resolver, *, activity=None, identity=None, token_allowance=12000,
+                          parent_task_id=None):
     """Review every nonempty target of an authorized managed DOCX artifact.
 
     ``generate(batch, evidence)`` performs exactly one actual model invocation.
     This function owns the per-batch three-call correction budget. ``evidence``
     re-admits project RAG sources for every batch, including restored batches.
     Caller identity includes semantic task revision, models and configuration.
+    Optional ``parent_task_id`` comes from the runtime-owned linked-run lineage.
+    Parent checkpoints are read-only and revalidated against current admission.
     """
     if not isinstance(request, str) or not request.strip() or len(request) > 32000:
         raise _invalid('请提供有效的全文审阅请求。')
@@ -219,6 +279,7 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         'template_sha256': template['sha256'], 'project_id': template['project_id'],
         'request_sha256': _hash(request)}
     review_identity.setdefault('task_revision', activity.revision)
+    parent = _review_parent(workflow, run_id, template, activity, parent_task_id)
     results, remaining, batches = {}, [], []
     for field in fields:
         if field['field_type'] == 'heading':
@@ -262,6 +323,11 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
             'evidence_generation': context.get('generation'),
             'evidence_sha256': _hash(sorted((_source_identity(source) for source in context['evidence']), key=_json))}
         saved = activity.load_checkpoint(checkpoint_key, checkpoint_identity)
+        inherited_from = None
+        if saved is None:
+            saved = _parent_checkpoint(workflow, activity, parent, checkpoint_key, checkpoint_identity, page)
+            if saved is not None:
+                inherited_from = parent['task_id']
         normalized, response, restored = None, None, False
         if saved is not None:
             try:
@@ -271,6 +337,7 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
             except (CoreDataError, KeyError, TypeError, ValueError):
                 # Stored batches are reusable only after current quote admission.
                 normalized = None
+                inherited_from = None
         if normalized is None:
             if not _fits(batch, context, token_allowance):
                 response = _pending(page, '单个位置或必要依据超出本批上下文预算，请扩大上下文后复核。',
@@ -306,7 +373,8 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         if not activity.checkpoint(checkpoint_key, checkpoint_identity, payload):
             raise CoreDataError('document_review_stale', '审阅阶段身份已变化，旧批次结果未发布。')
         results.update({result['target_id']: result for result in normalized})
-        batches.append({'index': index, 'target_ids': batch['target_ids'], 'restored': restored})
+        batches.append({'index': index, 'target_ids': batch['target_ids'], 'restored': restored,
+                        'inherited_from': inherited_from})
         remaining = remaining[len(page):]
         activity.progress(completed=len(results), total=len(fields), kind='document_review')
     ordered = [results[field['id']] for field in fields]

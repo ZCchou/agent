@@ -25,6 +25,7 @@ class ReviewSources:
                        'original_hash': 'source-hash', 'locator': {'page': 2}}
         self.grounding = RagGrounding(self)
         self.calls = []
+        self.resolved = []
 
     def assert_generation(self, project_id, generation):
         assert project_id == self.project_id
@@ -33,7 +34,7 @@ class ReviewSources:
 
     def validate_evidence(self, project_id, ids, run_id=None):
         assert project_id == self.project_id and run_id == self.run_id
-        if not self.valid or ids != ['evidence-1']:
+        if not self.valid or ids != [self.source['id']]:
             raise CoreDataError('rag_evidence_stale', '依据失效')
         return [self.source]
 
@@ -41,19 +42,20 @@ class ReviewSources:
         self.calls.append(batch['target_ids'])
         self.grounding.runs[self.run_id] = {
             'project_id': self.project_id, 'generation': self.generation,
-            'query': '', 'subject': None, 'evidence': {'evidence-1': self.source},
+            'query': '', 'subject': None, 'evidence': {self.source['id']: self.source},
             'admitted': {}, 'aliases': {}, 'quote_options': {},
         }
-        self.grounding.admit(self.run_id, ['evidence-1'])
+        self.grounding.admit(self.run_id, [self.source['id']])
         return {'evidence': [evidence_for_model(evidence_with_quotes(self.source))],
                 'generation': self.generation}
 
     def resolve(self, text, citations):
+        self.resolved.append({'run_id': self.run_id, 'citations': citations})
         return self.grounding.document_claim(self.run_id, text, citations)
 
     def response(self, batch, *, quote_id=None):
         return {'results': [{'target_id': field['id'], 'status': 'reviewed',
-                'summary': SOURCE, 'problems': [], 'evidence': [{'id': 'evidence-1',
+                'summary': self.source['text'], 'problems': [], 'evidence': [{'id': self.source['id'],
                   'quote_id': quote_id or quote_options(self.source['text'])[0]['quote_id']}],
                 'version_issues': [], 'gaps': []} for field in batch['fields']]}
 
@@ -77,15 +79,16 @@ def register(workflow, run, document):
     return workflow.register_template(run['id'], buffer.getvalue(), 'review.docx')
 
 
-def execute(setup, artifact, generate=None, *, identity=None, allowance=16000):
+def execute(setup, artifact, generate=None, *, identity=None, allowance=16000,
+            parent_task_id=None, request='审阅全文非空内容'):
     workflow, run, monitor, root, sources = setup
     generate = generate or (lambda batch, evidence: sources.response(batch))
     async def operation(activity):
-        return await review_template(workflow, run['id'], artifact['id'], '审阅全文非空内容',
+        return await review_template(workflow, run['id'], artifact['id'], request,
             generate, sources.evidence, sources.resolve, activity=activity,
             identity=identity or {'task_revision': 'intent-1', 'project_generation': sources.generation,
                                  'models': {'generator': 'model'}, 'config': {'route': 'local'}},
-            token_allowance=allowance)
+            token_allowance=allowance, parent_task_id=parent_task_id)
     return asyncio.run(monitor.execute_stage(root['id'], 'document_review', operation))
 
 
@@ -328,3 +331,134 @@ def test_format_call_budget_survives_interruption_inside_batch(setup):
     result = execute(setup, artifact, generate)
     assert result['report']['coverage'] == {'total': 1, 'reviewed': 0, 'pending': 1}
     assert result['report']['targets'][0]['error_code'] == 'document_review_call_budget_exceeded'
+
+
+def cancelled_review(setup, *, status='cancelled'):
+    workflow, run, monitor, root, sources = setup
+    document = Document()
+    for index in range(25):
+        document.add_paragraph(f'条目{index}')
+    artifact = register(workflow, run, document)
+    original_evidence = sources.evidence
+    generated = []
+
+    async def evidence(batch):
+        if batch['index'] == 2:
+            if status == 'interrupted':
+                monitor.interrupt_active()
+            else:
+                current = monitor.get_task(root['id'])
+                monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='cancel-review')
+            await asyncio.Event().wait()
+        return original_evidence(batch)
+
+    def generate(batch, context):
+        generated.append(batch['target_ids'])
+        return sources.response(batch)
+
+    sources.evidence = evidence
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            execute(setup, artifact, generate)
+    finally:
+        sources.evidence = original_evidence
+    assert len(generated) == 2
+    assert monitor.get_task(root['id'])['status'] == status
+    workflow.repository.transition_model_run(run['id'], {'queued'}, status)
+    return artifact
+
+
+def linked_review(setup, artifact):
+    workflow, run, monitor, root, sources = setup
+    linked = workflow.repository.create_expanded_retry(run['id'])
+    linked_artifact = workflow.register_template(linked['id'],
+        workflow.path_for(run['id'], artifact['id']).read_bytes(), 'review.docx')
+    linked_root = monitor.start_task(run_id=linked['id'], project_id=root['project_id'])
+    linked_sources = ReviewSources(linked['id'], sources.project_id)
+    linked_sources.source = {**sources.source, 'id': 'current-evidence'}
+    return (workflow, linked, monitor, linked_root, linked_sources), linked_artifact
+
+
+def parent_audit(setup):
+    workflow, _, _, root, _ = setup
+    with workflow.repository._connect() as connection:
+        audit = {'task': tuple(connection.execute(
+            'SELECT * FROM execution_wait_tasks WHERE id=?', (root['id'],)).fetchone())}
+        for table in ('stages', 'activity', 'checkpoints', 'controls'):
+            audit[table] = [tuple(row) for row in connection.execute(
+                f'SELECT * FROM execution_wait_{table} WHERE task_id=? ORDER BY rowid', (root['id'],))]
+    return audit
+
+
+@pytest.mark.parametrize('status', ['cancelled', 'interrupted'])
+def test_cancelled_review_reuses_only_validated_batches_on_linked_retry_with_fresh_evidence(setup, status):
+    artifact = cancelled_review(setup, status=status)
+    before = parent_audit(setup)
+    child, child_artifact = linked_review(setup, artifact)
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch['target_ids'])
+        return child[4].response(batch)
+
+    result = execute(child, child_artifact, generate, parent_task_id=setup[3]['id'])
+    assert calls == [['p-20', 'p-21', 'p-22', 'p-23', 'p-24']]
+    assert [item['restored'] for item in result['report']['batches']] == [True, True, False]
+    assert [item.get('inherited_from') for item in result['report']['batches']] == [setup[3]['id'], setup[3]['id'], None]
+    assert result['report']['coverage'] == {'total': 25, 'reviewed': 25, 'pending': 0}
+    assert len(child[4].calls) == 3
+    assert len(child[4].resolved) == 25
+    assert all(item['run_id'] == child[1]['id'] for item in child[4].resolved)
+    assert all(source['id'] == 'current-evidence' for target in result['report']['targets'] for source in target['evidence'])
+    assert parent_audit(setup) == before
+
+
+@pytest.mark.parametrize('changed', ['source', 'template', 'model', 'configuration', 'generation', 'request'])
+def test_linked_review_recomputes_when_parent_identity_is_stale(setup, changed):
+    artifact = cancelled_review(setup)
+    child, child_artifact = linked_review(setup, artifact)
+    identity = {'task_revision': 'intent-1', 'project_generation': 4,
+                'models': {'generator': 'model'}, 'config': {'route': 'local'}}
+    request = '审阅全文非空内容'
+    if changed == 'source':
+        child[4].source['text'] = '申请人应核对新的试验条件。'
+    elif changed == 'template':
+        document = Document()
+        for index in range(25):
+            document.add_paragraph(f'修改条目{index}')
+        child_artifact = register(child[0], child[1], document)
+    elif changed == 'model':
+        identity['models'] = {'generator': 'replacement'}
+    elif changed == 'configuration':
+        identity['config'] = {'route': 'different'}
+    elif changed == 'generation':
+        child[4].generation = 5
+        identity['project_generation'] = 5
+    else:
+        request = '审阅全文并核对额外条件'
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch['target_ids'])
+        return child[4].response(batch)
+
+    result = execute(child, child_artifact, generate, identity=identity,
+        parent_task_id=setup[3]['id'], request=request)
+    assert len(calls) == 3
+    assert all(item['restored'] is False for item in result['report']['batches'])
+
+
+def test_linked_review_rejects_an_unrelated_parent_root(setup):
+    artifact = cancelled_review(setup)
+    child, child_artifact = linked_review(setup, artifact)
+    workflow, _, monitor, _, _ = setup
+    conversation = workflow.repository.create_conversation('project_work', 'Unrelated',
+        project_id=setup[3]['project_id'])
+    other = workflow.repository.start_model_run(content='Other request', idempotency_key='unrelated',
+        provider_profile_id='provider', model_id='model', conversation_id=conversation['id'])
+    unrelated = monitor.start_task(run_id=other['id'], project_id=setup[3]['project_id'])
+    monitor.finish_task(unrelated['id'], 'cancelled')
+    with pytest.raises(CoreDataError) as error:
+        execute(child, child_artifact, parent_task_id=unrelated['id'])
+    assert error.value.code == 'document_review_lineage_invalid'
+    assert child[4].calls == []
