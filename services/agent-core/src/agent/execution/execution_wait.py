@@ -79,6 +79,7 @@ class StageActivity:
         self.progress_sequence = 0
         self.started_clock = self.progress_clock
         self.heartbeat_clock = self.progress_clock
+        self.heartbeat_seen = False
         self.resource_clock: float | None = None
         self.queue_clock: float | None = None
 
@@ -418,6 +419,7 @@ class ExecutionMonitor:
             activity.progress_sequence += 1
         elif kind == 'heartbeat':
             activity.heartbeat_clock = self.active_clock()
+            activity.heartbeat_seen = True
         elif kind == 'resource':
             activity.resource_clock = self.active_clock()
         elif kind == 'queue':
@@ -612,7 +614,8 @@ class ExecutionMonitor:
                             activity.progress_sequence != first_lost_progress_sequence or active_resource):
                         first_lost_at = None
                     stalled = now - progress_at >= policy.no_progress_probe_seconds
-                    heartbeat_lost = now - max(activity.heartbeat_clock, continued_at, progress_at) >= HEARTBEAT_LOSS_SECONDS
+                    heartbeat_lost = activity.heartbeat_seen and \
+                        now - max(activity.heartbeat_clock, continued_at, progress_at) >= HEARTBEAT_LOSS_SECONDS
                     total_reached = policy.mode == 'custom' and total_deadline is not None \
                         and task['elapsed_seconds'] >= total_deadline
                     if total_reached:

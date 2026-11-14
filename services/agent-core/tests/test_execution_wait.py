@@ -101,6 +101,43 @@ def test_heartbeat_and_unknown_resources_do_not_claim_progress(foundation):
     assert row['progress_at'] == root['created_at']
 
 
+@pytest.mark.parametrize('heartbeat_established', [False, True])
+def test_heartbeat_loss_requires_an_established_communication_channel(foundation, heartbeat_established):
+    repository, _, clock = foundation
+    started = clock.now
+    times = list(range(5, 300, 5)) + [299, 300] if not heartbeat_established else [5, 10, 15, 20, 25, 29, 30]
+    observations, diagnosed = [], []
+    root = None
+
+    async def sleep(seconds):
+        observations.append((clock.now - started, monitor.get_task(root['id'])['status']))
+        if times:
+            clock.now = started + times.pop(0)
+            await asyncio.sleep(0)
+        else:
+            await asyncio.Event().wait()
+
+    monitor = wait.ExecutionMonitor(repository, clock=clock, sleep=sleep)
+    root = monitor.start_task(run_id='channel-' + str(heartbeat_established))
+
+    async def operation(activity):
+        if heartbeat_established:
+            activity.heartbeat(channel='worker')
+        while monitor.get_task(root['id'])['status'] != 'waiting_recovery':
+            await asyncio.sleep(0)
+        return 'finished after observation'
+
+    def diagnose(activity):
+        diagnosed.append(clock.now - started)
+        return wait.Diagnostic(activity_observed=None)
+
+    assert asyncio.run(monitor.execute_stage(root['id'], 'integrity', operation,
+                     diagnose=diagnose)) == 'finished after observation'
+    assert diagnosed == ([30] if heartbeat_established else [300])
+    expected_running = {0, 29} if heartbeat_established else {0, 60, 299}
+    assert expected_running <= {elapsed for elapsed, status in observations if status == 'running'}
+
+
 def test_uncertain_pause_keeps_request_alive_and_cancel_unblocks(foundation):
     _, monitor, _ = foundation
     root = monitor.start_task(run_id='run')
