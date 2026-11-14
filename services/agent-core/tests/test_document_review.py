@@ -93,6 +93,40 @@ def execute(setup, artifact, generate=None, *, identity=None, allowance=16000,
     return asyncio.run(monitor.execute_stage(root['id'], 'document_review', operation))
 
 
+@pytest.mark.parametrize('locator,label', [
+    ({'page': 2}, 'Rules · A · 1 · 物理页 2'),
+    ({}, 'Rules · A · 1 · 物理页码未提供'),
+])
+def test_review_markdown_uses_application_source_labels(setup, locator, label):
+    workflow, run, _, _, sources = setup
+    sources.source['locator'] = locator
+    document = Document()
+    document.add_paragraph(SOURCE)
+    artifact = register(workflow, run, document)
+    result = execute(setup, artifact)
+    assert f'[{label}](rag-evidence:evidence-1)' in result['markdown']
+
+
+def test_model_classifies_authoring_guidance_without_treating_it_as_equipment_facts(setup):
+    workflow, run, _, _, _ = setup
+    document = Document()
+    document.add_paragraph('本章节主要说明大纲编制依据和参考文件。')
+    artifact = register(workflow, run, document)
+
+    def generate(batch, evidence):
+        return {'results': [{'target_id': item['id'], 'content_kind': 'instruction',
+            'status': 'pending', 'summary': '这是供编写者使用的模板说明，正式稿应提供实际文件清单。',
+            'problems': [], 'evidence': [], 'version_issues': [], 'gaps': ['实际文件清单待补充。']}
+            for item in batch['fields']]}
+
+    result = execute(setup, artifact, generate)
+    target = result['report']['targets'][0]
+    assert target['review_kind'] == 'instruction'
+    assert target['field_type'] == 'content'
+    assert target['evidence'] == []
+    assert '编写说明' in result['markdown']
+
+
 def test_restored_batches_do_not_reset_repeated_failure_recovery_limit(setup):
     workflow, run, monitor, root, sources = setup
     document = Document()

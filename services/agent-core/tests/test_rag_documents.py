@@ -34,6 +34,23 @@ def test_pdf_decimal_table_cells_and_contents_entries_are_not_clause_headings():
     assert next(item for item in parsed['chunks'] if '试验描述' in item['text'])['clause_number'] == '8.2.2.1'
 
 
+def test_pdf_appendix_clause_headings_preserve_continuations_and_page_numbers():
+    from agent.rag.documents import _chunks
+    parsed = _chunks([
+        ('A－1\nA.1 简介及范围\n应记录有效修订版本号。\nA.2 环境合格鉴定表\n应记录设备型号。',
+         {'kind': 'pdf', 'page': 286}),
+        ('A－2\n本条款的续段。\nA.2.1 试验类别\n应记录适用类别。', {'kind': 'pdf', 'page': 287}),
+    ], [])
+    by_text = {item['text']: item for item in parsed['chunks']}
+    first = next(item for text, item in by_text.items() if '简介及范围' in text)
+    continuation = next(item for text, item in by_text.items() if '续段' in text)
+    nested = next(item for text, item in by_text.items() if '试验类别' in text)
+    assert first['clause_number'] == 'A.1'
+    assert continuation['clause_number'] == 'A.2'
+    assert nested['clause_number'] == 'A.2.1'
+    assert first['locator']['page'] == 286 and nested['locator']['page'] == 287
+
+
 def test_separator_only_blocks_and_fragments_are_excluded():
     from agent.rag.documents import _chunks
     parsed = _chunks([(' | | --- | ', {}), ('A' * 1200 + '\n' + ' | ' * 400, {})], [])
@@ -230,7 +247,7 @@ def test_long_clause_preserves_exception_sentence_and_parent_relationship():
     assert len({chunk['locator']['block_id'] for chunk in parsed['chunks']}) == 1
     assert all(chunk['locator']['parent_length'] == len(text) for chunk in parsed['chunks'])
     assert all(chunk['locator']['context_required'] for chunk in parsed['chunks'])
-    assert all(chunk['locator']['splitting_version'] == 'source-block-v4' for chunk in parsed['chunks'])
+    assert all(chunk['locator']['splitting_version'] == 'source-block-v5' for chunk in parsed['chunks'])
     assert parsed['chunks'][0]['locator']['continues_after']
     assert parsed['chunks'][-1]['locator']['continues_before']
     assert parsed['warnings']

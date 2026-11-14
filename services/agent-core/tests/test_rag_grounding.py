@@ -260,10 +260,14 @@ def test_context_sends_source_once_with_selectable_quote_ids():
     assert record['quote_options'][0]['text'] == '申请人应提供试验报告。除另有规定外，应保存记录。'
 
 
-def test_exact_quote_from_preface_cannot_answer_explicit_technical_subject():
+@pytest.mark.parametrize('text', [
+    '译者的话\n本书介绍适航审定。',
+    'RTCA，INC.\nWashington, DC 20036\nRTCA/DO－160F\n第 17 章\n电压尖峰\n发行日期：2007年12月6日',
+])
+def test_exact_quote_from_front_matter_cannot_answer_explicit_technical_subject(text):
     class PrefaceService(EvidenceService):
         async def search(self, *args, **kwargs):
-            return {'evidence': [{**evidence(), 'text': '译者的话\n本书介绍适航审定。'}], 'generation': 4}
+            return {'evidence': [{**evidence(), 'text': text}], 'generation': 4}
     from agent.rag.grounding import RagGrounding
     g = RagGrounding(PrefaceService())
     asyncio.run(g.prepare({'id': 'r', 'user_message_id': 'u'}, {

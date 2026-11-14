@@ -1,3 +1,5 @@
+import pytest
+
 from agent.rag.retrieval import lexical_tokens, reciprocal_rank_fusion
 
 
@@ -5,6 +7,20 @@ def test_chinese_bigrams_and_exact_clause_tokens():
     tokens = lexical_tokens('25.1309 系统安全性')
     assert '系统' in tokens and '安全' in tokens and '全性' in tokens
     assert '25.1309' in tokens
+
+
+@pytest.mark.parametrize('body', [
+    '8.1 Scope\nThe equipment shall meet the specified performance requirements.',
+    'The equipment shall meet specified performance requirements.',
+    'This section applies to equipment in the specified environment.',
+    '设备应满足规定的性能要求。',
+    '本章适用于机载设备的环境鉴定。',
+])
+def test_publisher_header_does_not_hide_actual_scope_requirements(body):
+    from agent.rag.retrieval import reference_material
+    text = ('RTCA, Inc.\nWashington, DC\nRTCA/DO-160F\nSection 8\n'
+            'Vibration\nIssue date: December 6, 2007\n' + body)
+    assert reference_material(text, 'What performance must equipment meet?') is False
 
 
 def test_rrf_rewards_both_channels_with_k60():

@@ -191,6 +191,35 @@ def test_serial_invocation_permits_busy_remove_and_switch_wait(tmp_path):
     asyncio.run(exercise())
 
 
+def test_main_invocation_replaces_previous_reranker_status_and_counts(tmp_path):
+    from agent.execution.execution_wait import ExecutionMonitor
+
+    async def exercise():
+        service = service_at(tmp_path, runtime_root=fake_runtime(tmp_path / 'runtime'))
+        model = await imported(service, tmp_path / 'model.gguf')
+        monitor = ExecutionMonitor(service.repository)
+        try:
+            await finish(service, await service.handle('runtime.load', {'model_id': model['id']}))
+            root = monitor.start_task(run_id='review-status-transition')
+
+            async def review(activity):
+                activity.progress(20, 20, stage='result_validation', device='cuda',
+                                  model_name='Previous reranker', model_role='reranker')
+                async with service.invocation(model['provider_profile_id']) as profile:
+                    snapshot = monitor.get_task(root['id'])['progress']
+                    assert snapshot['details']['stage'] == 'document_review'
+                    assert snapshot['details']['model_name'] == profile.name
+                    assert snapshot['details']['model_id'] == model['id']
+                    assert snapshot['details']['device'] == 'cpu'
+                    assert snapshot['completed'] is None and snapshot['total'] is None
+
+            await monitor.execute_stage(root['id'], 'document_review', review)
+        finally:
+            await service.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("mode,code", [("identity", "runtime_identity"), ("crash", "malformed_model"), ("driver", "driver_error")])
 def test_failed_readiness_never_publishes_profile(tmp_path, mode, code):
     async def exercise():

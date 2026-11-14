@@ -465,6 +465,8 @@ class LocalModelService:
         from agent.execution.execution_wait import current_activity
         activity = current_activity.get()
         if activity is not None:
+            activity.progress(stage=activity.stage, model_id=self._runtime.model_id,
+                              model_name=profile.name, model_role='main_model', device=self._runtime.backend)
             activity.queue(waiting=self._permit.locked(), resource='main_model')
         async with self._permit:
             if activity is not None:

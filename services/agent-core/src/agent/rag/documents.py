@@ -17,12 +17,12 @@ MAX_EXPANDED_BYTES = 200 * 1024 * 1024
 MAX_TEXT_CHARS = 20_000_000
 MAX_CHUNKS = 100_000
 CHUNK_CHARS = 1200
-SPLITTING_VERSION = 'source-block-v4'
+SPLITTING_VERSION = 'source-block-v5'
 PDF_PARSE_TIMEOUT = 120
 SUPPORTED_SUFFIXES = OFFICE_SUFFIXES | {'.pdf', '.txt', '.md', '.markdown'}
 _PDF_LOCK = threading.Lock()
 NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
-CLAUSE = re.compile(r'^\s*(?:§\s*)?((?:[A-Z]+[- ]?)?\d+(?:\.\d+)+(?:\([a-zA-Z0-9]+\))*)(?=$|[^0-9A-Za-z.])')
+CLAUSE = re.compile(r'^\s*(?:§\s*)?((?:(?:[A-Z]+[- ]?)?\d+|[A-Z]+)(?:\.\d+)+(?:\([a-zA-Z0-9]+\))*)(?=$|[^0-9A-Za-z.])')
 SECTION = re.compile(r'^\s*(?:section[ \t]+\d+\b|第[一二三四五六七八九十百零〇\d]+[章节])', re.IGNORECASE | re.MULTILINE)
 
 
