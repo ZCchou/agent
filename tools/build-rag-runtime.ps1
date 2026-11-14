@@ -99,7 +99,7 @@ Get-ChildItem -LiteralPath $destination -File -Recurse | Sort-Object FullName | 
 }
 $manifest = [ordered]@{
     schema_version = 1
-    protocol_version = 1
+    protocol_version = 2
     executable = 'rag-worker.exe'
     device_bundle = $Device
     python = '3.12'

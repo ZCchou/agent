@@ -428,6 +428,7 @@ pub fn run() {
             domain_commands::delete_conversation,
             domain_commands::start_model_run,
             domain_commands::intent_request,
+            domain_commands::execution_request,
             domain_commands::resolve_model_run_budget,
             domain_commands::get_model_run_plan,
             domain_commands::update_conversation_routing,

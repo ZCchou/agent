@@ -54,15 +54,17 @@ import { RoutingBudgetPrompt } from "./RoutingBudgetPrompt";
 import { ConversationRoutingControl, type RoutingModelOption } from "./ConversationRoutingControl";
 import { applyRunFailure, runErrorTranslationKey } from "./runErrors";
 import { documentProcessingLabel } from "./documentProcessing";
+import { ExecutionTaskCard } from "./ExecutionTaskCard";
 
 const MODEL_RUN_STATUSES = new Set<ModelRun["status"]>([
-  "queued", "building_context", "waiting_context", "waiting_permission", "waiting_budget", "generating", "waiting_tool",
+  "queued", "building_context", "waiting_context", "waiting_permission", "waiting_budget", "generating", "waiting_tool", "waiting_recovery",
   "completed", "failed", "cancelled", "interrupted",
 ]);
 const RUN_ACTIVITY_PHASES: Partial<Record<ModelRun['status'], string>> = {
   queued: 'queuedRequest', building_context: 'assembling_context', generating: 'waitingOutput',
   waiting_tool: 'waitingTool', waiting_permission: 'waitingPermission',
   waiting_budget: 'waitingBudget', waiting_context: 'waitingContext',
+  waiting_recovery: 'waitingRecovery',
 };
 
 function isModelRunStatus(value: unknown): value is ModelRun["status"] {
@@ -172,6 +174,7 @@ export function ChatPage() {
   const routingOptionsRef = useRef(routingOptions);
   routingOptionsRef.current = routingOptions;
   const [runActivityLabel, setRunActivityLabel] = useConversationState<string | null>(inspectorKey, null);
+  const [modelPreparationTask, setModelPreparationTask] = useConversationState<string | null>(inspectorKey, null);
   const pendingSendRef = useRef<{ signature: string; idempotencyKey: string } | null>(null);
   const intentTask = useSyncExternalStore(intentTasks.subscribe, () => intentTasks.get(inspectorKey));
   useEffect(() => {
@@ -181,6 +184,7 @@ export function ChatPage() {
     const phases: Partial<Record<typeof intentTask.status, string>> = {
       queued: 'preparingIntent', loading: 'loadingLocalModel', identifying: 'identifying',
       waiting_user: intentTask.clarification ? 'waitingClarification' : 'intentPaused',
+      waiting_recovery: 'waitingRecovery',
       failed: 'intentPaused', interrupted: 'intentPaused',
     };
     const phase = phases[intentTask.status];
@@ -404,7 +408,7 @@ export function ChatPage() {
         clearStreamingContent(); setActiveRun(null); runIdRef.current = null; setSending(false); setRunActivityLabel(null);
         stoppingRef.current = false; setStopping(false);
         void refreshWorkspace();
-      } else if (event.event_type === "run.failed" || event.event_type === "run.cancelled") {
+      } else if (event.event_type === "run.failed" || event.event_type === "run.cancelled" || event.event_type === "run.interrupted") {
         const refreshRevision = ++terminalRefreshRevision.current;
         setActiveRun((current) => current ? applyRunFailure(current, event) : current);
         setError(event.event_type !== "run.cancelled"); setSending(false); setRunActivityLabel(null);
@@ -431,7 +435,7 @@ export function ChatPage() {
         refreshToolOperations();
       }
       if (event.event_type.startsWith("run.web_search_") || event.event_type.startsWith("run.tool_")
-          || event.event_type === "run.completed" || event.event_type === "run.failed") {
+          || event.event_type === "run.completed" || event.event_type === "run.failed" || event.event_type === "run.interrupted") {
         refreshWebOperations();
       }
     }).then((dispose) => { if (active) unsubscribe = dispose; else dispose(); }).catch(() => { /* Browser test shell has no Tauri event plugin. */ });
@@ -571,8 +575,10 @@ export function ChatPage() {
     setFailedContent(null);
     setFailedEditMessage(null);
     setRunActivityLabel(tChat("routing.status.preparingRequest"));
+    setModelPreparationTask(null);
     clearStreamingContent();
     let releaseModel: (() => Promise<void>) | undefined;
+    let modelPreparationId: string | undefined;
     let sendIdentity: string | undefined;
     try {
       let settings = await settingsRepository.getAppSettings();
@@ -598,7 +604,12 @@ export function ChatPage() {
       if (selected?.provider.id.startsWith("managed:")) {
         releaseModel = await prepareLocalModel(localModelRepository, selected.model.id,
           () => !isCurrent() || submission.stopRequested,
-          (state) => { if (isCurrent()) showModelPreparation(state, selected?.provider.name ?? ''); });
+          (state, _elapsed, receipt) => {
+            if (!isCurrent()) return;
+            modelPreparationId = receipt.preparation_id;
+            setModelPreparationTask(receipt.execution_task_id ?? null);
+            showModelPreparation(state, selected?.provider.name ?? '');
+          });
         if (!isCurrent() || submission.stopRequested) return;
         settings = await settingsRepository.getAppSettings();
         candidates = selectableModels(settings, project, scope, true);
@@ -643,6 +654,7 @@ export function ChatPage() {
       setRunActivityLabel(tChat('routing.status.identifying', { attempt: 1, max: 3 }));
       const started = await modelRunRepository.start({
         intentScope: inspectorKey,
+        modelPreparationId,
         conversationId: conversation?.id, kind: conversation ? undefined : draft.kind,
         category: !conversation && draft.kind === "standard_chat" ? draft.category : undefined,
         chatGroupId: !conversation && draft.kind === "standard_chat" ? draft.chatGroupId ?? undefined : undefined,
@@ -1171,6 +1183,15 @@ export function ChatPage() {
 
   const effectiveKind = conversation?.kind ?? draft.kind;
   const source = conversation?.derived_from_conversation_id ?? null;
+  const preparingSubmission = sending && submissionRef.current && !submissionRef.current.accepted;
+  const preparingTask = preparingSubmission && intentTask?.request.idempotency_key === submissionRef.current?.intentKey
+    ? intentTask : null;
+  const executionOwner = preparingTask ? { kind: "intent" as const, id: preparingTask.id }
+    : preparingSubmission && modelPreparationTask ? { kind: "task" as const, id: modelPreparationTask }
+      : !preparingSubmission && activeRun ? { kind: "run" as const, id: activeRun.id } : null;
+  const monitoredExecution = preparingTask?.execution_task_id
+    ?? (preparingSubmission ? modelPreparationTask : undefined)
+    ?? (!preparingSubmission ? activeRun?.execution_task_id : undefined);
 
   return (
     <div className="chat-page">
@@ -1233,9 +1254,18 @@ export function ChatPage() {
           referenceDisabled={sending}
           onBeginEdit={beginMessageEdit} onEdit={editMessage} editDisabled={!coreOnline || sending || stopping}
           onChangeSetResolved={refreshChangeSets} />
-        {sending ? (
+        <ExecutionTaskCard enabled={coreOnline && currentPage === "chat" && Boolean(monitoredExecution)}
+          owner={executionOwner}
+          onRunRetry={async (runId) => {
+            if (activeRun?.id !== runId) return;
+            const scope = sendScopeRef.current;
+            await modelRunRepository.cancel(runId);
+            if (sendScopeRef.current === scope) await retryRun();
+          }}
+          onSettings={() => setCurrentPage("models")} />
+        {sending && (!monitoredExecution || streamingContent) ? (
           <AssistantRunMessage status={activeRun?.status ?? "queued"} content={streamingContent}
-            activityLabel={runActivityLabel}
+            activityLabel={monitoredExecution ? null : runActivityLabel}
             onProjectFile={effectiveKind === "project_work" ? openProjectFile : undefined}
             onProjectDirectory={effectiveKind === "project_work" ? openProjectDirectory : undefined} />
         ) : null}

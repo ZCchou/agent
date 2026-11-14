@@ -241,6 +241,8 @@ pub struct ModelRunStartRequest {
     pub intent_async: bool,
     #[serde(default, skip_serializing)]
     pub intent_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_preparation_id: Option<String>,
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_message_id: Option<String>,
@@ -725,6 +727,28 @@ pub async fn start_model_run(
     store.mark_committed(&staged_ids);
     store.mark_rejections_committed(&rejected_ids);
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn execution_request(
+    app: AppHandle,
+    manager: State<'_, Mutex<CoreProcessManager>>,
+    action: String,
+    params: Value,
+) -> Result<Value, String> {
+    if !matches!(action.as_str(), "status" | "continue" | "retry" | "cancel") {
+        return Err("execution_action_invalid".into());
+    }
+    if !params.is_object() {
+        return Err("execution_params_invalid".into());
+    }
+    request_core(
+        &app,
+        &manager,
+        "execution.request",
+        json!({"action": action, "params": params}),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1439,10 +1463,10 @@ mod routing_serialization_tests {
             contract["ipc_version"],
             crate::core_bridge::PROTOCOL_VERSION
         );
-        assert_eq!(contract["settings_schema_version"], 19);
-        assert_eq!(contract["core_schema_version"], 31);
+        assert_eq!(contract["settings_schema_version"], 20);
+        assert_eq!(contract["core_schema_version"], 32);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema31-agent-unified-v1");
+        assert_eq!(contract["build_id"], "schema32-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

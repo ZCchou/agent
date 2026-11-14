@@ -308,6 +308,11 @@ class DocumentAttachments:
         return parsed
 
     async def _convert(self, original):
+        from agent.execution.activity import run_stage
+        return await run_stage('document_conversion', lambda activity: self._convert_managed(original), safe_to_retry=True,
+            recoverable=lambda error: getattr(error, 'code', None) == 'rag_office_conversion_failed')
+
+    async def _convert_managed(self, original):
         cancel = threading.Event()
         future = asyncio.create_task(asyncio.to_thread(self._converted_pdf, original, cancel))
         try:

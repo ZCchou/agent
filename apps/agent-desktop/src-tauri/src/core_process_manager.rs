@@ -104,13 +104,15 @@ fn accept_run_event(sequences: &mut HashMap<String, u64>, response: &Value) -> b
     };
     if !matches!(
         event_type,
-        "run.state_changed"
+        "execution.activity"
+            | "run.state_changed"
             | "run.document_processing"
             | "run.chunk"
             | "run.draft_checkpoint"
             | "run.completed"
             | "run.failed"
             | "run.cancelled"
+            | "run.interrupted"
             | "run.tool_requested"
             | "run.tool_status_changed"
             | "run.change_set_ready"
@@ -162,6 +164,7 @@ fn terminal_event_run_id(response: &Value) -> Option<&str> {
         "run.completed"
             | "run.failed"
             | "run.cancelled"
+            | "run.interrupted"
             | "run.context_compaction_completed"
             | "run.context_compaction_failed"
     )

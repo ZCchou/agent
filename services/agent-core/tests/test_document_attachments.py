@@ -202,7 +202,7 @@ def test_schema26_upgrade_preserves_existing_attachment_records(tmp_path):
     assert stored['sha256'] == attachment['sha256']
     assert stored['storage_key'] == attachment['storage_key']
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 31
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 32
         assert "'document.source'" in connection.execute("SELECT sql FROM sqlite_master WHERE name='attachment_artifacts'").fetchone()[0]
 
 

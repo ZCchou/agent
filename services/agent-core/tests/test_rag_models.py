@@ -10,6 +10,12 @@ from agent.rag.models import ModelStore
 from agent.storage import CoreDataError
 
 
+@pytest.fixture(autouse=True)
+def controlled_model_memory(monkeypatch):
+    monkeypatch.setattr('agent.rag.models.system_memory',
+                        lambda: {'available_physical_bytes': 16 * 1024**3})
+
+
 @pytest.mark.parametrize('fail_pairs', [False, True])
 @pytest.mark.parametrize('action', ['embed', 'rerank'])
 def test_onnx_small_batches_and_memory_retry_preserve_results(tmp_path, monkeypatch, fail_pairs, action):
@@ -205,7 +211,7 @@ def test_runtime_manifest_rejects_tampered_executable(tmp_path, monkeypatch):
     runtime.mkdir(parents=True)
     executable = runtime / "rag-worker.exe"
     executable.write_bytes(b"trusted build")
-    manifest = {"schema_version": 1, "protocol_version": 1, "executable": "rag-worker.exe", "files": {"rag-worker.exe": hashlib.sha256(executable.read_bytes()).hexdigest()}}
+    manifest = {"schema_version": 1, "protocol_version": 2, "executable": "rag-worker.exe", "files": {"rag-worker.exe": hashlib.sha256(executable.read_bytes()).hexdigest()}}
     (runtime / "runtime.json").write_text(json.dumps(manifest))
     monkeypatch.setattr(models.sys, "frozen", True, raising=False)
     monkeypatch.setattr(models.sys, "executable", str(base / "agent-core.exe"))
@@ -271,7 +277,7 @@ def test_runtime_rejects_unlisted_executable_files(tmp_path, monkeypatch):
     runtime.mkdir(parents=True)
     executable = runtime / "rag-worker.exe"
     executable.write_bytes(b"trusted build")
-    (runtime / "runtime.json").write_text(json.dumps({"schema_version": 1, "protocol_version": 1, "executable": "rag-worker.exe", "files": {"rag-worker.exe": hashlib.sha256(executable.read_bytes()).hexdigest()}}))
+    (runtime / "runtime.json").write_text(json.dumps({"schema_version": 1, "protocol_version": 2, "executable": "rag-worker.exe", "files": {"rag-worker.exe": hashlib.sha256(executable.read_bytes()).hexdigest()}}))
     (runtime / "injected.dll").write_bytes(b"unlisted")
     monkeypatch.setattr(models.sys, "frozen", True, raising=False)
     monkeypatch.setattr(models.sys, "executable", str(base / "agent-core.exe"))
@@ -358,8 +364,9 @@ def test_remove_cleanup_failure_does_not_block_reimport(tmp_path, monkeypatch):
 
 
 def test_embedding_batches_reuse_hash_verification_and_keep_loop_responsive(tmp_path, monkeypatch):
-    import time
+    import threading
     import agent.rag.models as models
+    monkeypatch.setattr(models, 'system_memory', lambda: {'available_physical_bytes': 16 * 1024**3})
     script = tmp_path / "stdio.py"
     script.write_text("import sys,json\nfor line in sys.stdin:\n r=json.loads(line);v=[[1.0]+[0.0]*1023 for text in r['params'].get('texts',[])];print(json.dumps({'id':r['id'],'result':v}),flush=True)\n")
     store = ModelStore(tmp_path / "data")
@@ -367,17 +374,21 @@ def test_embedding_batches_reuse_hash_verification_and_keep_loop_responsive(tmp_
     monkeypatch.setattr(store, "_command", lambda: [__import__('sys').executable, str(script)])
     original = models._hash
     hashes = []
+    pending_ticks = []
+    responsive_hashes = []
     def slow_hash(path):
         hashes.append(path.name)
-        time.sleep(0.03)
+        tick = threading.Event()
+        pending_ticks.append(tick)
+        responsive_hashes.append(tick.wait(5))
         return original(path)
     monkeypatch.setattr(models, "_hash", slow_hash)
     async def exercise():
-        ticks = []
         finished = asyncio.Event()
         async def heartbeat():
             while not finished.is_set():
-                ticks.append(time.monotonic())
+                for pending in list(pending_ticks):
+                    pending.set()
                 await asyncio.sleep(0.005)
         ticker = asyncio.create_task(heartbeat())
         await asyncio.sleep(0)
@@ -385,8 +396,7 @@ def test_embedding_batches_reuse_hash_verification_and_keep_loop_responsive(tmp_
             await store.embed(record["id"], ["one"])
             first_count = len(hashes)
             assert first_count == 4
-            assert len(ticks) >= 8
-            assert max(b - a for a, b in zip(ticks, ticks[1:])) < 0.1
+            assert responsive_hashes == [True] * 4
             await store.embed(record["id"], ["two"])
             await store.embed(record["id"], ["three"])
             assert len(hashes) == first_count
@@ -396,6 +406,7 @@ def test_embedding_batches_reuse_hash_verification_and_keep_loop_responsive(tmp_
             os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 1000000))
             await store.embed(record["id"], ["changed stat"])
             assert len(hashes) == first_count * 2
+            assert all(responsive_hashes)
         finally:
             finished.set()
             await ticker
@@ -437,7 +448,7 @@ def test_runtime_status_is_lightweight_but_worker_admission_checks_hashes(tmp_pa
     runtime.mkdir(parents=True)
     executable = runtime / "rag-worker.exe"
     executable.write_bytes(b"trusted build")
-    (runtime / "runtime.json").write_text(json.dumps({"schema_version": 1, "protocol_version": 1, "executable": "rag-worker.exe", "files": {"rag-worker.exe": hashlib.sha256(executable.read_bytes()).hexdigest()}}))
+    (runtime / "runtime.json").write_text(json.dumps({"schema_version": 1, "protocol_version": 2, "executable": "rag-worker.exe", "files": {"rag-worker.exe": hashlib.sha256(executable.read_bytes()).hexdigest()}}))
     monkeypatch.setattr(models.sys, "frozen", True, raising=False)
     monkeypatch.setattr(models.sys, "executable", str(base / "agent-core.exe"))
     store = ModelStore(tmp_path / "data")
@@ -460,7 +471,7 @@ def test_runtime_status_never_walks_component_directories(tmp_path, monkeypatch)
     runtime = base / 'rag-runtime'
     runtime.mkdir(parents=True)
     (runtime / 'rag-worker.exe').write_bytes(b'worker')
-    (runtime / 'runtime.json').write_text(json.dumps({'schema_version': 1, 'protocol_version': 1,
+    (runtime / 'runtime.json').write_text(json.dumps({'schema_version': 1, 'protocol_version': 2,
         'executable': 'rag-worker.exe', 'files': {'rag-worker.exe': hashlib.sha256(b'worker').hexdigest()}}))
     monkeypatch.setattr(models.sys, 'frozen', True, raising=False)
     monkeypatch.setattr(models.sys, 'executable', str(base / 'agent-core.exe'))
@@ -505,6 +516,7 @@ def test_cpu_workers_are_reused_for_two_distinct_model_identities(tmp_path, monk
 def test_shutdown_during_model_switch_cannot_start_a_replacement_worker(tmp_path, monkeypatch):
     import sys
     from agent.rag.worker_client import WorkerClient
+    monkeypatch.setattr('agent.rag.models.system_memory', lambda: {'available_physical_bytes': 16 * 1024**3})
     script = tmp_path / 'worker.py'
     script.write_text("import sys,json\nfor line in sys.stdin:\n r=json.loads(line);print(json.dumps({'id':r['id'],'result':{'available':True}}),flush=True)\n")
     store = ModelStore(tmp_path / 'data')

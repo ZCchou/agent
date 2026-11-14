@@ -61,8 +61,8 @@ def test_invalid_reload_configuration_keeps_resident_session(tmp_path):
     asyncio.run(exercise())
 
 
-def test_streaming_total_deadline_keeps_timeout_error_code(tmp_path):
-    from agent.providers import ProviderEvent
+def test_local_streaming_ignores_legacy_total_deadline(tmp_path):
+    from agent.providers import FakeModelProvider, ProviderEvent
     from agent.rag.service import RagService
     from agent.rag.grounding import RagGrounding
     from test_tool_continuation_retry import fixture, configuration
@@ -77,12 +77,21 @@ def test_streaming_total_deadline_keeps_timeout_error_code(tmp_path):
         service.rag=RagService(core,Engines())
         service.rag_grounding=RagGrounding(service.rag)
         service.context.rag_context=service.rag_grounding.evidence
+        exceeded_legacy_deadline = asyncio.Event()
         class ActiveProvider:
             def __init__(self, profile): self.profile=profile
             async def stream_events(self, *args, **kwargs):
+                if kwargs.get('options') and kwargs['options'].purpose == 'intent_analysis':
+                    async for event in FakeModelProvider(self.profile).stream_events(*args, **kwargs):
+                        yield event
+                    return
+                output_count = 0
                 while True:
                     await asyncio.sleep(.005)
                     yield ProviderEvent("text_delta",text="x")
+                    output_count += 1
+                    if output_count == 12:
+                        exceeded_legacy_deadline.set()
         service._provider=lambda profile: ActiveProvider(profile)
         original=service._create_model_invocation_spec
         service._create_model_invocation_spec=lambda *args,**kwargs: replace(original(*args,**kwargs),total_timeout_ms=30,activity_timeout_ms=1000,first_output_timeout_ms=None,spec_hash="")
@@ -91,15 +100,20 @@ def test_streaming_total_deadline_keeps_timeout_error_code(tmp_path):
             await service.rag.handle("library.bind",{"library_id":library,"project_id":project["id"],"enabled":True})
             await ready(service.rag,library)
             assert (await wait_job(service.rag,await service.rag.handle("index.build",{"library_id":library})))["status"]=="completed"
-            response=await service.start({"conversation_id":conversation["id"],"content":"失效要求","idempotency_key":"total-deadline"})
-            await asyncio.wait_for(service.tasks[response["run"]["id"]],15)
+            response=await asyncio.wait_for(service.start({"conversation_id":conversation["id"],"content":"失效要求","idempotency_key":"total-deadline"}),15)
+            await asyncio.wait_for(exceeded_legacy_deadline.wait(),15)
             run=core.get_model_run(response["run"]["id"])
-            assert run["error_code"]=="request_timeout"
+            assert run["status"] == "generating"
+            assert run["error_code"] is None
+            assert not service.tasks[run["id"]].done()
             with core._connect() as connection:
-                codes=[row[0] for row in connection.execute("SELECT error_code FROM invocation_specs WHERE plan_id=?",(run["execution_plan_id"],))]
-            assert codes and set(codes)=={"request_timeout"}
+                invocations=connection.execute("SELECT status,error_code FROM invocation_specs WHERE plan_id=?",(run["execution_plan_id"],)).fetchall()
+            assert invocations
+            assert all(row["status"] == "dispatched" and row["error_code"] is None for row in invocations)
+            await asyncio.wait_for(service.cancel(run["id"]),5)
+            assert core.get_model_run(run["id"])["status"] == "cancelled"
         finally:
-            await service.shutdown()
+            await asyncio.wait_for(service.shutdown(),5)
     asyncio.run(exercise())
 
 

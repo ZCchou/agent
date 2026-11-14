@@ -27,7 +27,7 @@ def verify_build_identity(manifest: dict, repository: Path) -> None:
 def verify(root: Path, required_device: str | None = None) -> dict:
     root = Path(root).resolve()
     manifest = json.loads((root / "runtime.json").read_text(encoding="utf-8-sig"))
-    if manifest.get("schema_version") != 1 or manifest.get("protocol_version") != 1 \
+    if manifest.get("schema_version") != 1 or manifest.get("protocol_version") != 2 \
             or manifest.get("executable") != "rag-worker.exe" or manifest.get("device_bundle") not in {"cpu", "cuda"}:
         raise ValueError("Unsupported inference runtime manifest")
     if required_device not in {None, "cpu", "cuda"}:

@@ -6,12 +6,14 @@ import json
 import math
 from pathlib import Path
 import sys
+import threading
+import time
 
 from agent.document_parser.protocol import managed_original
 from agent.ocr.store import OcrModelStore
 
 
-def scan_pdf(path):
+def scan_pdf(path, progress=None):
     import pypdfium2 as pdfium
     pages = []
     with pdfium.PdfDocument(str(path)) as document:
@@ -36,6 +38,8 @@ def scan_pdf(path):
                 'height_points': height, 'image_ratio': ratio,
                 'needs_ocr': len(text.strip()) < 40 or ratio > .25 or (ratio > .01 and len(text.strip()) < 80)})
             page.close()
+            if progress:
+                progress({'completed': index + 1, 'total': len(document), 'page': index + 1})
     return {'pages': pages}
 
 
@@ -60,19 +64,46 @@ def main():
     profile_id = None
     engine_device = None
     output = sys.stdout
+    sequence = 0
     for line in sys.stdin:
         request_id = None
+        stopped = threading.Event()
+        heartbeat = None
+        lock = threading.Lock()
+        version, identity = 1, {}
+
+        def emit(frame):
+            nonlocal sequence
+            with lock:
+                sequence += 1
+                if version == 2:
+                    frame = {**frame, 'protocol_version': 2, **identity, 'sequence': sequence}
+                output.write(json.dumps(frame, ensure_ascii=True, allow_nan=False) + '\n')
+                output.flush()
+
+        def pulse():
+            previous_cpu = time.process_time()
+            while not stopped.wait(5):
+                cpu = time.process_time()
+                emit({'id': request_id, 'kind': 'heartbeat', 'cpu_seconds': cpu,
+                      'resource_active': True if cpu - previous_cpu >= .02 else None})
+                previous_cpu = cpu
         try:
             if len(line) > 1024 * 1024:
                 raise ValueError('OCR request exceeds limit')
             request = json.loads(line)
             request_id = request['id']
             params = request['params']
+            version = request.get('protocol_version', 1)
+            identity = request.get('execution_identity', {})
+            if version == 2:
+                heartbeat = threading.Thread(target=pulse, daemon=True)
+                heartbeat.start()
             data_dir = Path(params['data_dir']).absolute()
             original = managed_original(data_dir, params['path'])
             with redirect_stdout(sys.stderr):
                 if request['action'] == 'scan':
-                    result = scan_pdf(original)
+                    result = scan_pdf(original, lambda status: emit({'id': request_id, 'progress': status})) if version == 2 else scan_pdf(original)
                 elif request['action'] == 'recognize':
                     if engine is None or profile_id != params['profile_id'] or engine_device != params.get('device', 'auto'):
                         from agent.ocr.adapter import OcrAdapter
@@ -95,8 +126,10 @@ def main():
         except Exception as error:
             print(type(error).__name__, str(error)[:400], file=sys.stderr, flush=True)
             response = {'id': request_id, 'error': f'{getattr(error, "code", "ocr_page_failed")}: {type(error).__name__}'}
-        output.write(json.dumps(response, ensure_ascii=True, allow_nan=False) + '\n')
-        output.flush()
+        stopped.set()
+        if heartbeat is not None:
+            heartbeat.join()
+        emit(response)
 
 
 if __name__ == '__main__':
