@@ -376,12 +376,12 @@ def test_embedding_batches_reuse_hash_verification_and_keep_loop_responsive(tmp_
     hashes = []
     pending_ticks = []
     responsive_hashes = []
-    def slow_hash(path):
+    def slow_hash(path, **options):
         hashes.append(path.name)
         tick = threading.Event()
         pending_ticks.append(tick)
         responsive_hashes.append(tick.wait(5))
-        return original(path)
+        return original(path, **options)
     monkeypatch.setattr(models, "_hash", slow_hash)
     async def exercise():
         finished = asyncio.Event()
@@ -454,9 +454,9 @@ def test_runtime_status_is_lightweight_but_worker_admission_checks_hashes(tmp_pa
     store = ModelStore(tmp_path / "data")
     original = models._hash
     hashes = []
-    def counted_hash(path):
+    def counted_hash(path, **options):
         hashes.append(path)
-        return original(path)
+        return original(path, **options)
     monkeypatch.setattr(models, "_hash", counted_hash)
     assert store.runtime_status()["available"]
     assert store.runtime_status()["available"]

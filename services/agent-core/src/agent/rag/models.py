@@ -27,6 +27,43 @@ from agent.execution.execution_wait import current_activity, current_task_id, cu
 
 _UNSAFE = {".bin", ".pt", ".pth", ".pkl", ".pickle", ".py", ".pyc", ".pyo", ".exe", ".dll", ".so", ".bat", ".cmd", ".ps1", ".sh"}
 _DTYPES = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1, "I16": 2, "U16": 2, "F16": 2, "BF16": 2, "I32": 4, "U32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
+INTEGRITY_REPORT_INTERVAL_SECONDS = 1
+
+
+class _IntegrityProgress:
+    def __init__(self, phase, total_files):
+        self.activity = current_activity.get()
+        self.phase = phase
+        self.total_files = total_files
+        self.entries_checked = 0
+        self.files_processed = 0
+        self.bytes_read = 0
+        self.last_report = float('-inf')
+        self.report()
+
+    def read(self, count):
+        self.bytes_read += count
+        self.report()
+
+    def file_processed(self):
+        self.files_processed += 1
+        self.report()
+
+    def entry_checked(self):
+        self.entries_checked += 1
+        self.report()
+
+    def report(self, *, force=False):
+        if self.activity is None:
+            return
+        now = time.monotonic()
+        if force or now - self.last_report >= INTEGRITY_REPORT_INTERVAL_SECONDS:
+            if not self.activity.progress(stage='integrity_verification', integrity_phase=self.phase,
+                    integrity_files_processed=self.files_processed, integrity_total_files=self.total_files,
+                    integrity_entries_checked=self.entries_checked,
+                    integrity_bytes_read=self.bytes_read):
+                raise CoreDataError('execution_revision_conflict', 'Integrity verification belongs to a superseded attempt.')
+            self.last_report = now
 
 
 def _json(path):
@@ -35,11 +72,13 @@ def _json(path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def _hash(path):
+def _hash(path, *, progress=None):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
+            if progress is not None:
+                progress(len(block))
     return digest.hexdigest()
 
 
@@ -72,7 +111,7 @@ def _model_file_error(error, root, operation):
     return CoreDataError('rag_model_error', f'{operation}: {error}')
 
 
-def _files(root):
+def _files(root, *, progress=None):
     if _linked(root):
         raise ValueError("Model directory cannot be a symbolic link or junction")
     result = []
@@ -81,6 +120,8 @@ def _files(root):
             path = Path(directory) / name
             if _linked(path):
                 raise ValueError(f"Linked model path is forbidden: {path.relative_to(root)}")
+            if progress is not None:
+                progress()
         for name in files:
             path = Path(directory) / name
             if name == ".rag-import.json":
@@ -415,12 +456,20 @@ class ModelStore:
     def _verify(self, record, root=None, direct=False):
         root = (root if direct else (root or self.root) / record["id"])
         try:
-            files = _files(root)
+            inventory = _IntegrityProgress('model_inventory', None)
+            files = _files(root, progress=inventory.entry_checked)
+            inventory.total_files = len(files)
+            inventory.report(force=True)
             manifest = _json(root / ".rag-import.json")
-            hashes = {str(item.relative_to(root)).replace("\\", "/"): _hash(item) for item in files}
+            progress = _IntegrityProgress('model_hashes', len(files))
+            hashes = {}
+            for item in files:
+                hashes[item.relative_to(root).as_posix()] = _hash(item, progress=progress.read)
+                progress.file_processed()
             digest = hashlib.sha256(json.dumps({"profile": record["profile"], "files": hashes}, sort_keys=True).encode()).hexdigest()
             if manifest.get("files") != hashes or digest != record["digest"] or manifest.get("digest") != digest:
                 raise ValueError("Model integrity hash changed")
+            progress.report(force=True)
         except (OSError, ValueError, KeyError) as exc:
             raise _model_file_error(exc, root, 'Model integrity verification failed') from exc
         return root
@@ -440,6 +489,7 @@ class ModelStore:
                 raise ValueError("Unsupported inference runtime manifest version")
             executable = _safe_relative(base, metadata["executable"])
             hashes = metadata["files"]
+            inventory = _IntegrityProgress('runtime_inventory', len(hashes))
             actual = set()
             manifest_stat = manifest_path.stat()
             stamp = [("runtime.json", manifest_stat.st_ino, manifest_stat.st_size, manifest_stat.st_mtime_ns, manifest_stat.st_ctime_ns)]
@@ -450,6 +500,7 @@ class ModelStore:
                     item = Path(directory) / name
                     if _linked(item):
                         raise ValueError("Linked inference runtime file")
+                    inventory.entry_checked()
                 for name in files:
                     item = Path(directory) / name
                     if item != manifest_path:
@@ -457,15 +508,20 @@ class ModelStore:
                         actual.add(relative)
                         stat = item.stat()
                         stamp.append((relative, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+                        inventory.file_processed()
             if actual != set(hashes):
                 raise ValueError("Inference runtime contains unlisted or missing files")
             if not hashes or metadata["executable"] not in hashes:
                 raise ValueError("Inference runtime executable is unlisted")
+            inventory.report(force=True)
             identity = (str(base), tuple(sorted(stamp)))
             if force or self._runtime_verified != identity:
+                progress = _IntegrityProgress('runtime_hashes', len(hashes))
                 for name, expected in hashes.items():
-                    if _hash(_safe_relative(base, name)) != expected:
+                    if _hash(_safe_relative(base, name), progress=progress.read) != expected:
                         raise ValueError(f"Inference runtime file hash mismatch: {name}")
+                    progress.file_processed()
+                progress.report(force=True)
                 self._runtime_verified = identity
             return [str(executable)]
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -473,11 +529,15 @@ class ModelStore:
 
     def _stat_identity(self, root):
         try:
-            files = _files(root) + [root / ".rag-import.json"]
+            progress = _IntegrityProgress('model_inventory', None)
+            files = _files(root, progress=progress.entry_checked) + [root / ".rag-import.json"]
+            progress.total_files = len(files)
             result = []
             for path in files:
                 stat = path.stat()
                 result.append((path.relative_to(root).as_posix(), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+                progress.file_processed()
+            progress.report(force=True)
             return tuple(result)
         except (OSError, ValueError) as exc:
             raise _model_file_error(exc, root, 'Model integrity stat check failed') from exc
