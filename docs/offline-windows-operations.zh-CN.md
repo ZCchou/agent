@@ -4,13 +4,13 @@
 
 ## 新电脑安装
 
-1. 在发行页面下载 `agent-0.16.0-preview.2-windows-x64-setup.exe` 和全部 `offline.partNN.zip`，保存至同一目录。
+1. 在发行页面下载 `agent-0.16.0-preview.5-windows-x64-setup.exe` 和该页列出的全部 `offline.partNN.zip`，保存至同一目录。
 2. 将这些文件复制至目标电脑，运行安装器。安装器逐卷校验、解压，并从随包文件安装 WebView2 和 Microsoft VC++ x64 运行库。系统可能显示 Microsoft 组件的权限或重启提示。
 3. 安装完成后打开 agent，在“系统功能 → 模型”选择模型库目录，导入 GGUF 主模型，选择设备、加载并设为默认。
 4. 在“检索模型”导入完整的嵌入与重排序模型目录。OCR 模型随完整离线包提供，可从安装目录的 `ocr-model-package` 导入。
 5. 创建资料库、导入资料，待处理和索引完成后，在“项目设置 → 资料与 RAG”启用资料库。
 
-下载地址与主模型、辅助模型下载步骤见 README。联网电脑可先备齐文件，再复制至离线电脑。[发行下载](https://github.com/ZCchou/agent/releases/tag/v0.16.0-preview.2) · [模型下载](../README.md#下载主模型)
+下载地址与主模型、辅助模型下载步骤见 README。联网电脑可先备齐文件，再复制至离线电脑。[发行下载](https://github.com/ZCchou/agent/releases/tag/v0.16.0-preview.5) · [模型下载](../README.md#下载主模型)
 
 运行组件包括 llama.cpp CPU/CUDA/Vulkan、RAG CPU/CUDA、OCR、Office 解析及其依赖。目标电脑提供显卡驱动。所需 Python、CUDA 运行库及推理运行组件随包提供，应用管理其加载与调用。
 
@@ -26,13 +26,13 @@
 
 应用设置提供手动检查更新。签名程序包更新主程序、Core、应用 DLL 和更新辅助程序，沿用现有运行组件。preview.1 升至 preview.2 的程序更新包含迁移修复。
 
-需要采用去重运行组件的用户下载安装完整 preview.2 离线包，退出当前应用后安装。完整安装与程序更新提供相同版本的应用程序，实际运行组件布局可从安装清单核对。
+preview.5 更新了辅助推理与 OCR 运行组件，已有安装使用本版完整离线包升级。退出当前应用后运行安装器，升级会复用校验一致的已安装文件，只暂存变化文件。实际运行组件布局可从安装清单核对。
 
 更新失败时保留错误记录，按提示恢复或重新安装完整包。运行中的托管模型和占用文件需要先停止，再重试安装。
 
 ## 迁移与恢复
 
-统一版使用应用标识 `io.github.zcchou.agent.airworthiness`，数据库 schema 30、IPC 23。设置中的迁移入口支持 Document Preview 与 OCR Preview。先退出来源应用，选择来源资料及目标模型库，按界面步骤创建快照、合并与验证。
+统一版使用应用标识 `io.github.zcchou.agent.airworthiness`，数据库 schema 32、IPC 25。设置中的迁移入口支持 Document Preview 与 OCR Preview。先退出来源应用，选择来源资料及目标模型库，按界面步骤创建快照、合并与验证。
 
 preview.2 修复 SQLite 在停止后仍保留 WAL/SHM 导致的激活失败。迁移通过 SQLite 检查与 checkpoint 保存已提交数据，再验证激活条件。出现错误时保留来源资料与备份，并提供诊断信息。
 
