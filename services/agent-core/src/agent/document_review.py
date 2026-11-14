@@ -6,13 +6,23 @@ import hashlib
 import inspect
 import json
 import re
+import uuid
 
+from agent.context_engine.policy import estimate_tokens
 from agent.document_plan import document_structure, field_type, validate_source_locators
 from agent.documents import load_docx, targets
 from agent.execution.execution_wait import current_activity
+from agent.providers import ProviderError
 from agent.rag.grounding import plain_markdown
 from agent.rag.support import review_issues
 from agent.storage import CoreDataError
+
+
+TRANSPORT_FAILURE_CODES = frozenset({
+    'runtime_crashed', 'network_unavailable', 'connection_reset', 'request_timeout',
+    'stream_stalled', 'managed_session_changed', 'model_not_loaded',
+    'provider_response_incomplete', 'provider_empty_output',
+})
 
 
 def _json(value):
@@ -136,20 +146,28 @@ def _batch(base, fields, index):
 
 
 def _fits(batch, evidence, token_allowance):
-    # Match planned-fill's conservative character-token ceiling and reserve
-    # half the allowance for output, including format-correction instructions.
-    return len(_json({'batch': batch, 'evidence': evidence})) + 256 <= token_allowance // 2
+    # Runtime already separates the model window into input/output allowances.
+    # Apply the normal mixed-language estimator once, with instruction and
+    # format-correction space inside the supplied input allowance.
+    return estimate_tokens({'batch': batch, 'evidence': evidence}) + 256 <= token_allowance
 
 
 def _call_count(activity, identity):
     # Progress is an append-only, fenced record and does not clear consecutive
-    # recovery failures. Counting it preserves the model-call cap across a
-    # process interruption before the batch result can be checkpointed.
+    # recovery failures. Confirmed transport outcomes remain audited separately
+    # from the three completed-output format trials. Unknown interruptions
+    # conservatively consume a trial until an outcome can be established.
     with activity.monitor.repository._connect() as connection:
         return connection.execute(
-            '''SELECT COUNT(*) FROM execution_wait_activity
-               WHERE task_id=? AND kind='progress'
-                 AND json_extract(payload_json,'$.review_call_identity')=?''',
+            '''SELECT COUNT(*) FROM execution_wait_activity a
+               WHERE a.task_id=? AND a.kind='progress'
+                 AND json_extract(a.payload_json,'$.review_call_identity')=?
+                 AND json_extract(a.payload_json,'$.review_call_number') IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM execution_wait_activity outcome
+                     WHERE outcome.task_id=a.task_id AND outcome.kind='progress'
+                       AND json_extract(outcome.payload_json,'$.review_transport_failure')=
+                           json_extract(a.payload_json,'$.review_reservation_id'))''',
             (activity.task_id, identity)).fetchone()[0]
 
 
@@ -238,7 +256,7 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
     """Review every nonempty target of an authorized managed DOCX artifact.
 
     ``generate(batch, evidence)`` performs exactly one actual model invocation.
-    This function owns the per-batch three-call correction budget. ``evidence``
+    This function owns the per-batch three-output correction budget. ``evidence``
     re-admits project RAG sources for every batch, including restored batches.
     Caller identity includes semantic task revision, models and configuration.
     Optional ``parent_task_id`` comes from the runtime-owned linked-run lineage.
@@ -345,11 +363,13 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
             else:
                 call_identity = _hash(checkpoint_identity)
                 used_calls = _call_count(activity, call_identity)
-                response = _pending(page, '本批已使用三次实际调用，审阅结果仍需人工复核。',
+                response = _pending(page, '本批已使用三次格式核验机会，审阅结果仍需人工复核。',
                                     code='document_review_call_budget_exceeded')
                 for attempt in range(used_calls, 3):
+                    reservation_id = uuid.uuid4().hex
                     if not activity.progress(completed=len(results), total=len(fields),
-                            review_call_identity=call_identity, review_call_number=attempt + 1):
+                            review_call_identity=call_identity, review_call_number=attempt + 1,
+                            review_reservation_id=reservation_id):
                         raise CoreDataError('document_review_stale', '审阅调用身份已变化，旧阶段没有继续调用模型。')
                     try:
                         response = await _invoke(generate, batch, context)
@@ -358,13 +378,20 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
                         if isinstance(response, str):
                             response = json.loads(response)
                         break
-                    except CoreDataError as error:
+                    except (CoreDataError, ProviderError) as error:
+                        if error.code in TRANSPORT_FAILURE_CODES:
+                            details = getattr(error, 'details', None) or {}
+                            activity.progress(completed=len(results), total=len(fields),
+                                review_transport_failure=reservation_id, transport_error_code=error.code,
+                                output_character_count=details.get('text_character_count'),
+                                usage_present=bool(getattr(error, 'usage', None)))
+                            raise
                         if error.code not in {'document_review_invalid', 'rag_quote_invalid', 'rag_citation_invalid',
                                               'rag_answer_invalid', 'rag_evidence_stale', 'rag_evidence_missing'}:
                             raise
                         batch = {**batch, 'format_error': error.code}
                         if attempt == 2:
-                            response = _pending(page, '三次审阅调用未通过覆盖或证据核验，请人工复核。', code=error.code)
+                            response = _pending(page, '三次审阅输出未通过覆盖或证据核验，请人工复核。', code=error.code)
             if normalized is None:
                 normalized = await _validate(response, page, template, evidence_resolver)
         workflow.path_for(run_id, template_id)

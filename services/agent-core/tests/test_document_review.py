@@ -8,6 +8,7 @@ from docx import Document
 from agent.document_review import review_template
 from agent.documents import DocumentWorkflow
 from agent.execution.execution_wait import ExecutionMonitor
+from agent.providers import ProviderError
 from agent.rag.grounding import RagGrounding, evidence_for_model, evidence_with_quotes, quote_options
 from agent.storage import CoreDataError, CoreRepository
 
@@ -142,12 +143,12 @@ def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(s
 
     def generate(batch, evidence):
         sizes.append(len(batch['fields']))
-        costs.append(len(json.dumps({'batch': batch, 'evidence': evidence}, ensure_ascii=False)))
+        costs.append(len(json.dumps({'batch': batch, 'evidence': evidence}, ensure_ascii=False, separators=(',', ':'))))
         return sources.response(batch)
 
-    result = execute(setup, artifact, generate, allowance=5000)
+    result = execute(setup, artifact, generate, allowance=1600)
     assert max(sizes) < 10
-    assert max(costs) <= 2500
+    assert max(costs) <= 4032
     assert result['report']['coverage']['total'] == 24
     assert result['report']['coverage']['pending'] == 0
 
@@ -462,3 +463,87 @@ def test_linked_review_rejects_an_unrelated_parent_root(setup):
         execute(child, child_artifact, parent_task_id=unrelated['id'])
     assert error.value.code == 'document_review_lineage_invalid'
     assert child[4].calls == []
+
+
+def test_default_8k_review_budget_calls_model_for_all_substantive_batches(setup):
+    workflow, run, _, _, sources = setup
+    document = Document()
+    document.add_heading('Review requirements', 1)
+    for index in range(35):
+        document.add_paragraph(f'Requirement {index} needs review.')
+    artifact = register(workflow, run, document)
+    sources.source['text'] = 'The applicant shall preserve applicable conditions and provide a controlled report. ' * 18
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch['target_ids'])
+        return sources.response(batch)
+
+    result = execute(setup, artifact, generate, allowance=2730)
+    assert len(calls) >= 4
+    assert sum(map(len, calls)) == 35
+    assert max(map(len, calls)) <= 10
+    assert result['report']['coverage']['total'] == 36
+    assert all(target['error_code'] != 'document_context_too_small' for target in result['report']['targets'])
+
+
+@pytest.mark.parametrize('kind', ['network_unavailable', 'runtime_crashed', 'model_not_loaded'])
+def test_confirmed_transport_failures_preserve_format_budget_and_actual_call_audit(setup, kind):
+    workflow, run, _, root, sources = setup
+    document = Document()
+    document.add_paragraph('正文')
+    artifact = register(workflow, run, document)
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch)
+        if len(calls) <= 3:
+            error_type = ProviderError if kind == 'network_unavailable' else CoreDataError
+            raise error_type(kind, 'confirmed transport failure')
+        return sources.response(batch)
+
+    for _ in range(3):
+        with pytest.raises((ProviderError, CoreDataError)) as error:
+            execute(setup, artifact, generate)
+        assert error.value.code == kind
+    result = execute(setup, artifact, generate)
+    assert len(calls) == 4
+    assert result['report']['coverage'] == {'total': 1, 'reviewed': 1, 'pending': 0}
+    with workflow.repository._connect() as connection:
+        records = [json.loads(row[0]) for row in connection.execute(
+            "SELECT payload_json FROM execution_wait_activity WHERE task_id=? AND kind='progress'", (root['id'],))]
+    reservations = [record for record in records if 'review_reservation_id' in record]
+    failures = [record for record in records if 'review_transport_failure' in record]
+    assert len(reservations) == 4
+    assert len({record['review_reservation_id'] for record in reservations}) == 4
+    assert len(failures) == 3
+
+
+def test_bad_completed_outputs_stay_counted_when_transport_recovery_renews_attempts(setup):
+    workflow, run, _, root, _ = setup
+    document = Document()
+    document.add_paragraph('正文')
+    artifact = register(workflow, run, document)
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch)
+        if len(calls) in {2, 4}:
+            raise ProviderError('provider_response_incomplete', 'transport output incomplete',
+                                details={'text_character_count': 42})
+        return {'results': []}
+
+    for _ in range(2):
+        with pytest.raises(ProviderError):
+            execute(setup, artifact, generate)
+    result = execute(setup, artifact, generate)
+    assert len(calls) == 5
+    assert result['report']['coverage']['pending'] == 1
+    assert execute(setup, artifact, generate)['report']['batches'][0]['restored'] is True
+    assert len(calls) == 5
+    with workflow.repository._connect() as connection:
+        failures = [json.loads(row[0]) for row in connection.execute(
+            "SELECT payload_json FROM execution_wait_activity WHERE task_id=? AND json_extract(payload_json,'$.review_transport_failure') IS NOT NULL",
+            (root['id'],))]
+    assert len(failures) == 2
+    assert all(item['output_character_count'] == 42 for item in failures)
