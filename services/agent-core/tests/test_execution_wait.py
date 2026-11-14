@@ -519,3 +519,54 @@ def test_custom_total_applies_across_multiple_stages(foundation):
             await task
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('kind', ['library', 'version', 'index'])
+def test_source_invalidation_fences_activity_and_deletes_only_matching_checkpoints(foundation, kind):
+    repository, monitor, _ = foundation
+    root = monitor.start_task(run_id='source-deletion-' + kind)
+
+    async def operation(activity):
+        source = {kind + '_ids': ['removed']}
+        assert activity.progress(stage='retrieval_scope', sources=source)
+        assert activity.checkpoint('matching', {'sources': source}, [1])
+        assert activity.checkpoint('unrelated', {'sources': {kind + '_ids': ['kept']}}, [2])
+        assert monitor.invalidate_sources(**{kind + '_id': 'removed'}) == 1
+        assert activity.progress(completed=999) is False
+        assert activity.checkpoint('late', {'sources': source}, [3]) is False
+        assert monitor.get_task(root['id'])['status'] == 'interrupted'
+        with repository._connect() as connection:
+            keys = [row[0] for row in connection.execute('SELECT checkpoint_key FROM execution_wait_checkpoints')]
+            assert keys == ['unrelated']
+            assert connection.execute('SELECT COUNT(*) FROM execution_wait_activity').fetchone()[0] == 1
+            assert connection.execute('SELECT COUNT(*) FROM execution_wait_tasks').fetchone()[0] == 1
+        return 'stale result'
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(monitor.execute_stage(root['id'], 'rerank', operation))
+    assert monitor.get_task(root['id'])['error_code'] == 'rag_evidence_stale'
+
+
+def test_source_invalidation_fences_scope_before_first_checkpoint_and_preserves_terminal_audit(foundation):
+    repository, monitor, _ = foundation
+    root = monitor.start_task(run_id='scope-only')
+
+    async def scope(activity):
+        activity.progress(sources={'library_ids': ['removed']})
+        assert monitor.invalidate_sources(library_id='removed') == 1
+        assert activity.checkpoint('late', {}, []) is False
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(monitor.execute_stage(root['id'], 'retrieve', scope))
+    other = monitor.start_task(run_id='finished-audit')
+
+    async def finished(activity):
+        activity.checkpoint('finished', {'sources': {'library_ids': ['removed']}}, [1])
+
+    asyncio.run(monitor.execute_stage(other['id'], 'retrieve', finished))
+    monitor.finish_task(other['id'])
+    monitor.invalidate_sources(library_id='removed')
+    assert monitor.get_task(other['id'])['status'] == 'completed'
+    with repository._connect() as connection:
+        assert connection.execute('SELECT COUNT(*) FROM execution_wait_tasks').fetchone()[0] == 2
+        assert connection.execute('SELECT COUNT(*) FROM execution_wait_stages').fetchone()[0] == 2

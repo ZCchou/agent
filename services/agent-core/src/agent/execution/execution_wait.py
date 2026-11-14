@@ -277,6 +277,48 @@ class ExecutionMonitor:
         with self.repository._connect() as connection:
             connection.execute('DELETE FROM execution_wait_tasks WHERE id=?', (task_id,))
 
+    def invalidate_sources(self, *, library_id: str | None = None,
+                           version_id: str | None = None, index_id: str | None = None) -> int:
+        """Fence source-dependent roots and remove their affected checkpoints.
+
+        Scope registration precedes inference, so activity can identify a root
+        even before its first checkpoint. Business history and checkpoints for
+        other sources survive. The active stage stays owned until its runner
+        drains the prior request, preventing overlapping replacement work.
+        """
+        selectors = {'library_ids': library_id, 'version_ids': version_id, 'index_ids': index_id}
+        if not any(value is not None for value in selectors.values()) or any(
+                value is not None and (not isinstance(value, str) or not value)
+                for value in selectors.values()):
+            raise CoreDataError('execution_source_required', '请选择需要失效的资料身份。')
+        checkpoint_clauses, activity_clauses, parameters = [], [], []
+        for key, value in selectors.items():
+            if value is None:
+                continue
+            checkpoint_clauses.append(
+                f"EXISTS (SELECT 1 FROM json_each(identity_json,'$.sources.{key}') WHERE value=?)")
+            activity_clauses.append(
+                f"EXISTS (SELECT 1 FROM json_each(payload_json,'$.sources.{key}') WHERE value=?)")
+            parameters.append(value)
+        checkpoint_filter = ' OR '.join(checkpoint_clauses)
+        activity_filter = ' OR '.join(activity_clauses)
+        now = self.clock()
+        with self.repository._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            affected = [row[0] for row in connection.execute(
+                f'''SELECT task_id FROM execution_wait_checkpoints WHERE {checkpoint_filter}
+                    UNION SELECT task_id FROM execution_wait_activity
+                    WHERE kind='progress' AND ({activity_filter})''', (*parameters, *parameters))]
+            connection.execute(f'DELETE FROM execution_wait_checkpoints WHERE {checkpoint_filter}', parameters)
+            for task_id in affected:
+                connection.execute(
+                    '''UPDATE execution_wait_tasks SET status='interrupted',error_code='rag_evidence_stale',
+                       revision=revision+1,sequence=sequence+1,finished_at=?,updated_at=?
+                       WHERE id=? AND status IN ('running','waiting_recovery')''', (now, now, task_id))
+        for task_id in affected:
+            self._emit(task_id, 'sources_invalidated')
+        return len(affected)
+
     @staticmethod
     def _valid(connection, activity: StageActivity) -> bool:
         return connection.execute(
