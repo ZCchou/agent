@@ -68,6 +68,13 @@ describe("terminal response fallback", () => {
     expect(applyRunFailure(run, { ...event, data: {} }).draft?.content).toBe("Partial output");
   });
 
+  it("keeps interruptions distinct from failed and cancelled outcomes", () => {
+    const interrupted = applyRunFailure(run, { ...event, event_type: "run.interrupted",
+      data: { error_code: "core_interrupted" } });
+    expect(interrupted.status).toBe("interrupted");
+    expect(interrupted.draft?.content).toBe("Partial output");
+  });
+
   it("does not apply a different run's terminal event", () => {
     expect(applyRunFailure(run, { ...event, run_id: "other" })).toBe(run);
   });

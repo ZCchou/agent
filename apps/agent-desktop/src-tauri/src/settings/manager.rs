@@ -1183,7 +1183,7 @@ impl SettingsManager {
                     Self::migrate_capability_contract(&mut settings);
                     self.repository.save(&settings)?;
                 }
-                if settings.schema_version == 18 {
+                if matches!(settings.schema_version, 18 | 19) {
                     settings.schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
                     self.repository.save(&settings)?;
                 }
@@ -1596,6 +1596,7 @@ impl SettingsManager {
             || !(1..=6).contains(&settings.routing.max_model_calls_per_message)
             || settings.routing.max_specialist_steps > 2
             || !(30..=180).contains(&settings.routing.intent_timeout_seconds)
+            || !settings.routing.execution_wait.is_valid()
             || [
                 settings.routing.main_model_idle_seconds,
                 settings.routing.auxiliary_model_idle_seconds,
@@ -1726,6 +1727,35 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_wait_policy_migrates_and_validates_without_losing_legacy_timeout() {
+        let original = AppSettings {
+            schema_version: 19,
+            ..AppSettings::default()
+        };
+        let manager =
+            SettingsManager::new(Arc::new(MemorySettingsRepository::with_settings(original)));
+        let loaded = manager.get_settings().unwrap();
+        let value = serde_json::to_value(&loaded.routing).unwrap();
+        assert_eq!(value["execution_wait"]["mode"], "adaptive");
+        assert!(value["execution_wait"]["max_total_seconds"].is_null());
+        assert_eq!(value["execution_wait"]["max_auto_recoveries"], 2);
+        assert_eq!(value["intent_timeout_seconds"], 90);
+        for (field, invalid) in [
+            ("no_progress_probe_seconds", serde_json::json!(59)),
+            ("long_running_notice_seconds", serde_json::json!(3601)),
+            ("max_total_seconds", serde_json::json!(59)),
+            ("max_auto_recoveries", serde_json::json!(3)),
+            ("mode", serde_json::json!("unknown")),
+        ] {
+            let mut changed = value.clone();
+            changed["execution_wait"][field] = invalid;
+            assert!(manager
+                .update_routing_preferences(serde_json::from_value(changed).unwrap())
+                .is_err());
+        }
+    }
+
+    #[test]
     fn intent_timeout_and_residency_defaults_migrate_and_validate() {
         let original = AppSettings {
             schema_version: 18,
@@ -1734,7 +1764,7 @@ mod tests {
         let manager =
             SettingsManager::new(Arc::new(MemorySettingsRepository::with_settings(original)));
         let loaded = manager.get_settings().unwrap();
-        assert_eq!(loaded.schema_version, 19);
+        assert_eq!(loaded.schema_version, 20);
         let value = serde_json::to_value(&loaded.routing).unwrap();
         assert_eq!(value["intent_timeout_seconds"], 90);
         assert_eq!(value["main_model_idle_seconds"], 1800);

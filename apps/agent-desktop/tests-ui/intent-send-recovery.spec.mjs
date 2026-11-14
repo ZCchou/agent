@@ -12,10 +12,11 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
     const listeners = new Map();
     window.managedReady = false;
     window.emitIntentRun = (event_type, data) => {
-      const handler = listeners.get('model-run-event');
-      window[`_${handler}`]({ event: 'model-run-event', id: 1, payload: {
-        run_id: 'recovered-run', event_type, data, timestamp: '2026-11-14T00:00:00Z',
-      } });
+      for (const handler of listeners.get('model-run-event') ?? []) {
+        window[`_${handler}`]({ event: 'model-run-event', id: 1, payload: {
+          run_id: 'recovered-run', event_type, data, timestamp: '2026-11-14T00:00:00Z',
+        } });
+      }
     };
     window.completeIntent = (status = 'completed') => {
       const task = window.intentTasks.at(-1);
@@ -30,7 +31,10 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
       Object.assign(task, { status: "completed", result: accepted });
     };
     window.__TAURI_INTERNALS__.invoke = async (command, args) => {
-      if (command === 'plugin:event|listen') listeners.set(args.event, args.handler);
+      if (command === 'plugin:event|listen') {
+        const handlers = listeners.get(args.event) ?? new Set();
+        handlers.add(args.handler); listeners.set(args.event, handlers);
+      }
       if (managed && command === 'get_app_settings') {
         const settings = structuredClone(await invoke(command, args));
         settings.models.providers = [{ id: 'managed:status-model', name: 'Fixture local model', kind: 'openai_compatible', enabled: true,
@@ -80,6 +84,57 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
   await expect(editor).toBeEnabled();
   return editor;
 }
+
+test('adaptive execution keeps progress visible across old deadlines and exposes recovery controls', async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  await page.evaluate(() => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    window.executionControls = [];
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === 'execution_request') {
+        if (args.action !== 'status') {
+          window.executionControls.push(structuredClone(args));
+          window.executionRoot.revision += 1;
+          window.executionRoot.sequence += 1;
+          window.executionRoot.status = args.action === 'cancel' ? 'cancelled' : 'running';
+          if (args.action === 'cancel') Object.assign(window.intentTasks.at(-1), { status: 'cancelled',
+            error: { code: 'cancelled_by_user', message: 'Cancelled' } });
+        }
+        return { task: structuredClone(window.executionRoot ?? null) };
+      }
+      const result = await invoke(command, args);
+      if (command === 'start_model_run' && result.task) {
+        result.task.execution_task_id = 'execution-root';
+        window.intentTasks.at(-1).execution_task_id = 'execution-root';
+        window.executionRoot = { id: 'execution-root', intent_task_id: result.task.id, run_id: null,
+          revision: 1, attempt: 1, sequence: 1, status: 'running', stage: 'rag_retrieval', auto_recoveries: 0,
+          created_at: 100, updated_at: 500, elapsed_seconds: 400, seconds_since_progress: 2,
+          current_stage: { completed: 18, total: 40, details: { stage: 'reranking', device: 'cpu', model_name: 'Fixture reranker' } } };
+        window.intentTasks.at(-1).remaining_seconds = 0;
+      }
+      return result;
+    };
+  });
+  await send(page, editor);
+  const card = page.getByRole('region', { name: 'Task execution status' });
+  await expect(card).toContainText('Completed 18/40');
+  await expect(card).toContainText('Running for 400 seconds');
+  await expect(card).toContainText('Fixture reranker');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 2,
+    error_code: 'execution_activity_uncertain' }));
+  await expect(card).toContainText('Task needs attention');
+  await card.getByRole('button', { name: 'Continue waiting', exact: true }).click();
+  await expect(card).toContainText('Reranking candidates');
+  await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 4 }));
+  await card.getByRole('button', { name: 'Recover current stage', exact: true }).click();
+  await expect(card).toContainText('Reranking candidates');
+  const controls = await page.evaluate(() => window.executionControls);
+  expect(controls.map(value => value.action)).toEqual(['continue', 'retry']);
+  expect(controls.every(value => value.params.idempotency_key.length > 0)).toBe(true);
+  await card.getByRole('button', { name: 'Cancel task', exact: true }).click();
+  await expect(card).toHaveCount(0);
+});
 
 test('cold local model transitions to intent recognition, clarification and actual run phases', async ({ page }) => {
   const editor = await openRecoveryChat(page, null, true);

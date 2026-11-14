@@ -18,6 +18,7 @@ export interface LocalModelConfiguration {
 }
 export interface LocalModelJob {
   id: string; kind?: string; state?: string; status?: string; progress: number;
+  execution_task_id?: string;
   error?: LocalModelError | string | null;
 }
 export interface LocalModelList { models: LocalModel[]; root: string; storage_migration?: unknown }
@@ -31,6 +32,7 @@ export interface LocalRuntimeCapabilities { devices: unknown[]; runtimes: unknow
 
 export interface LocalModelPreparation {
   preparation_id: string;
+  execution_task_id?: string;
   state: "waiting" | "loading" | "ready" | "failed";
   job?: LocalModelJob;
 }

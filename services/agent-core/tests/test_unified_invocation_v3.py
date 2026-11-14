@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -183,6 +184,7 @@ def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed()
     async def scenario() -> None:
         service = object.__new__(ChatRunService)
         service.rag_grounding = SimpleNamespace(runs={})
+        service.local_models = SimpleNamespace(observe_activity=lambda _provider_id: nullcontext())
         service.execution_repository = ExecutionRepositoryStub()
         service.repository = SimpleNamespace(
             bind_attempt_invocation_spec=lambda *_args: None,
@@ -209,7 +211,7 @@ def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed()
                     "id": "step", "provider_profile_id": "provider", "model_id": "model",
                     "protocol_id": "openai_responses",
                 },
-                {"id": "attempt", "attempt_number": 1}, object(),
+                {"id": "attempt", "attempt_number": 1}, SimpleNamespace(profile=service.profiles['provider']),
                 [{"role": "user", "content": "hello"}], max_output_tokens=32,
             )
         assert denied.value.code == "provider_empty_output"

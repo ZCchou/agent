@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RoutingPreferences } from "../../types/settings";
-import { idleMinutes, intentTimeout } from "./routingDurations";
+import { idleMinutes } from "./routingDurations";
+import { ExecutionWaitSettings } from "./ExecutionWaitSettings";
 
 function ResidenceInput({ seconds, label, onChange }: { seconds: number; label: string; onChange(seconds: number): Promise<void> }) {
   const { t } = useTranslation("common");
@@ -35,17 +36,10 @@ export function RoutingDurationSettings({ value, onChange }: {
   value: RoutingPreferences; onChange(next: Partial<RoutingPreferences>): Promise<void>;
 }) {
   const { t } = useTranslation("common");
-  const timeout = value.intent_timeout_seconds ?? 90;
-  const [input, setInput] = useState(String(timeout));
-  useEffect(() => { setInput(String(timeout)); }, [timeout]);
   return <>
-    <label><span>{t("routingDuration.timeout")}</span><input type="number" min={30} max={180} step={1} value={input}
-      onChange={(event) => setInput(event.target.value)} onBlur={() => {
-        const seconds = intentTimeout(input);
-        if (seconds === null) { setInput(String(timeout)); return; }
-        void onChange({ intent_timeout_seconds: seconds });
-      }} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
-      <small>{t("routingDuration.budget", { seconds: 3 * timeout })}</small></label>
+    <ExecutionWaitSettings value={value.execution_wait} onChange={(execution_wait) => onChange({ execution_wait })} />
+    <details><summary>{t("executionWait.legacyTitle")}</summary>
+      <p>{t("executionWait.legacy", { seconds: value.intent_timeout_seconds ?? 90 })}</p></details>
     <ResidenceInput seconds={value.main_model_idle_seconds ?? 1800} label={t("routingDuration.main")}
       onChange={(seconds) => onChange({ main_model_idle_seconds: seconds })} />
     <ResidenceInput seconds={value.auxiliary_model_idle_seconds ?? 1800} label={t("routingDuration.auxiliary")}

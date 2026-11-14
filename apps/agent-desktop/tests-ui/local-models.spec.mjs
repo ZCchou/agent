@@ -115,6 +115,37 @@ async function importModel(page) {
   await page.getByRole("button", { name: "导入所选模型" }).click();
   await expect(page.getByRole("heading", { name: "Fixture GGUF", exact: true })).toBeVisible();
 }
+
+test("standalone loading exposes its saved recovery task in model settings", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    window.__loadRecoveryActions = [];
+    const task = { id: 'load-execution', revision: 0, sequence: 1, attempt: 1,
+      run_id: 'local_model:load-job', status: 'waiting_recovery', stage: 'main_model_loading',
+      auto_recoveries: 2, elapsed_seconds: 400, can_retry: true, can_continue: false,
+      current_stage: { details: { model_name: 'Fixture GGUF', device: 'cpu' } } };
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === 'local_model_request' && args.action === 'job.list') return { jobs: [{
+        id: 'load-job', kind: 'runtime.load', status: 'waiting_recovery', progress: 0,
+        execution_task_id: task.id }] };
+      if (command === 'execution_request') {
+        if (args.action !== 'status') {
+          window.__loadRecoveryActions.push(args.action);
+          Object.assign(task, { status: 'running', revision: 1, sequence: 2 });
+        }
+        return { task: structuredClone(task) };
+      }
+      return original(command, args);
+    };
+  });
+  const card = page.locator('.execution-task-card');
+  await expect(card).toContainText('Fixture GGUF');
+  await expect(card).toContainText('CPU');
+  await card.getByRole('button', { name: 'Recover current stage', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__loadRecoveryActions)).toEqual(['retry']);
+  await expect(card.getByRole('button', { name: 'Recover current stage', exact: true })).toHaveCount(0);
+});
 test("maximum-context shortcut fills declared maximum and saves through the normal form", async ({ page }) => {
   await setup(page); await importModel(page);
   const input = page.getByRole('spinbutton', { name: '上下文', exact: true });

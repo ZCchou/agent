@@ -21,7 +21,7 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }
   const revision = task ? `${task.id}-${task.revision}` : "";
   const clarification = task?.status === "waiting_user" && task.clarification;
   const notice = Boolean(task && (clarification || task.status === "failed" || task.status === "interrupted" || (task.status === "waiting_user" && !task.clarification)
-    || (task.status === "identifying" && task.remaining_seconds <= 15)));
+    || (task.status === "identifying" && !task.execution_task_id && task.remaining_seconds <= 15)));
   const open = enabled && notice && hidden !== revision;
 
   useEffect(() => {
@@ -71,7 +71,7 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }
           <label style={{ display: "grid", gap: 4 }}>{t("intent.freeText")}<textarea required value={answers[question.id] ?? ""}
             onChange={(event) => setAnswers((value) => ({ ...value, [question.id]: event.target.value }))} /></label>
         </fieldset>)}
-      </form> : <p>{t("intent.timing", { elapsed: Math.ceil(task.elapsed_seconds), attempts: task.attempts,
+      </form> : <p>{t(task.execution_task_id ? "intent.adaptiveTiming" : "intent.timing", { elapsed: Math.ceil(task.elapsed_seconds), attempts: task.attempts,
         remaining: Math.max(0, Math.ceil(task.remaining_seconds)), budget: Math.max(0, Math.ceil(task.budget_remaining_seconds)) })}</p>}
       {task.error ? <details open><summary>{t("intent.technicalError")}</summary><p style={{ overflowWrap: "anywhere" }}>{task.error.code} — {task.error.message}</p></details> : null}
       {error ? <p role="alert">{error}</p> : null}

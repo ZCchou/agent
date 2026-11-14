@@ -1,5 +1,13 @@
 import rag from "./rag";
 const common = {
+  executionWait: {
+    title: "运行与等待", mode: "等待策略", adaptive: "智能等待", custom: "自定义等待上限",
+    notice: "长任务提醒（秒）", probe: "无进展诊断阈值（秒）", unlimited: "总等待时长不限",
+    total: "总等待上限（分钟）", recoveries: "连续失败自动恢复次数（0～2）",
+    hint: "任务持续推进时继续执行。确认异常后自动恢复，仍需处理时保留进度并提醒。设置作用于新任务。",
+    legacyTitle: "升级前的等待设置", legacy: "已保存的意图识别时限为 {{seconds}} 秒，可作为自定义等待的参考。",
+    saveError: "等待设置保存失败，请重试。",
+  },
   routingDuration: { timeout: "意图识别超时（秒）", budget: "最多尝试 3 次，总识别预算 {{seconds}} 秒。", main: "主模型空闲驻留", auxiliary: "辅助模型空闲驻留", manual: "手动卸载", custom: "自定义", customMinutes: "自定义分钟数（1–1440）", minutes: "{{count}} 分钟", residenceHint: "修改立即生效，并重新计算空闲时间。使用中或已固定的模型保持加载；辅助模型可能因内存压力提前回收。" },
   rag,
   buttonAudit: {

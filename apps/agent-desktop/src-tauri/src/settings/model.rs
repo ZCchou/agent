@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 ///
 /// 后续设置结构发生不兼容变化时，应通过版本迁移处理，
 /// 而不是让新代码直接猜测旧数据结构。
-pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 19;
+pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 20;
 
 pub const DEFAULT_SIDEBAR_WIDTH_PX: u16 = 280;
 
@@ -984,6 +984,40 @@ impl Default for WebSearchSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExecutionWaitPolicy {
+    pub mode: String,
+    pub long_running_notice_seconds: u32,
+    pub no_progress_probe_seconds: u32,
+    pub max_total_seconds: Option<u32>,
+    pub max_auto_recoveries: u8,
+}
+
+impl Default for ExecutionWaitPolicy {
+    fn default() -> Self {
+        Self {
+            mode: "adaptive".to_string(),
+            long_running_notice_seconds: 90,
+            no_progress_probe_seconds: 300,
+            max_total_seconds: None,
+            max_auto_recoveries: 2,
+        }
+    }
+}
+
+impl ExecutionWaitPolicy {
+    pub fn is_valid(&self) -> bool {
+        matches!(self.mode.as_str(), "adaptive" | "custom")
+            && (30..=3600).contains(&self.long_running_notice_seconds)
+            && (60..=3600).contains(&self.no_progress_probe_seconds)
+            && self
+                .max_total_seconds
+                .is_none_or(|value| (60..=86400).contains(&value))
+            && self.max_auto_recoveries <= 2
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingPreferences {
     #[serde(default = "automatic_conversation_mode")]
     pub new_conversation_mode: String,
@@ -1003,6 +1037,8 @@ pub struct RoutingPreferences {
     pub main_model_idle_seconds: u32,
     #[serde(default = "default_model_idle")]
     pub auxiliary_model_idle_seconds: u32,
+    #[serde(default)]
+    pub execution_wait: ExecutionWaitPolicy,
 }
 
 const fn default_intent_timeout() -> u32 {
@@ -1040,6 +1076,7 @@ impl Default for RoutingPreferences {
             intent_timeout_seconds: default_intent_timeout(),
             main_model_idle_seconds: default_model_idle(),
             auxiliary_model_idle_seconds: default_model_idle(),
+            execution_wait: ExecutionWaitPolicy::default(),
         }
     }
 }

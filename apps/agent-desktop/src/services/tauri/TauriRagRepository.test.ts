@@ -3,7 +3,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { TauriRagRepository } from "./TauriRagRepository";
 
-beforeEach(() => vi.mocked(invoke).mockReset());
+beforeEach(() => { vi.mocked(invoke).mockReset(); });
 it("passes OCR options and a single target project with the native document grant", async () => {
   vi.mocked(invoke).mockResolvedValue({});
   const repository = new TauriRagRepository();
@@ -55,7 +55,13 @@ it("revokes cancelled selections without forwarding filesystem parameters", asyn
   expect(invoke).toHaveBeenCalledExactlyOnceWith("rag_revoke_paths", { grantId: "cancelled" });
 });
 it("supports model, library, document, task and retrieval operations", async () => {
-  vi.mocked(invoke).mockResolvedValue({});
+  vi.mocked(invoke).mockImplementation(async (_command, args) => {
+    const action = (args as { action: string }).action;
+    if (action === 'search.start') return { task: { id: 'search-root', status: 'running' } };
+    if (action === 'search.status') return { task: { id: 'search-root', status: 'completed' },
+      result: { evidence: [], generation: 1, index_ids: [] } };
+    return {};
+  });
   const repository = new TauriRagRepository();
   const selection = { grant_id: "root", paths: ["C:/models"] };
   const draft = { name: "Library", embedding_model_id: "embedding", reranker_model_id: "ranking" };
@@ -75,6 +81,44 @@ it("supports model, library, document, task and retrieval operations", async () 
   await repository.buildIndex("library");
   await repository.search("project", "query");
   const calls = vi.mocked(invoke).mock.calls.map((call) => call[1] as { action: string; params: object });
-  expect(calls.map((call) => call.action)).toEqual(["model.list", "model.root", "model.device", "model.probe", "model.remove", "library.list", "library.create", "library.update", "library.remove", "document.paste", "document.preview", "document.withdraw", "job.list", "index.build", "search"]);
+  expect(calls.map((call) => call.action)).toEqual(["model.list", "model.root", "model.device", "model.probe", "model.remove", "library.list", "library.create", "library.update", "library.remove", "document.paste", "document.preview", "document.withdraw", "job.list", "index.build", "search.start", "search.status"]);
   expect(calls[10].params).toEqual({ version_id: "version", offset: 200, limit: 200 });
+});
+
+it("returns a standalone task identity before waiting for search results", async () => {
+  vi.mocked(invoke).mockReset().mockImplementation(async (_command, args) => {
+    if ((args as { action: string }).action === 'search.start') return { task: { id: 'library-search', status: 'running' } };
+    return { task: { id: 'library-search', status: 'completed' }, result: { evidence: [], generation: 1, index_ids: [] } };
+  });
+  const identities: string[] = [];
+  await new TauriRagRepository().searchLibrary('library', '振动', { onTaskId: (id) => identities.push(id) });
+  expect(identities).toEqual(['library-search']);
+  expect(vi.mocked(invoke).mock.calls[0][1]).toMatchObject({ action: 'search.start',
+    params: { search_action: 'library.search', library_id: 'library', query: '振动', idempotency_key: expect.any(String) } });
+});
+
+it("reuses the original request key after uncertain search admission", async () => {
+  vi.mocked(invoke).mockReset().mockRejectedValueOnce(new Error('core_request_timeout'))
+    .mockResolvedValueOnce({ task: { id: 'recovered-search', status: 'running' } })
+    .mockResolvedValueOnce({ task: { id: 'recovered-search', status: 'completed' },
+      result: { evidence: [], generation: 1, index_ids: [] } });
+  await new TauriRagRepository().searchLibrary('uncertain-library', 'query');
+  const calls = vi.mocked(invoke).mock.calls;
+  expect(calls[0][1]).toEqual(calls[1][1]);
+  expect(calls[2][1]).toEqual({ action: 'search.status', params: { execution_task_id: 'recovered-search' } });
+});
+
+it("surfaces invalidated saved results and starts a fresh request on the next search", async () => {
+  vi.mocked(invoke).mockReset().mockResolvedValueOnce({ task: { id: 'stale-search', status: 'completed' } })
+    .mockResolvedValueOnce({ task: { id: 'stale-search', status: 'completed' }, result: null,
+      error: { code: 'rag_generation_changed', message: '资料范围已变化' } })
+    .mockResolvedValueOnce({ task: { id: 'new-search', status: 'running' } })
+    .mockResolvedValueOnce({ task: { id: 'new-search', status: 'completed' },
+      result: { evidence: [], generation: 2, index_ids: [] } });
+  const repository = new TauriRagRepository();
+  await expect(repository.searchLibrary('stale-library', 'query')).rejects.toThrow('rag_generation_changed');
+  await expect(repository.searchLibrary('stale-library', 'query')).resolves.toMatchObject({ generation: 2 });
+  const calls = vi.mocked(invoke).mock.calls;
+  expect((calls[0][1] as { params: { idempotency_key: string } }).params.idempotency_key)
+    .not.toBe((calls[2][1] as { params: { idempotency_key: string } }).params.idempotency_key);
 });

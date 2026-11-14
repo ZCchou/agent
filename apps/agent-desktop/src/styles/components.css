@@ -2090,3 +2090,12 @@ label.top-select > svg:last-child {
 .local-model-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .local-model-job { padding: 12px 0; }
 .local-model-job progress { margin: 0 12px; }
+
+.execution-task-card { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: 12px; min-width: 0; overflow-wrap: anywhere; }
+.execution-task-card__heading, .execution-task-card__progress, .execution-task-card__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.execution-task-card__progress { margin: 8px 0; font-size: 13px; color: var(--text-secondary); }
+.execution-task-card__actions { margin-top: 10px; }
+.execution-task-card details { max-width: 100%; }
+.execution-wait-settings { display: grid; gap: 12px; margin: 12px 0; padding: 14px; border: 1px solid var(--border-subtle); border-radius: 10px; min-width: 0; }
+.execution-wait-settings label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.execution-wait-settings input[type="number"] { width: 110px; }

@@ -270,7 +270,7 @@ class RagRepository(WorkspaceRepository):
             connection.execute("UPDATE rag_versions SET status='withdrawn',withdrawn_at=? WHERE id IN (SELECT value FROM json_each(?))", (_utc_now(), json.dumps(versions)))
             self.bump_library(connection, version['library_id'], revoke_projects=False)
             connection.execute('''UPDATE rag_projects SET generation=generation+1 WHERE project_id IN (SELECT b.project_id FROM rag_bindings b WHERE b.library_id=? AND b.enabled=1 AND EXISTS (SELECT 1 FROM rag_index_chunks ic JOIN rag_chunks c ON c.id=ic.chunk_id WHERE ic.index_id=b.index_id AND c.version_id IN (SELECT value FROM json_each(?))))''', (version['library_id'], json.dumps(versions)))
-        return {'withdrawn': True, 'version_id': version_id}
+        return {'withdrawn': True, 'version_id': version_id, 'version_ids': versions}
 
     def new_job(self, kind, library_id, *, parent_id=None, filename='', payload=None, request_key=None, attempt=1):
         job_id, now = identifier(), _utc_now()

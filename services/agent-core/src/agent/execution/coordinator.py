@@ -71,6 +71,7 @@ class ExecutionCoordinator:
             "files", "tools", "web", "web_evidence", "reasoning",
             "task_kinds", "explanation_code", "follow_up", "rag_requirement",
             "read_attachment_ids", "read_requests", "task_scope", "retrieval_scope", "allow_simulated_data", "clarification",
+            "document_workflow",
         }
         if set(value) - allowed_fields:
             raise ValueError("routing intent contains unsupported fields")
@@ -119,11 +120,13 @@ class ExecutionCoordinator:
         scope = value.get('task_scope', 'unspecified')
         retrieval_scope = value.get('retrieval_scope', 'broad')
         simulated = value.get('allow_simulated_data', False)
+        document_workflow = value.get('document_workflow', 'none')
         if (not isinstance(read_ids, list) or len(read_ids) > 8
                 or any(not isinstance(identity, str) or not 1 <= len(identity) <= 200 for identity in read_ids)
                 or len(set(read_ids)) != len(read_ids)
                 or scope not in {'unspecified', 'full', 'section'}
-                or retrieval_scope not in {'focused', 'broad'} or type(simulated) is not bool):
+                or retrieval_scope not in {'focused', 'broad'} or type(simulated) is not bool
+                or document_workflow not in {'none', 'review_nonempty'}):
             raise ValueError('routing intent attachment plan is invalid')
         clarification = value.get('clarification')
         if clarification is not None:
@@ -147,6 +150,7 @@ class ExecutionCoordinator:
             'read_attachment_ids': list(dict.fromkeys([*read_ids, *(item['attachment_id'] for item in read_requests)])),
             'read_requests': read_requests, 'task_scope': scope, 'retrieval_scope': retrieval_scope,
             'allow_simulated_data': simulated, 'clarification': clarification,
+            'document_workflow': document_workflow,
         }
 
     @staticmethod

@@ -23,6 +23,7 @@ from agent.storage import CoreDataError
 from agent.gpu_resources import system_memory
 from agent.rag.model_profiles import PROFILES, validate_onnx_package
 from agent.rag.worker_client import WorkerClient
+from agent.execution.execution_wait import current_activity, current_task_id, current_monitor, Diagnostic
 
 _UNSAFE = {".bin", ".pt", ".pth", ".pkl", ".pickle", ".py", ".pyc", ".pyo", ".exe", ".dll", ".so", ".bat", ".cmd", ".ps1", ".sh"}
 _DTYPES = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1, "I16": 2, "U16": 2, "F16": 2, "BF16": 2, "I32": 4, "U32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
@@ -174,6 +175,7 @@ class ModelStore:
         self._model_peaks = {}
         self._rerank_partial = OrderedDict()
         self.gpu_resources = None
+        self.execution_monitor = None
         self._state = _json(self._state_path) if self._state_path.exists() else {"schema_version": 1, "root": str(self.data_dir / "models"), "models": []}
         if self._state.get("schema_version") != 1:
             raise CoreDataError("rag_model_error", "Unsupported local model registry version")
@@ -192,7 +194,7 @@ class ModelStore:
             if getattr(sys, "frozen", False):
                 base = Path(sys.executable).resolve().parent / "rag-runtime"
                 metadata = _json(base / "runtime.json")
-                if metadata.get("schema_version") != 1 or metadata.get("protocol_version") != 1 or _linked(base):
+                if metadata.get("schema_version") != 1 or metadata.get("protocol_version") != 2 or _linked(base):
                     raise ValueError("Invalid inference runtime manifest")
                 executable = _safe_relative(base, metadata["executable"])
                 if not isinstance(metadata.get("files"), dict) or metadata["executable"] not in metadata["files"]:
@@ -201,11 +203,11 @@ class ModelStore:
             else:
                 command = [sys.executable, "-m", "agent.rag.worker"]
             libraries = {name: importlib.util.find_spec(name) is not None for name in ("torch", "transformers", "safetensors", "onnx", "onnxruntime")}
-            return {"available": True, "command": command[0], "version": 1, "libraries": libraries,
+            return {"available": True, "command": command[0], "version": 2, "libraries": libraries,
                     "cuda_requires_probe": True, "source_runtime": not getattr(sys, "frozen", False),
                     "integrity_check": "on_load"}
         except (CoreDataError, OSError, ValueError, KeyError, TypeError) as exc:
-            return {"available": False, "version": 1, "error": str(exc)}
+            return {"available": False, "version": 2, "error": str(exc)}
 
     def inspect(self, path, profile=None):
         root = Path(path).absolute()
@@ -434,7 +436,7 @@ class ModelStore:
         manifest_path = base / "runtime.json"
         try:
             metadata = _json(manifest_path)
-            if metadata.get("schema_version") != 1 or metadata.get("protocol_version") != 1:
+            if metadata.get("schema_version") != 1 or metadata.get("protocol_version") != 2:
                 raise ValueError("Unsupported inference runtime manifest version")
             executable = _safe_relative(base, metadata["executable"])
             hashes = metadata["files"]
@@ -576,7 +578,36 @@ class ModelStore:
             raise CoreDataError('rag_resource_exhausted', '辅助检索模型可用内存不足。',
                                 {'device': 'cpu', 'resource': 'cpu_memory', 'reserve_bytes': 2 * 1024**3})
 
-    async def _request(self, model_id, action, *, progress=None, partial=None, **params):
+    async def _request(self, model_id, action, **params):
+        monitor = current_monitor.get() or self.execution_monitor
+        if current_activity.get() is not None or monitor is None:
+            return await self._request_once(model_id, action, **params)
+        task_id = current_task_id.get()
+        owned = task_id is None
+        if owned:
+            task_id = monitor.start_task(run_id='rag-model-' + uuid.uuid4().hex)['id']
+        async def operation(activity):
+            return await self._request_once(model_id, action, **params)
+        try:
+            result = await monitor.execute_stage(task_id, 'rag_' + action, operation,
+                safe_to_retry=True, diagnose=self.diagnose,
+                recoverable=lambda error: isinstance(error, CoreDataError) and error.code == 'rag_worker_crash')
+        except BaseException as error:
+            if owned:
+                monitor.finish_task(task_id, 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
+                                    error_code=getattr(error, 'code', None))
+            raise
+        if owned:
+            monitor.finish_task(task_id)
+        return result
+
+    def diagnose(self, activity):
+        worker = getattr(activity, '_rag_worker', None)
+        if worker is None:
+            return Diagnostic(activity_observed=None)
+        return worker.diagnose()
+
+    async def _request_once(self, model_id, action, *, progress=None, partial=None, checkpoint_identity=None, **params):
         if self._closed:
             raise CoreDataError("rag_model_error", "Local model store is closed")
         with self._lock:
@@ -585,12 +616,19 @@ class ModelStore:
         if action == "embed" and record["role"] != "embedding" or action == "rerank" and record["role"] != "reranker":
             raise CoreDataError("rag_model_error", "Selected local model has the wrong role")
         device = record["device"]
+        activity = current_activity.get()
+        model_details = {'model_role': record['role'], 'model_name': record['name'], 'device': device}
+        if activity:
+            activity.queue(True, **model_details)
         key = (record['id'], record['digest'], device)
         def is_resident():
             worker = self._resident_workers.get(key)
             return worker is not None and worker.process is not None and worker.process.returncode is None
         guard = self.gpu_resources.auxiliary(record, resident=is_resident) if self.gpu_resources else nullcontext()
         async with guard, self._device_locks[device]:
+            if activity:
+                activity.queue(False, **model_details)
+                activity.progress(stage='integrity_verification', **model_details)
             if self._closed:
                 raise CoreDataError("rag_model_error", "Local model store is closed")
             identity = (str(root), record["id"], record["digest"])
@@ -625,20 +663,37 @@ class ModelStore:
                     worker.model_root = str(root)
                     self._resident_workers[key] = worker
                 self._resident_workers.move_to_end(key)
-                self._touch_cached(key)
                 self._workers[device] = worker
                 self._loaded_models[device] = (worker, identity)
+                if activity:
+                    activity._rag_worker = worker
+                    activity.progress(stage='worker_starting' if force else 'model_ready', **model_details)
                 request_params = {"path": str(path), "profile": record["profile"], "backend": record["backend"],
-                                  "device": device, "digest": record["digest"], **params}
+                                  "device": device, "digest": record["digest"], 'protocol_version': 2, **params}
+                if activity:
+                    request_params['execution_identity'] = {'task_id': activity.task_id,
+                        'revision': activity.revision, 'attempt': activity.attempt}
                 if action == 'probe':
                     result = await worker.request(action, request_params)
                 else:
                     texts = params['texts']
                     batch_size = 2 if record['backend'] == 'onnx' else (4 if action == 'rerank' else 8)
                     checkpoint = partial if partial is not None else {}
+                    checkpoint_key = None
+                    if activity and checkpoint_identity is not None:
+                        checkpoint_key = 'rag_scores_' + hashlib.sha256(
+                            json.dumps(checkpoint_identity, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+                        saved = activity.load_checkpoint(checkpoint_key, checkpoint_identity)
+                        if saved is not None:
+                            if (not isinstance(saved, dict) or any(
+                                not key.isdigit() or not 0 <= int(key) < len(texts)
+                                or type(value) not in (int, float) or not math.isfinite(value)
+                                or not 0 <= value <= 1 for key, value in saved.items())):
+                                raise CoreDataError('rag_model_error', 'Stored reranker checkpoint is invalid')
+                            checkpoint.update((int(key), value) for key, value in saved.items())
                     pending_indices = [index for index in range(len(texts)) if index not in checkpoint]
                     completed = len(checkpoint)
-                    model_progress = {'model_role': record['role'], 'model_name': record['name']}
+                    model_progress = model_details
                     if progress:
                         inference_stage = 'reranking' if action == 'rerank' else 'embedding'
                         event = {'stage': inference_stage if is_resident() else 'model_loading',
@@ -647,14 +702,26 @@ class ModelStore:
                         if inspect.isawaitable(pending):
                             await pending
                     async def worker_progress(event):
+                        if event.get('kind') == 'heartbeat':
+                            if activity:
+                                activity.heartbeat(worker_sequence=event.get('sequence'), **model_details)
+                                activity.resource(active=event.get('resource_active'),
+                                    cpu_seconds=event.get('cpu_seconds'),
+                                    peak_memory_bytes=event.get('peak_memory_bytes'), **model_details)
+                            return
+                        if activity:
+                            activity.progress(completed, len(texts), **{key: value for key, value in event.items()
+                                if key not in {'completed', 'total'}}, **model_details)
                         if progress:
                             pending = progress({**event, **model_progress, 'completed': completed, 'total': len(texts)})
                             if inspect.isawaitable(pending):
                                 await pending
                     if action == 'rerank' and len(pending_indices) > 1:
+                        if activity:
+                            activity.progress(completed, len(texts), stage='tokenization', **model_details)
                         lengths = await worker.request('rerank_lengths', {
                             **request_params, 'texts': [texts[index] for index in pending_indices],
-                            'report_progress': progress is not None}, progress=worker_progress if progress else None)
+                            'report_progress': True}, progress=worker_progress)
                         if (not isinstance(lengths, list) or len(lengths) != len(pending_indices)
                                 or any(type(length) is not int or length < 0 for length in lengths)):
                             raise CoreDataError('rag_model_error', 'Inference returned invalid token lengths')
@@ -664,8 +731,7 @@ class ModelStore:
                         batch = [texts[index] for index in batch_indices]
                         try:
                             batch_result = await worker.request(action, {**request_params, 'texts': batch,
-                                                                         'report_progress': progress is not None},
-                                                                progress=worker_progress if progress else None)
+                                                                         'report_progress': True}, progress=worker_progress)
                         except CoreDataError as exc:
                             if exc.code != 'rag_resource_exhausted' or batch_size == 1:
                                 raise
@@ -678,8 +744,14 @@ class ModelStore:
                                                       or not 0 <= value <= 1 for value in batch_result):
                             raise CoreDataError('rag_model_error', 'Inference returned invalid reranker scores')
                         checkpoint.update(zip(batch_indices, batch_result))
+                        if activity and checkpoint_key is not None:
+                            if not activity.checkpoint(checkpoint_key, checkpoint_identity,
+                                                       {str(key): value for key, value in checkpoint.items()}):
+                                raise CoreDataError('execution_revision_conflict', 'Reranker result belongs to a superseded attempt')
                         del pending_indices[:len(batch_indices)]
                         completed = len(checkpoint)
+                        if activity:
+                            activity.progress(completed, len(texts), stage='result_validation', **model_details)
                         if progress:
                             pending = progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
                                                 'completed': completed, 'total': len(texts)})
@@ -692,7 +764,6 @@ class ModelStore:
                 if self._resident_workers.get(key) is not worker:
                     raise CoreDataError('rag_model_changed', 'The selected model changed during inference.')
                 self._loaded_models[device] = (worker, identity)
-                self._touch_cached(key)
                 return result
             except asyncio.CancelledError:
                 await self._discard_worker(key)
@@ -700,6 +771,9 @@ class ModelStore:
             except Exception:
                 await self._discard_worker(key)
                 raise
+            finally:
+                if key in self._resident_workers:
+                    self._touch_cached(key)
 
     async def release_cuda(self):
         async with self._device_locks["cuda"]:
@@ -729,7 +803,8 @@ class ModelStore:
             raise CoreDataError("rag_model_error", "Inference returned invalid embedding dimensions or values")
         return result
 
-    async def rerank(self, model_id, query, texts, *, token_budget=2048, progress=None, cache_key=None, timeout=90):
+    async def rerank(self, model_id, query, texts, *, token_budget=2048, progress=None, cache_key=None,
+                     checkpoint_context=None, timeout=None):
         if not isinstance(query, str) or not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
             raise CoreDataError("rag_model_error", "Reranking requires a query and list of strings")
         partial = {}
@@ -737,14 +812,19 @@ class ModelStore:
             async with asyncio.timeout(timeout):
                 record = dict(self._record(model_id))
                 fingerprint = await asyncio.to_thread(self._stat_identity, self.root / model_id)
-                identity = (str(self.root), model_id, record['digest'], record['device'], fingerprint,
-                            query, tuple(texts), token_budget, cache_key)
+                checkpoint_identity = {'root': str(self.root), 'model_id': model_id, 'digest': record['digest'],
+                    'device': record['device'], 'profile': record['profile'], 'backend': record['backend'],
+                    'fingerprint': fingerprint, 'query': query, 'token_budget': token_budget, 'context': cache_key,
+                    'sources': checkpoint_context,
+                    'candidates': [hashlib.sha256(text.encode('utf-8')).hexdigest() for text in texts]}
+                identity = json.dumps(checkpoint_identity, sort_keys=True, ensure_ascii=True)
                 partial = self._rerank_partial.setdefault(identity, {})
                 self._rerank_partial.move_to_end(identity)
                 while len(self._rerank_partial) > 8:
                     self._rerank_partial.popitem(last=False)
                 result = await self._request(model_id, 'rerank', query=query, texts=texts,
-                                             token_budget=token_budget, progress=progress, partial=partial)
+                                             token_budget=token_budget, progress=progress, partial=partial,
+                                             checkpoint_identity=checkpoint_identity)
         except TimeoutError as exc:
             raise CoreDataError('rag_rerank_timeout', '辅助检索重排超过时间预算，可重试继续。',
                                 {'completed': len(partial), 'total': len(texts), 'timeout_seconds': timeout,

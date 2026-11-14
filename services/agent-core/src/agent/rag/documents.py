@@ -340,9 +340,10 @@ def _parse_pdf_document(path, deadline):
     return _chunks(blocks, warnings)
 
 
-def _parse_pdf(path):
-    deadline = time.monotonic() + PDF_PARSE_TIMEOUT
-    if not _PDF_LOCK.acquire(timeout=PDF_PARSE_TIMEOUT):
+def _parse_pdf(path, *, adaptive=False):
+    deadline = float('inf') if adaptive else time.monotonic() + PDF_PARSE_TIMEOUT
+    acquired = _PDF_LOCK.acquire() if adaptive else _PDF_LOCK.acquire(timeout=PDF_PARSE_TIMEOUT)
+    if not acquired:
         raise CoreDataError('rag_document_timeout', 'PDF parsing timed out waiting for the PDF parser.')
     try:
         return _parse_pdf_document(path, deadline)
@@ -379,7 +380,7 @@ def _parse_text_file(path):
     return _chunks(blocks, [])
 
 
-def parse_document(path: Path, max_expanded_bytes=MAX_EXPANDED_BYTES):
+def parse_document(path: Path, max_expanded_bytes=MAX_EXPANDED_BYTES, *, adaptive=False):
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
@@ -395,5 +396,5 @@ def parse_document(path: Path, max_expanded_bytes=MAX_EXPANDED_BYTES):
         from agent.document_parser.office import parse_office_document
         return parse_office_document(path, max_expanded_bytes=max_expanded_bytes)
     if suffix == '.pdf':
-        return _parse_pdf(path)
+        return _parse_pdf(path, adaptive=adaptive)
     return _parse_text_file(path)

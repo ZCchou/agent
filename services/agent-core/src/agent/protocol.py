@@ -11,9 +11,17 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 24
-CORE_VERSION = "0.16.0-preview.4"
-BUILD_ID = "schema31-agent-unified-v1"
+PROTOCOL_VERSION = 25
+CORE_VERSION = "0.16.0-preview.5"
+BUILD_ID = "schema32-agent-unified-v1"
+
+
+def _execution_identity(repository, run):
+    if run is None:
+        return None
+    with repository._connect() as connection:
+        root = connection.execute('SELECT id FROM execution_wait_tasks WHERE run_id=?', (run['id'],)).fetchone()
+    return {**run, 'execution_task_id': root['id']} if root is not None else run
 _LOGGER = logging.getLogger("agent.core")
 
 
@@ -266,11 +274,11 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
                 run = repository.latest_model_run(conversation_id)
             else:
                 raise CoreDataError("invalid_params", "run_id or conversation_id is required.")
-            result = {"run": run}
+            result = {"run": _execution_identity(repository, run)}
         elif message_type == "model.run.find":
-            result = {"run": repository.get_model_run_by_idempotency_key(
+            result = {"run": _execution_identity(repository, repository.get_model_run_by_idempotency_key(
                 _required_string(params, "idempotency_key")
-            )}
+            ))}
         elif message_type == "context.preview":
             result = {"snapshot": ContextRepository(repository).preview(_required_string(params, "run_id"))}
         elif message_type == "context.source.preview":
@@ -386,6 +394,7 @@ def handle_message(message: Any, repository: CoreRepository | None = None) -> di
 
 
 ASYNC_MESSAGE_TYPES = {
+    "execution.request",
     "intent.request",
     "rag.request",
     "local_model.request",
@@ -442,6 +451,8 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
             result = await service.rag.handle(_required_string(params, "action"), params.get("params", {}))
         elif message_type == 'intent.request':
             result = await service.intent_sessions.handle(_required_string(params, 'action'), params.get('params', {}))
+        elif message_type == 'execution.request':
+            result = await service.handle_execution(_required_string(params, 'action'), params.get('params', {}))
         elif message_type == "local_model.request":
             result = await service.handle_local_model(_required_string(params, "action"), params.get("params", {}))
         elif message_type == 'document.artifact.get':

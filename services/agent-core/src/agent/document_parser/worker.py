@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import threading
 
 from agent.document_parser.protocol import (RESULT, RESULT_LIMIT, STATUS_LIMIT, decode_frame, encode_frame,
                                           managed_original, owned_stage, write_result)
@@ -11,6 +12,18 @@ from agent.storage import CoreDataError
 
 def main() -> int:
     request_id = None
+    heartbeat = None
+    stopped = threading.Event()
+    output_lock = threading.Lock()
+
+    def announce():
+        with output_lock:
+            sys.stdout.buffer.write(encode_frame({'request_id': request_id, 'status': 'heartbeat'}))
+            sys.stdout.buffer.flush()
+
+    def keep_alive():
+        while not stopped.wait(5):
+            announce()
     try:
         # Read once before importing native dependencies. No concurrent stdin reader.
         line = sys.stdin.buffer.readline(STATUS_LIMIT + 1)
@@ -30,8 +43,14 @@ def main() -> int:
         result_limit = limits['result_bytes']
         if type(result_limit) is not int or not 0 < result_limit <= RESULT_LIMIT:
             raise ValueError('Invalid result limit')
+        if type(request.get('adaptive_wait', False)) is not bool:
+            raise ValueError('Invalid execution wait mode')
+        if request.get('adaptive_wait'):
+            announce()
+            heartbeat = threading.Thread(target=keep_alive, daemon=True)
+            heartbeat.start()
         from agent.rag.documents import parse_document
-        parsed = parse_document(original)
+        parsed = parse_document(original, adaptive=request.get('adaptive_wait', False))
         write_result(output, request_id, parsed, result_limit)
         status = {'request_id': request_id, 'status': 'complete'}
         code = 0
@@ -42,8 +61,12 @@ def main() -> int:
     except BaseException:
         status = {'request_id': request_id, 'status': 'error', 'code': 'rag_parser_failed'}
         code = 1
-    sys.stdout.buffer.write(encode_frame(status))
-    sys.stdout.buffer.flush()
+    stopped.set()
+    if heartbeat is not None:
+        heartbeat.join()
+    with output_lock:
+        sys.stdout.buffer.write(encode_frame(status))
+        sys.stdout.buffer.flush()
     return code
 
 

@@ -6,9 +6,13 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import re
+import uuid
 
 from agent.rag.worker_client import WorkerClient
 from agent.storage import CoreDataError
+from agent.execution.execution_wait import Diagnostic, current_activity
+from agent.execution.activity import run_stage
 
 
 def verify_runtime(root):
@@ -54,13 +58,42 @@ class OcrClient:
             return {'available': False, 'error': error.code}
 
     async def request(self, action, path, **params):
+        return await run_stage('ocr_' + action, lambda activity: self._request(action, path, **params),
+            safe_to_retry=True, diagnose=lambda activity: self.worker.diagnose(activity) if self.worker else Diagnostic(),
+            recoverable=lambda error: getattr(error, 'code', None) == 'rag_worker_crash')
+
+    async def _request(self, action, path, **params):
         if self.worker is None:
             command = self.command or runtime_command()
             if self.command is None and getattr(sys, 'frozen', False):
                 import asyncio
                 await asyncio.to_thread(verify_runtime, Path(command[0]).parent.parent)
             self.worker = WorkerClient(command, timeout=360, memory_limit=4 * 1024 ** 3)
-        return await self.worker.request(action, {'data_dir': str(self.data_dir), 'path': str(Path(path).resolve()), **params})
+        activity = current_activity.get()
+        payload = {'data_dir': str(self.data_dir), 'path': str(Path(path).resolve()), **params}
+        if activity is not None:
+            payload.update(protocol_version=2, execution_identity={'task_id': activity.task_id,
+                'revision': activity.revision, 'attempt': activity.attempt, 'request_id': uuid.uuid4().hex})
+
+        def progress(frame):
+            if activity is None:
+                return
+            if frame.get('kind') == 'heartbeat':
+                activity.heartbeat(worker='ocr')
+                activity.resource(active=frame.get('resource_active'), cpu_seconds=frame.get('cpu_seconds'))
+            else:
+                activity.progress(**frame)
+
+        try:
+            result = await self.worker.request(action, payload, **({'progress': progress} if activity is not None else {}))
+        except CoreDataError as error:
+            code = error.message.split(':', 1)[0]
+            if error.code == 'rag_model_error' and re.fullmatch(r'ocr_[a-z_]{1,64}', code):
+                raise CoreDataError(code, 'OCR 文档处理失败，请查看识别组件与页面状态。') from error
+            raise
+        if activity is not None:
+            activity.progress(completed=1, total=1, action=action, page=params.get('page'))
+        return result
 
     async def close(self):
         if self.worker:

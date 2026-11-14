@@ -258,7 +258,8 @@ def test_real_preflight_strict_schema_and_counted_unsupported_fallback(tmp_path,
         'reasoning': 'standard', 'task_kinds': ['attachment_extract'], 'explanation_code': 'read',
         'follow_up': 'none', 'rag_requirement': 'not_needed', 'read_attachment_ids': [attachment['id']],
         'read_requests': [{'attachment_id': attachment['id'], 'offset': 0, 'limit': 1, 'physical_page': None, 'section': None}],
-        'task_scope': 'section', 'retrieval_scope': 'focused', 'allow_simulated_data': False, 'clarification': None}
+        'task_scope': 'section', 'retrieval_scope': 'focused', 'allow_simulated_data': False, 'clarification': None,
+        'document_workflow': 'none'}
     def respond(request):
         payload = json.loads(request.content)
         captured.append(payload)

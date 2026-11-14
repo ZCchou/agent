@@ -2,6 +2,7 @@ import type { AttachmentReference, ContextSnapshot, Conversation, ExecutionPlan,
 
 export interface StartModelRunInput {
   intentScope?: string;
+  modelPreparationId?: string;
   ragMode?: "auto" | "required";
   attachmentPurposes?: Record<string, "template" | "reference">;
   conversationId?: string;

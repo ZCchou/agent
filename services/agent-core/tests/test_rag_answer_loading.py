@@ -20,6 +20,9 @@ def test_prepare_model_coalesces_load_and_releases_only_last_waiter():
         service._closed = False
         service._run_pins = {}
         service._preparations = {}
+        service._preparation_jobs = {}
+        service._model_load_jobs = {}
+        service.execution_monitor = None
         service._operation = None
         service._auto_load_job = None
         service._runtime = None
@@ -67,6 +70,9 @@ def test_invocation_schema_changes_request_identity():
 def test_releasing_other_model_does_not_cancel_current_load():
     service = LocalModelService.__new__(LocalModelService)
     service._preparations = {"old": ("a", float("inf"))}
+    service._preparation_jobs = {}
+    service._model_load_jobs = {}
+    service.execution_monitor = None
     service._run_pins = {}
     service._auto_load_job = "loading-b"
     service.catalog = SimpleNamespace(jobs=lambda: [{"id": "loading-b", "model_id": "b", "status": "running"}])
@@ -96,6 +102,9 @@ def test_selecting_registered_cold_model_does_not_load_it(tmp_path):
 def test_cancelled_load_is_terminal_for_existing_waiter():
     service = LocalModelService.__new__(LocalModelService)
     service._preparations = {"lease": ("m", float("inf"))}
+    service._preparation_jobs = {}
+    service._model_load_jobs = {}
+    service.execution_monitor = None
     service._run_pins = {}
     service._auto_load_job = "job"
     service._operation = None

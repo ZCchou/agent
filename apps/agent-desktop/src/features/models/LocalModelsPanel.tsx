@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
+import { ExecutionTaskCard } from "../chat/ExecutionTaskCard";
 import { localModelRepository, modelCatalogRepository } from "../../services/runtime";
 import type { LocalModel, LocalModelConfiguration, LocalModelError, LocalModelJob, LocalModelList, LocalPathSelection, LocalRuntimeCapabilities, LocalRuntimeStatus } from "../../types/localModels";
 
@@ -42,7 +43,9 @@ export function LocalModelJobs({ jobs, busy, onCancel }: { jobs: LocalModelJob[]
     const state = job.state ?? job.status ?? "queued";
     return <div key={job.id} className="local-model-job"><span>{job.kind || "模型任务"} · {state}</span><progress aria-label={`任务 ${job.id}`} value={job.progress ?? 0} max="1" />
       {job.error && <p role="alert">{formatLocalModelError(job.error)}</p>}
-      {["queued", "running"].includes(state) && <Button disabled={busy} onClick={() => onCancel(job.id)}>取消任务</Button>}
+      {job.execution_task_id ? <ExecutionTaskCard enabled owner={{ kind: "task", id: job.execution_task_id }}
+        onSettings={() => document.getElementById("local-model-runtime")?.scrollIntoView({ behavior: "smooth" })} />
+        : ["queued", "running"].includes(state) && <Button disabled={busy} onClick={() => onCancel(job.id)}>取消任务</Button>}
     </div>;
   })}</div>;
 }
@@ -95,7 +98,9 @@ export function LocalModelsPanel({ onChanged, onAuxiliary }: { onChanged(): Prom
   }
   const runtimeBlocked = (runtime.active_run_count ?? 0) > 0 ? "对话正在使用模型，请先停止或等待回答完成。"
     : (runtime.preparation_count ?? 0) > 0 ? "正在为消息准备模型，请等待或取消该消息。"
-    : runtime.operation ? "模型任务正在进行，请等待完成或取消任务。" : undefined;
+    : runtime.operation ? "模型任务正在进行，请等待完成或取消任务。"
+      : jobs.some(job => (job.state ?? job.status) === "waiting_recovery")
+        ? "模型任务等待处理，请在任务卡中恢复或取消。" : undefined;
   return <section className="local-models" aria-label="本地模型管理">
     <p className="models-alert" role="status">离线模式 · 模型文件由本机导入 · 公网服务、检索、远程图片和在线更新已停用</p>
     {error && <div role="alert"><p>{error}</p><p>运行中请先停止对话或卸载模型后重试。指定设备加载失败时可修改配置后重新加载。</p><Button onClick={() => void act(refresh)}>重试刷新</Button></div>}
@@ -122,7 +127,7 @@ export function LocalModelsPanel({ onChanged, onAuxiliary }: { onChanged(): Prom
       <LocalModelJobs jobs={jobs} busy={busy} onCancel={id => void act(() => localModelRepository.cancel(id))} />
     </Card>
     <Card><h2>辅助模型</h2><p>嵌入与重排模型沿用知识库中的本地模型配置。</p><Button onClick={onAuxiliary}>管理辅助模型</Button></Card>
-    <Card><h2>设备与运行时</h2><p>新导入模型默认自动选择，优先 GPU。已有模型按保存的设备配置加载。检测会校验资源并探测可用设备。</p><p>本地模型首输出最多等待 5 分钟，输出中断等待 60 秒，单次调用最多 15 分钟。可在对话中取消。</p>
+    <Card><h2 id="local-model-runtime">设备与运行时</h2><p>新导入模型默认自动选择，优先 GPU。已有模型按保存的设备配置加载。检测会校验资源并探测可用设备。</p><p>本地任务采用“运行与等待”中保存的策略。智能等待会持续检查进展，需要处理时可在任务卡中继续等待、恢复或取消。</p>
       <Button disabled={probing} onClick={() => void probeResources()}>{probing ? "正在校验资源与探测设备…" : "检测设备与运行时"}</Button>
       {capabilities && <pre>{JSON.stringify(capabilities, null, 2)}</pre>}
       <p role="status">状态 {runtime.state} · 实际后端 {runtime.backend || "未加载"} · GPU 层数 {runtime.gpu_layers_used ?? 0} · 实际上下文 {runtime.context_length ?? 0}</p>

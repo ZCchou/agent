@@ -1,6 +1,7 @@
 import type { RagDocument, RagFileInspection, RagTaskDetail } from "../../types/rag";
 import { invoke } from "@tauri-apps/api/core";
-import type { RagRepository } from "../repositories/RagRepository";
+import type { RagRepository, RagSearchOptions } from "../repositories/RagRepository";
+import type { ExecutionTaskSnapshot } from "./executionTasks";
 import type { OcrImportOptions, OcrCatalog, OcrPage, RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
 
 function request<T = unknown>(action: string, params: object = {}): Promise<T> {
@@ -9,14 +10,59 @@ function request<T = unknown>(action: string, params: object = {}): Promise<T> {
 function pathParams(selection: RagPathSelection) {
   return { path: selection.paths[0], grant_id: selection.grant_id };
 }
+const pendingSearchKeys = new Map<string, string>();
+async function searchRequestKey(action: string, params: object) {
+  const bytes = new TextEncoder().encode(JSON.stringify({ action, params }));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const storageKey = "agent.rag-search." + Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, "0")).join("");
+  let key = pendingSearchKeys.get(storageKey);
+  try { key ??= localStorage.getItem(storageKey) ?? undefined; } catch { /* Storage can be unavailable in a restricted WebView. */ }
+  key ??= crypto.randomUUID();
+  pendingSearchKeys.set(storageKey, key);
+  try { localStorage.setItem(storageKey, key); } catch { /* The in-memory identity still protects repeated control requests. */ }
+  return { key, forget() {
+    pendingSearchKeys.delete(storageKey);
+    try { localStorage.removeItem(storageKey); } catch { /* No persistent identity was available. */ }
+  } };
+}
+const communicationFailure = (error: unknown) => /timeout|connection|core_unavailable|core_not_running|communication/i.test(String(error));
 export class TauriRagRepository implements RagRepository {
+  private async searchTask(action: "library.search" | "search", params: object, options?: RagSearchOptions): Promise<RagSearchResult> {
+    const identity = await searchRequestKey(action, params);
+    const start = () => request<{ task: ExecutionTaskSnapshot }>("search.start", {
+      search_action: action, ...params, idempotency_key: identity.key,
+    });
+    const admitted = await start().catch((error) => {
+      if (communicationFailure(error)) return start();
+      throw error;
+    });
+    if (!admitted?.task?.id) throw new Error("execution_task_not_found");
+    options?.onTaskId?.(admitted.task.id);
+    while (true) {
+      let status: { task: ExecutionTaskSnapshot; result: RagSearchResult | null; error?: { code: string; message: string } | null };
+      try { status = await request("search.status", { execution_task_id: admitted.task.id }); }
+      catch (error) {
+        if (!communicationFailure(error)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      if (status.task.status === "completed" && status.result) { identity.forget(); return status.result; }
+      if (status.task.status === "cancelled") { identity.forget(); throw new Error("cancelled_by_user"); }
+      if (status.task.status === "failed" || status.task.status === "completed") {
+        const code = status.error?.code ?? status.task.error_code ?? "rag_search_failed";
+        if (["rag_generation_changed", "rag_evidence_stale", "rag_model_changed"].includes(code)) identity.forget();
+        throw new Error(`${code}: ${status.error?.message ?? ""}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+  }
   overview(projectId?: string) { return request<{ libraries: RagLibrary[] }>("library.overview", projectId ? { project_id: projectId } : {}); }
   documents(libraryId: string, offset = 0, query = "", includeWithdrawn = false) { return request<{ documents: RagDocument[]; total: number }>("document.list", { library_id: libraryId, offset, limit: 50, query, include_withdrawn: includeWithdrawn }); }
   history(documentId: string) { return request<{ versions: (RagDocument & { id: string })[] }>("document.history", { document_id: documentId }); }
   inspectDocuments(libraryId: string, selection: RagPathSelection) { return request<{ files: RagFileInspection[] }>("document.inspect", { library_id: libraryId, ...selection }); }
   taskDetail(jobId: string) { return request<RagTaskDetail>("job.detail", { job_id: jobId }); }
   resumeJob(jobId: string, acceptPartial = false) { return request("job.resume", { job_id: jobId, accept_partial: acceptPartial }); }
-  searchLibrary(libraryId: string, query: string) { return request<RagSearchResult>("library.search", { library_id: libraryId, query }); }
+  searchLibrary(libraryId: string, query: string, options?: RagSearchOptions) { return this.searchTask("library.search", { library_id: libraryId, query }, options); }
   updateMetadata(confirmation: RagDocumentConfirmation) { return request("document.metadata", confirmation); }
   openOriginal(versionId: string) { return invoke<void>("rag_open_original", { versionId }); }
   selectPaths(kind: RagPathKind, modelFile = false) { return invoke<RagPathSelection | null>("rag_select_paths", { kind, modelFile }); }
@@ -46,6 +92,6 @@ export class TauriRagRepository implements RagRepository {
   pauseJob(jobId: string) { return request("job.pause", { job_id: jobId }); }
   cancelJob(jobId: string) { return request("job.cancel", { job_id: jobId }); }
   buildIndex(libraryId: string, versionIds?: string[]) { return request("index.build", { library_id: libraryId, ...(versionIds ? { version_ids: versionIds } : {}) }); }
-  search(projectId: string, query: string, libraryIds?: string[]) { return request<RagSearchResult>("search", { project_id: projectId, query, ...(libraryIds ? { library_ids: libraryIds } : {}) }); }
+  search(projectId: string, query: string, libraryIds?: string[], options?: RagSearchOptions) { return this.searchTask("search", { project_id: projectId, query, ...(libraryIds ? { library_ids: libraryIds } : {}) }, options); }
   previewEvidence(projectId: string, evidenceId: string, offset = 0, length = 8000) { return request<Record<string, unknown>>("evidence.preview", { project_id: projectId, evidence_id: evidenceId, offset, length }); }
 }

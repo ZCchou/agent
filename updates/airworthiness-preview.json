@@ -1,11 +1,11 @@
 {
-  "version": "0.16.0-preview.4",
-  "notes": "# agent 0.16.0-preview.4\n\n修复聊天中的工作状态显示，改善 Windows 模型目录访问受限的诊断。\n\n- 模型准备返回就绪后，聊天进入请求准备和意图识别阶段。\n- 显示意图识别次数、等待补充、等待继续、工具结果及操作确认状态。旧任务轮询与本次提交按身份隔离。\n- 显示嵌入模型、重排序模型的真实加载与计算状态，加载标题使用模型用途和名称，重排序进度使用候选条数。\n- 公开检索入口传递嵌入进度，兼容已有辅助模型接口。\n- 模型目录枚举遇到权限错误时，显示受限路径和 Windows 读取权限处理提示。授权后可重新检测模型。\n\n## 已安装 preview.3\n\n在“设置 → 软件更新”选择“预览版”，检查、下载程序更新并安装重启。程序更新包包含应用、Core 和更新辅助程序，适用于 preview.3 运行组件。\n\n## 首次安装与 U 盘拷贝\n\n下载本版 `agent-0.16.0-preview.4-windows-x64-setup.exe`，并准备 preview.3 的 `agent-0.16.0-preview.3-offline.part01.zip` 至 `part07.zip`。将八个文件放在同一目录后运行安装器。已有的七个分卷可直接复用。\n\n七个分卷及其 SHA-256 位于 [preview.3 完整离线发行](https://github.com/ZCchou/agent/releases/tag/v0.16.0-preview.3)。本版的 U 盘目录和校验清单列出全部必需文件。\n\n主模型、嵌入和重排序模型通过本地文件配置。首次使用所需的模型下载和配置方法见仓库 README。\n\n## 验收范围\n\n状态流转通过真实 ChatPage、Tauri 仓库及事件接口的浏览器回归验证。冷启动和驻留嵌入进度通过真实 ModelStore、资料库检索入口及受控 stdio 推理进程验证。权限错误覆盖受限目录定位和恢复后重试，目标电脑的实际目录权限由用户在资源管理器确认后恢复。\n\n真实整份模板完成稿及目标设备性能的验收记录见 preview.3 报告。完整离线安装的清理阶段仍可能显示 0/0 计数。安装器缺少 Authenticode 签名，程序更新包与更新清单使用独立发布密钥签名。\n",
-  "pub_date": "2026-11-14T06:58:07.110614Z",
+  "version": "0.16.0-preview.5",
+  "notes": "# 0.16.0-preview.5\n\n- 默认智能等待。加载、意图识别、附件/OCR、嵌入、重排序和生成按实际进展持续执行。\n- 聊天和模型设置显示阶段、设备、候选或页面计数、最近进展及恢复次数。\n- 辅助模型独立心跳及持久化评分检查点。确认异常后最多自动恢复两次，之后可多次手动恢复。\n- 整份 DOCX 非空内容清单和章节分批审阅，保留覆盖清单、证据和待处理事项。\n- 修复上下文整理恢复、取消、部分输出保护、重复错误和加载状态的兼容问题。\n- 更新 CUDA 辅助推理和 OCR 组件，完整包支持校验复用未变化文件。\n\n## 下载与升级\n\n下载本页安装器和全部七个 offline.partNN.zip，放在同一目录后运行安装器。U 盘拷贝同样需要这八个安装文件，可一并携带校验清单、安装说明和验收报告。\n\n本次运行组件发生变化，从 preview.4 升级使用完整包。更新器会检查运行组件身份并引导完整安装。签名程序小包适用于组件身份已经匹配的安装。\n\n七个分卷中有三个与历史分卷完全一致。安装器按大小和 SHA-256 查找可复用分卷，旧文件名可以保留。完整安装包内含运行组件及 OCR 模型，主模型、嵌入和重排序权重按 README 导入。\n\n## 验收范围\n\n自动化结果及安装耗时见验收报告。已完成十项冻结 CPU/CUDA 小型原生推理、实际 BGE INT8 CPU 冷启动/驻留测量，以及真实 OCR 单页识别。\n\n本次 DOCX 已验证 1689 个非空位置的结构、分批及恢复。完整专业语义审阅尚未完成，1529 项实质或占位目标保持待处理。目标电脑此前慢速重排的具体原因仍需该电脑的运行记录。适航结论及图形内容需人工复核。\n\n安装器尚无 Authenticode 签名。更新清单及程序更新 ZIP 使用独立发布密钥签名。\n",
+  "pub_date": "2026-11-14T11:19:56.837553Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc1dYdVpWNFlhZ1k5UFRXNHAxNlExNjdyS2RXVnpNdnF6QXV3VmtKOGc1Tk4yU0pqU0Izbzg3TVF6RWtGTytnU0FpM04xeE43QkduQitGak8ybUowTTkzQUZ4eVg1YWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjM5NDg2CWZpbGU6YWdlbnQtMC4xNi4wLXByZXZpZXcuNC13aW5kb3dzLXg4Nl82NC1wcm9ncmFtLnppcAoyRHF5ZEtId0dhL1dGa3V3NHRobzF0cW5mbm4xb2FRejQweVBRV2plT2NXUFlzY2JpNlJtQzArOFQxSkZHdGdHVlhZMWpycC84SUZISVhJRDNnNG5DUT09Cg==",
-      "url": "https://github.com/ZCchou/agent/releases/download/v0.16.0-preview.4/agent-0.16.0-preview.4-windows-x86_64-program.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc1dYdVpWNFlhZ1NHaEh4Y2ZnVU1Qb2hLOGl5Yk04UnQya0tuUk5rcUdaSzhYVjdvOHZmd1VtZzRnM3VGd0tpU1oxdUNDdFlTVGdBbUpZZGNFUmk5V3RvZjdvLzNQWGdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjU1MTk2CWZpbGU6YWdlbnQtMC4xNi4wLXByZXZpZXcuNS13aW5kb3dzLXg4Nl82NC1wcm9ncmFtLnppcAo5cFRQT3l0REtXSnFDSjB5Y2pFSW90QmtVSU5YNWZlNENZcDhPNGpIWXlUb0dPLzg0UXBuOGEwTzEwcE5lUVhFdTI3SkI3VXVvZnNlV1VlbUg1bHdCUT09Cg==",
+      "url": "https://github.com/ZCchou/agent/releases/download/v0.16.0-preview.5/agent-0.16.0-preview.5-windows-x86_64-program.zip"
     }
   }
 }

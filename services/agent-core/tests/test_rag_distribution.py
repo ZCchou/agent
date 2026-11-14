@@ -19,7 +19,7 @@ def test_staging_verifies_runtime_before_atomic_replacement(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "rag-worker.exe").write_bytes(b"runtime")
-    manifest = {"schema_version": 1, "protocol_version": 1, "executable": "rag-worker.exe",
+    manifest = {"schema_version": 1, "protocol_version": 2, "executable": "rag-worker.exe",
         "device_bundle": "cpu", "python": "3.12", "files": {"rag-worker.exe": hashlib.sha256(b"runtime").hexdigest()}}
     (source / "runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
     target = tmp_path / "app" / "rag-runtime"
@@ -55,7 +55,7 @@ def test_runtime_release_identity_rejects_stale_worker_and_dependency_lock(tmp_p
 def test_offline_full_edition_requires_cuda_capable_runtime(tmp_path, bundle, device, accepted):
     tool = bundle_tool()
     (tmp_path / "rag-worker.exe").write_bytes(b"runtime")
-    manifest = {"schema_version": 1, "protocol_version": 1, "executable": "rag-worker.exe",
+    manifest = {"schema_version": 1, "protocol_version": 2, "executable": "rag-worker.exe",
                 "device_bundle": bundle, "files": {"rag-worker.exe": hashlib.sha256(b"runtime").hexdigest()}}
     (tmp_path / "runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
     if accepted:
@@ -76,7 +76,7 @@ def test_cpu_only_runtime_cannot_replace_the_installed_full_edition(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "rag-worker.exe").write_bytes(b"runtime")
-    manifest = {"schema_version": 1, "protocol_version": 1, "executable": "rag-worker.exe",
+    manifest = {"schema_version": 1, "protocol_version": 2, "executable": "rag-worker.exe",
                 "device_bundle": "cpu", "files": {"rag-worker.exe": hashlib.sha256(b"runtime").hexdigest()}}
     (source / "runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
     target = tmp_path / "app/rag-runtime"

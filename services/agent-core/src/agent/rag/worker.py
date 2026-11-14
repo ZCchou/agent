@@ -8,9 +8,13 @@ import math
 import os
 import struct
 import sys
+import threading
+import time
 from pathlib import Path
 
 from agent.rag.model_profiles import PROFILES, QUERY_INSTRUCTION, RERANK_PREFIX, RERANK_SUFFIX
+
+HEARTBEAT_INTERVAL = 5
 
 
 def _owned_state_dict(root):
@@ -233,9 +237,6 @@ def dispatch(request, cache):
     profile = PROFILES[params["profile"]]
     if (action == "embed") != (profile.role == "embedding"):
         raise ValueError("Requested action does not match model role")
-    if progress and action != 'rerank_lengths':
-        progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
-                  'completed': 0, 'total': len(params.get('texts', []))})
     texts = params["texts"]
     if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
         raise ValueError("texts must be a list of strings")
@@ -245,10 +246,15 @@ def dispatch(request, cache):
         texts = [f"<Instruct>: {QUERY_INSTRUCTION}\n<Query>: {params['query']}\n<Document>: {text}" for text in texts]
     # Tokenize with the actual model tokenizer before grouping lengths. All
     # scoring truncation applies only to these worker-local inputs.
+    if progress:
+        progress({'stage': 'tokenization', 'completed': 0, 'total': len(texts)})
     lengths = tokenizer(texts, padding=False, truncation=True,
                         max_length=_token_limit(params, metadata))['input_ids'] if texts else []
     if action == 'rerank_lengths':
         return [len(row) for row in lengths]
+    if progress:
+        progress({'stage': 'reranking' if action == 'rerank' else 'embedding',
+                  'completed': 0, 'total': len(texts)})
     ordered = sorted(range(len(texts)), key=lambda index: len(lengths[index]))
     batch_size = 2 if params['backend'] == 'onnx' else 8
     results = [None] * len(texts)
@@ -267,31 +273,61 @@ def dispatch(request, cache):
             result = _torch_batch(params, tokenizer, model, batch)
         for index, value in zip(indices, result):
             results[index] = value
+    if progress:
+        progress({'stage': 'result_validation', 'completed': len(texts), 'total': len(texts)})
     return results
 
 
 def main():
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1")
     cache = {}
+    sequence = 0
     for line in sys.stdin:
         request_id = None
+        stopped = threading.Event()
+        heartbeat = None
+        output = sys.stdout
+        output_lock = threading.Lock()
+        identity = {}
+        version = 1
+        def emit(frame):
+            nonlocal sequence
+            with output_lock:
+                sequence += 1
+                if version == 2:
+                    frame = {**frame, 'protocol_version': 2, **identity, 'sequence': sequence}
+                output.write(json.dumps(frame, ensure_ascii=True, allow_nan=False) + '\n')
+                output.flush()
         try:
             request = json.loads(line)
             request_id = request.get("id")
-            if request.get('params', {}).get('report_progress'):
+            version = request.get('protocol_version', request.get('params', {}).get('protocol_version', 1))
+            identity = request.get('execution_identity', request.get('params', {}).get('execution_identity', {}))
+            if version == 2:
+                def pulse():
+                    previous_cpu = time.process_time()
+                    while not stopped.wait(HEARTBEAT_INTERVAL):
+                        cpu = time.process_time()
+                        emit({'id': request_id, 'kind': 'heartbeat', 'cpu_seconds': cpu,
+                              'resource_active': True if cpu - previous_cpu >= 0.02 else None,
+                              'peak_memory_bytes': _peak_memory_bytes()})
+                        previous_cpu = cpu
+                heartbeat = threading.Thread(target=pulse, daemon=True)
+                heartbeat.start()
+            if version == 2 or request.get('params', {}).get('report_progress'):
                 def emit_progress(event):
-                    frame = {'id': request_id, 'progress': event}
-                    output.write(json.dumps(frame, ensure_ascii=True, allow_nan=False) + '\n')
-                    output.flush()
-                output = sys.stdout
+                    emit({'id': request_id, 'progress': event})
                 request['_progress'] = emit_progress
             with contextlib.redirect_stdout(sys.stderr):
                 result = dispatch(request, cache)
             response = {"id": request_id, "result": result, 'peak_memory_bytes': _peak_memory_bytes()}
         except Exception as exc:
             response = {"id": request_id, "error": f"{type(exc).__name__}: {exc}"}
-        sys.stdout.write(json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n")
-        sys.stdout.flush()
+        finally:
+            stopped.set()
+            if heartbeat:
+                heartbeat.join()
+        emit(response)
 
 
 def _peak_memory_bytes():

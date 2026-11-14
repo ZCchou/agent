@@ -17,6 +17,8 @@ from agent.providers import (
 )
 from agent.storage import CoreDataError
 from agent.local_provider import ManagedLocalProvider
+from agent.execution.activity import monitored_local, run_stage
+from agent.execution.execution_wait import current_activity
 
 
 _LOGGER = logging.getLogger("agent.core")
@@ -72,7 +74,10 @@ class ModelInvocationService:
 
     async def complete_prepared(
         self, provider: Any, spec: InvocationSpec, prepared: PreparedRequest,
+        *, stream_factory=None,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
+        if monitored_local(provider) and current_activity.get() is None and stream_factory is None:
+            return await run_stage('model_output', lambda activity: self.complete_prepared(provider, spec, prepared))
         content = ""
         usage: dict[str, int] = {}
         events: list[ProviderEvent] = []
@@ -80,14 +85,15 @@ class ModelInvocationService:
         diagnostic: dict[str, Any] = {}
         saw_activity = False
         try:
-            async with self.provider_session(provider) as ready_provider:
+            async with self.provider_session(provider if stream_factory is None else None) as ready_provider:
                 started = time.monotonic()
-                async with asyncio.timeout(spec.total_timeout_ms / 1000):
-                    stream = self.stream_prepared(ready_provider, spec, prepared).__aiter__()
+                async with asyncio.timeout(None if monitored_local(provider) else spec.total_timeout_ms / 1000):
+                    stream = (stream_factory() if stream_factory is not None else
+                              self.stream_prepared(ready_provider, spec, prepared)).__aiter__()
                     async with closing_provider_stream(stream):
                         while True:
                             try:
-                                async with asyncio.timeout(spec.stream_wait_seconds(saw_activity, time.monotonic()-started)):
+                                async with asyncio.timeout(None if monitored_local(provider) else spec.stream_wait_seconds(saw_activity, time.monotonic()-started)):
                                     event = await anext(stream)
                             except StopAsyncIteration:
                                 break
@@ -99,6 +105,9 @@ class ModelInvocationService:
                                 ) from error
                             if event.kind not in {"provider_diagnostic", "usage"}:
                                 saw_activity = True
+                                activity = current_activity.get()
+                                if activity is not None:
+                                    activity.progress(kind=event.kind, characters=len(event.text or ''))
                             capability_id = (
                                 "structured_web_evidence"
                                 if "structured_web_evidence" in spec.capability_signature
@@ -182,16 +191,19 @@ class ModelInvocationService:
         options: GenerationOptions,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
         """Run a bounded hidden invocation while preserving normalized audit events."""
+        if monitored_local(provider) and current_activity.get() is None:
+            return await run_stage('model_output', lambda activity: self.complete_with_events(
+                provider, model_id, messages, options=options))
         content = ""
         usage: dict[str, int] = {}
         events: list[ProviderEvent] = []
         try:
-            async with asyncio.timeout(90):
+            async with asyncio.timeout(None if monitored_local(provider) else 90):
                 stream = self.stream(provider, model_id, messages, tools=False, options=options).__aiter__()
                 async with closing_provider_stream(stream):
                     while True:
                         try:
-                            async with asyncio.timeout(30):
+                            async with asyncio.timeout(None if monitored_local(provider) else 30):
                                 event = await anext(stream)
                         except StopAsyncIteration:
                             break
@@ -200,6 +212,9 @@ class ModelInvocationService:
                                 "stream_stalled", "The specialist model stopped producing activity."
                             ) from error
                         events.append(event)
+                        activity = current_activity.get()
+                        if activity is not None and event.kind not in {'provider_diagnostic', 'usage'}:
+                            activity.progress(kind=event.kind, characters=len(event.text or ''))
                         if event.kind == "text_delta" and event.text:
                             content += event.text
                         elif event.kind == "usage" and event.usage:

@@ -24,7 +24,8 @@ export function applyRunFailure(run: ModelRun, event: ModelRunEvent): ModelRun {
     ? event.data.fallback_content : run.draft?.content;
   return {
     ...run,
-    status: event.event_type === "run.cancelled" ? "cancelled" : "failed",
+    status: event.event_type === "run.cancelled" ? "cancelled"
+      : event.event_type === "run.interrupted" ? "interrupted" : "failed",
     error_code: typeof event.data.error_code === "string" ? event.data.error_code : run.error_code,
     error_message: typeof event.data.message === "string" ? event.data.message : run.error_message,
     draft: content ? { content, updated_at: event.timestamp } : run.draft,
