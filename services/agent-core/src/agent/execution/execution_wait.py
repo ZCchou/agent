@@ -121,6 +121,9 @@ class ExecutionMonitor:
         self.sleep = sleep
         self.on_event = on_event
         self._active: dict[str, StageActivity] = {}
+        from agent.migrations.v32_execution_wait import ensure_replay_columns
+        with repository._connect() as connection:
+            ensure_replay_columns(connection)
 
     @contextmanager
     def associate(self, task_id: str):
@@ -137,8 +140,37 @@ class ExecutionMonitor:
         if row is None:
             raise CoreDataError('execution_task_not_found', 'The execution task does not exist.')
         result = dict(row)
+        result.pop('replay_json', None)
         result['policy'] = json.loads(result.pop('policy_json'))
         return result
+
+    def set_replay(self, task_id: str, kind: str, request: dict[str, Any]) -> None:
+        if not isinstance(kind, str) or not kind or not isinstance(request, dict):
+            raise CoreDataError('invalid_execution_replay', 'Execution replay metadata is invalid.')
+        encoded = _json(request)
+        with self.repository._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT replay_kind,replay_json FROM execution_wait_tasks WHERE id=?',
+                                     (task_id,)).fetchone()
+            if row is None:
+                raise CoreDataError('execution_task_not_found', 'The execution task does not exist.')
+            if row['replay_kind'] is not None:
+                saved = json.loads(row['replay_json'])
+                if row['replay_kind'] != kind or _json(saved['request']) != encoded:
+                    raise CoreDataError('execution_replay_conflict', 'This execution identity belongs to a different request.')
+                return
+            connection.execute('UPDATE execution_wait_tasks SET replay_kind=?,replay_json=? WHERE id=?',
+                               (kind, _json({'request': request}), task_id))
+
+    def get_replay(self, task_id: str) -> dict[str, Any] | None:
+        with self.repository._connect() as connection:
+            row = connection.execute('SELECT replay_kind,replay_json FROM execution_wait_tasks WHERE id=?',
+                                     (task_id,)).fetchone()
+        if row is None:
+            raise CoreDataError('execution_task_not_found', 'The execution task does not exist.')
+        if row['replay_kind'] is None:
+            return None
+        return {'kind': row['replay_kind'], **json.loads(row['replay_json'])}
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self.repository._connect() as connection:
@@ -256,10 +288,15 @@ class ExecutionMonitor:
         return task
 
     def finish_task(self, task_id: str, status: str = 'completed', *,
-                    error_code: str | None = None) -> dict[str, Any]:
+                    error_code: str | None = None, replay_outcome: dict | None = None) -> dict[str, Any]:
         if status not in TERMINAL:
             raise CoreDataError('invalid_execution_status', 'A terminal execution status is required.')
         with self.repository._connect() as connection:
+            if replay_outcome is not None:
+                connection.execute('''UPDATE execution_wait_tasks
+                    SET replay_json=json_set(replay_json,'$.outcome',json(?))
+                    WHERE id=? AND status IN ('running','waiting_recovery') AND replay_kind IS NOT NULL''',
+                    (_json(replay_outcome), task_id))
             cursor = connection.execute(
                 '''UPDATE execution_wait_tasks SET status=?,error_code=?,finished_at=?,updated_at=?,
                    revision=revision+1,sequence=sequence+1 WHERE id=? AND status IN ('running','waiting_recovery')''',
@@ -325,6 +362,8 @@ class ExecutionMonitor:
                     WHERE kind='progress' AND ({activity_filter})''', (*parameters, *parameters))]
             connection.execute(f'DELETE FROM execution_wait_checkpoints WHERE {checkpoint_filter}', parameters)
             for task_id in affected:
+                connection.execute("UPDATE execution_wait_tasks SET replay_json=json_remove(replay_json,'$.outcome') WHERE id=?",
+                                   (task_id,))
                 connection.execute(
                     '''UPDATE execution_wait_tasks SET status='interrupted',error_code='rag_evidence_stale',
                        revision=revision+1,sequence=sequence+1,finished_at=?,updated_at=?

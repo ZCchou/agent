@@ -5,6 +5,7 @@ import asyncio
 from collections import OrderedDict
 from contextlib import closing
 import inspect
+import hashlib
 import json
 import math
 import logging
@@ -36,11 +37,13 @@ class RagService:
             models = ModelStore(self.repository.data_dir)
         self.models = models
         self.execution_monitor = ExecutionMonitor(repository)
+        self.execution_policy = None
         if hasattr(models, 'execution_monitor'):
             models.execution_monitor = self.execution_monitor
         self.rerank_timeout = rerank_timeout
         self.parser = parser if parser is not None else ParserService(self.repository.data_dir)
         self._tasks = {}
+        self._search_tasks = {}
         self._closed = False
         from agent.ocr.pipeline import OcrPipeline
         self.ocr = OcrPipeline(self.repository, parser=self.parser)
@@ -137,6 +140,10 @@ class RagService:
             return self.repository.task_detail(params.get('job_id'))
         if action == 'job.resume':
             return await self.workflow.resume(params.get('job_id'), accept_partial=params.get('accept_partial', False))
+        if action == 'search.start':
+            return self.start_search(params)
+        if action == 'search.status':
+            return self.search_status(params.get('execution_task_id'))
         if action == 'library.search':
             return await self.search_library(params.get('library_id'), params.get('query'))
         if action == 'document.metadata':
@@ -196,7 +203,8 @@ class RagService:
         if action == 'document.withdraw':
             preview = self.repository.preview(params.get('version_id'), limit=1)
             result = self.repository.withdraw(params.get('version_id'))
-            self.execution_monitor.invalidate_sources(version_id=params.get('version_id'))
+            for version_id in result['version_ids']:
+                self.execution_monitor.invalidate_sources(version_id=version_id)
             job_id = preview['version']['ocr_summary'].get('job_id')
             if job_id:
                 job = self.repository.job(job_id)
@@ -374,22 +382,136 @@ class RagService:
                 'external_untrusted': True, 'search_id': search_id, 'aliases': aliases}
 
     async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None, retrieval_scope=None):
+        request = {'action': 'search', 'params': {'project_id': project_id, 'query': query, 'run_id': run_id,
+            'library_ids': library_ids, 'version_ids': version_ids, 'limit': limit, 'retrieval_scope': retrieval_scope}}
         return await self._search_operation(lambda: self._search_once(project_id, query, run_id, library_ids,
-            version_ids, limit, progress, retrieval_scope), project_id=project_id)
+            version_ids, limit, progress, retrieval_scope), request=request)
 
-    async def _search_operation(self, operation, *, project_id=None):
+    def _create_search_root(self, request, idempotency_key=None):
+        replay_request = request
+        identity = None
+        if idempotency_key is not None:
+            encoded = json.dumps(request, sort_keys=True, ensure_ascii=True, allow_nan=False)
+            fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
+            identity = 'rag-search-' + hashlib.sha256(idempotency_key.encode()).hexdigest()
+            replay_request = {**request, 'idempotency_key': idempotency_key, 'fingerprint': fingerprint}
+        root = self.execution_monitor.start_task(run_id=identity or 'rag-search-' + identifier(),
+            task_id=identity, project_id=request['params'].get('project_id'),
+            policy=self.execution_policy() if self.execution_policy is not None else None)
+        self.execution_monitor.set_replay(root['id'], 'rag_search', replay_request)
+        return self.execution_monitor.get_task(root['id'])
+
+    def start_search(self, params):
+        key = required_text(params.get('idempotency_key'), 'Search idempotency key', 200)
+        action = params.get('search_action', 'search')
+        query = required_text(params.get('query'), 'Search query', SEARCH_QUERY_MAX_CHARS)
+        if action == 'library.search':
+            request = {'action': action, 'params': {'library_id': params.get('library_id'), 'query': query}}
+        elif action == 'search':
+            request = {'action': action, 'params': {'project_id': params.get('project_id'), 'query': query,
+                'run_id': params.get('run_id'), 'library_ids': params.get('library_ids'),
+                'version_ids': params.get('version_ids'), 'limit': params.get('limit', 8),
+                'retrieval_scope': params.get('retrieval_scope')}}
+        else:
+            raise CoreDataError('rag_action_unsupported', 'The search replay action is unsupported.')
+        root = self._create_search_root(request, key)
+        if root['status'] == 'running' and root['attempt'] == 0:
+            self.resume_execution(root['id'])
+        return {'task': {**self.execution_monitor.get_task(root['id']), 'execution_task_id': root['id']}}
+
+    def search_status(self, task_id):
+        root = self.execution_monitor.get_task(task_id)
+        replay = self.execution_monitor.get_replay(task_id)
+        if replay is None or replay['kind'] != 'rag_search':
+            raise CoreDataError('invalid_execution_replay', 'The task does not belong to RAG search.')
+        outcome = replay.get('outcome', {}) if root['status'] in {'completed', 'failed'} else {}
+        result = outcome.get('result')
+        error = outcome.get('error')
+        if result is None and error is None and root['status'] in {'completed', 'failed', 'interrupted'}:
+            error = {'code': root.get('error_code') or 'rag_evidence_stale',
+                     'message': 'The saved search result is unavailable. Resume or search again.', 'details': None}
+        if result is not None:
+            try:
+                self._validate_search_result(replay['request'], result)
+            except CoreDataError as failure:
+                result = None
+                error = {'code': failure.code, 'message': str(failure), 'details': failure.details}
+        return {'task': {**root, 'execution_task_id': root['id']}, 'result': result, 'error': error}
+
+    def _validate_search_result(self, request, result):
+        params = request['params']
+        if request['action'] == 'search':
+            self.assert_generation(params['project_id'], result['generation'])
+            self.validate_evidence(params['project_id'], [row['id'] for row in result['evidence']], params.get('run_id'))
+            return
+        with closing(self.repository.connect()) as connection:
+            library = self.repository.library(connection, params['library_id'])
+            if library['active_index_id'] != result['index_id']:
+                raise CoreDataError('rag_generation_changed', 'The library index changed. Search again.')
+            for row in result['evidence']:
+                if self.repository.version(connection, row['version_id'])['status'] != 'confirmed':
+                    raise CoreDataError('rag_evidence_invalid', 'The retrieved source is no longer available.')
+
+    def resume_execution(self, task_id):
+        if self._closed:
+            raise CoreDataError('rag_closed', 'The RAG service is closed.')
+        replay = self.execution_monitor.get_replay(task_id)
+        if replay is None or replay['kind'] != 'rag_search':
+            raise CoreDataError('invalid_execution_replay', 'The task does not belong to RAG search.')
+        previous = self._search_tasks.get(task_id)
+        if previous is not None and not previous.done():
+            return self.execution_monitor.get_task(task_id)
+        request = replay['request']
+        async def operation():
+            if request['action'] == 'library.search':
+                return await self._search_library_once(**request['params'])
+            if request['action'] == 'search':
+                return await self._search_once(**request['params'])
+            raise CoreDataError('invalid_execution_replay', 'The persisted search action is invalid.')
+        task = asyncio.create_task(self._execute_search_root(task_id, operation), name='rag-search-' + task_id)
+        self._search_tasks[task_id] = task
+        def finished(completed):
+            if not completed.cancelled():
+                completed.exception()
+            if self._search_tasks.get(task_id) is completed:
+                self._search_tasks.pop(task_id, None)
+        task.add_done_callback(finished)
+        return self.execution_monitor.get_task(task_id)
+
+    def cancel_execution(self, task_id):
+        task = self._search_tasks.get(task_id)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _search_operation(self, operation, *, request):
         if current_task_id.get() is not None:
             return await operation()
+        task_id = self._create_search_root(request)['id']
+        task = asyncio.current_task()
+        self._search_tasks[task_id] = task
+        try:
+            return await self._execute_search_root(task_id, operation)
+        finally:
+            if self._search_tasks.get(task_id) is task:
+                self._search_tasks.pop(task_id, None)
+
+    async def _execute_search_root(self, task_id, operation):
         monitor = self.execution_monitor
-        task_id = monitor.start_task(run_id='rag-search-' + identifier(), project_id=project_id)['id']
+        activity_token = current_activity.set(None)
         try:
             with monitor.associate(task_id):
                 result = await operation()
         except BaseException as error:
+            outcome = {'error': {'code': getattr(error, 'code', 'rag_search_failed'), 'message': str(error),
+                                 'details': getattr(error, 'details', None)}}
             monitor.finish_task(task_id, 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
-                                error_code=getattr(error, 'code', None))
+                                error_code=getattr(error, 'code', None), replay_outcome=outcome)
             raise
-        monitor.finish_task(task_id)
+        finally:
+            current_activity.reset(activity_token)
+        terminal = monitor.finish_task(task_id, replay_outcome={'result': result})
+        if terminal['status'] != 'completed':
+            raise asyncio.CancelledError
         return result
 
     async def _search_once(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None, retrieval_scope=None):
@@ -458,6 +580,14 @@ class RagService:
     async def close(self):
         self._closed = True
         self._rerank_attempts.clear()
+        searches = [task for task in self._search_tasks.values() if not task.done()]
+        for task_id, task in list(self._search_tasks.items()):
+            if not task.done():
+                self.execution_monitor.finish_task(task_id, 'interrupted', error_code='core_interrupted')
+                task.cancel()
+        if searches:
+            await asyncio.gather(*searches, return_exceptions=True)
+        self._search_tasks.clear()
         tasks = list(self._tasks.values())
         for job_id, task in list(self._tasks.items()):
             self.repository.terminate_task(job_id, 'app_exit', interrupted=True)
@@ -616,7 +746,8 @@ class RagService:
         return chosen, index_by_chunk
 
     async def search_library(self, library_id, query):
-        return await self._search_operation(lambda: self._search_library_once(library_id, query))
+        request = {'action': 'library.search', 'params': {'library_id': library_id, 'query': query}}
+        return await self._search_operation(lambda: self._search_library_once(library_id, query), request=request)
 
     async def _search_library_once(self, library_id, query):
         query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)

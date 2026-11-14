@@ -7,6 +7,15 @@ import re
 import sqlite3
 
 
+def ensure_replay_columns(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(execution_wait_tasks)')}
+    if not columns:
+        return
+    for column in ('replay_kind', 'replay_json'):
+        if column not in columns:
+            connection.execute(f'ALTER TABLE execution_wait_tasks ADD COLUMN {column} TEXT')
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     row = connection.execute("SELECT sql FROM sqlite_master WHERE name='model_runs'").fetchone()
     if row is not None and "'waiting_recovery'" not in row[0]:
@@ -30,7 +39,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 ('running','waiting_recovery','completed','failed','cancelled','interrupted')),
             stage TEXT, policy_json TEXT NOT NULL, auto_recoveries INTEGER NOT NULL DEFAULT 0,
             command TEXT, error_code TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
-            finished_at REAL)''',
+            finished_at REAL, replay_kind TEXT, replay_json TEXT)''',
         '''CREATE UNIQUE INDEX IF NOT EXISTS execution_wait_run
             ON execution_wait_tasks(run_id) WHERE run_id IS NOT NULL''',
         '''CREATE UNIQUE INDEX IF NOT EXISTS execution_wait_intent
@@ -66,6 +75,7 @@ def migrate(connection: sqlite3.Connection) -> None:
     columns = {row[1] for row in connection.execute('PRAGMA table_info(execution_wait_tasks)')}
     if 'sequence' not in columns:
         connection.execute('ALTER TABLE execution_wait_tasks ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0')
+    ensure_replay_columns(connection)
     stage_columns = {row[1] for row in connection.execute('PRAGMA table_info(execution_wait_stages)')}
     for column in ('queue_wait_seconds', 'elapsed_seconds'):
         if column not in stage_columns:
