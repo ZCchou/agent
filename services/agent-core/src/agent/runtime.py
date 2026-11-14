@@ -323,12 +323,19 @@ class ChatRunService:
                 self.rag.cancel_execution(root['id'])
             # Wake the business owner immediately, including between leaf stages.
             run_id, intent_id = result.get('run_id'), result.get('intent_task_id')
+            if run_id and not run_id.startswith(('local_model:', 'rag-search-')):
+                run = self.repository.get_model_run(run_id)
+                if run['status'] == 'waiting_context':
+                    self.context.context_repository.pause_compaction(run['conversation_id'])
+                    compaction = self.compaction_tasks.pop(run['conversation_id'], None)
+                    if compaction is not None and not compaction.done():
+                        compaction.cancel()
             task = self.run_tasks.get(run_id) or self.intent_sessions.tasks.get(intent_id)
             if task is not None and not task.done() and not task.cancelling():
                 task.cancel()
             if run_id and not run_id.startswith(('local_model:', 'rag-search-')) and run_id not in self.run_tasks:
                 run = self.repository.get_model_run(run_id)
-                if run['status'] in {'queued', 'waiting_budget', 'waiting_permission'}:
+                if run['status'] in {'queued', 'waiting_context', 'waiting_budget', 'waiting_permission'}:
                     self.repository.transition_model_run(run_id, {run['status']}, 'cancelled',
                         'cancelled_by_user', 'Generation was stopped by the user.')
                     self.local_models.release_run(run_id)
@@ -1848,7 +1855,8 @@ class ChatRunService:
         self.tool_loop.cancel_run(run_id)
         self.repository.cancel_active_web_operations(run_id)
         self.context.context_repository.pause_compaction(run["conversation_id"])
-        root = self.execution_status({'owner_kind': 'run', 'owner_id': run_id})
+        root = self.execution_monitor.start_task(run_id=run_id,
+            policy=self.routing_preferences.get('execution_wait'))
         self.execution_monitor.control(root['id'], 'cancel', revision=root['revision'],
             idempotency_key='run-cancel-' + str(root['revision']))
         task = self.run_tasks.get(run_id) or self.compaction_tasks.get(run["conversation_id"])
@@ -2029,6 +2037,16 @@ class ChatRunService:
         return self.repository.get_model_run(run["id"])
 
     async def continue_context(self, run_id: str) -> dict[str, Any]:
+        run = self.repository.get_model_run(run_id)
+        if run['status'] != 'waiting_context':
+            raise CoreDataError('invalid_run_transition', 'Only a run waiting for context can continue.')
+        root = self.execution_monitor.start_task(run_id=run_id,
+            policy=self.routing_preferences.get('execution_wait'))
+        if root['status'] in {'completed', 'cancelled'}:
+            raise CoreDataError('execution_task_terminal', 'The execution task cannot continue.')
+        if root['status'] in {'failed', 'interrupted'}:
+            self.execution_monitor.control(root['id'], 'retry', revision=root['revision'],
+                idempotency_key='context-resume-' + str(root['revision']))
         run = self.repository.continue_context_run(run_id)
         self.run_tasks[run_id] = asyncio.create_task(self._execute(run_id))
         return run

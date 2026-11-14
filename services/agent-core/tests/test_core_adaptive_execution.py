@@ -312,6 +312,36 @@ def test_loading_primary_process_is_live_and_absent_process_is_unknown():
     assert service._model_diagnostic(provider).process_exited
 
 
+def test_execution_cancel_stops_context_recovery_before_foreground_resume(tmp_path, monkeypatch):
+    from agent.runtime import ChatRunService
+    from test_context_compaction_lifecycle import CheckpointProvider, seed
+
+    async def exercise():
+        async def emit(value):
+            pass
+
+        core = CoreRepository(tmp_path / 'core.db')
+        service = ChatRunService(core, emit)
+        run = seed(core)
+        core.transition_model_run(run['id'], {'queued'}, 'waiting_context')
+        root = service.execution_monitor.start_task(run_id=run['id'])
+        provider = CheckpointProvider()
+        monkeypatch.setattr('agent.runtime.create_provider', lambda profile: provider)
+        try:
+            service._launch_compaction(run, service.profiles['builtin-demo'], trigger='explicit_resume')
+            task = service.compaction_tasks[run['conversation_id']]
+            await service.handle_execution('cancel', {'task_id': root['id'], 'revision': root['revision'],
+                'idempotency_key': 'cancel-context-owner'})
+            await asyncio.gather(task, return_exceptions=True)
+            assert provider.calls == []
+            assert core.get_model_run(run['id'])['status'] == 'cancelled'
+            assert not service.compaction_tasks
+        finally:
+            await service.shutdown()
+
+    asyncio.run(exercise())
+
+
 def test_parser_adaptive_exchange_accepts_only_matching_worker_heartbeats():
     import io
     from types import SimpleNamespace
