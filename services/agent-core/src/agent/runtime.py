@@ -124,6 +124,7 @@ class ChatRunService:
         self.local_models = LocalModelService(repository, load_guard=self.gpu_resources.primary)
         self.local_models.execution_monitor = self.execution_monitor
         self.local_models.execution_policy = lambda: self.routing_preferences.get('execution_wait')
+        self.rag.execution_policy = lambda: self.routing_preferences.get('execution_wait')
         self.rag_grounding = RagGrounding(self.rag)
         self.context = ContextEngineService(repository, skill_context=self.skills.render,
                                             rag_context=self.rag_grounding.evidence)
@@ -314,6 +315,94 @@ class ChatRunService:
             runtime = self.local_models._runtime
             return Diagnostic(process_exited=runtime is not None and not runtime.alive)
         return Diagnostic()
+
+    @staticmethod
+    def _managed_transport_failure(error):
+        return getattr(error, 'code', None) in {
+            'runtime_crashed', 'network_unavailable', 'connection_reset', 'request_timeout',
+            'stream_stalled', 'managed_session_changed', 'model_not_loaded',
+            'provider_response_incomplete', 'provider_empty_output',
+        }
+
+    async def _restore_managed_provider(self, provider, expected):
+        await self.local_models.recover(provider.profile.id, expected)
+        fresh = self._provider(self.local_models.get_profile(provider.profile.id))
+        provider.profile, provider.inner = fresh.profile, fresh.inner
+
+    async def _recovering_managed_events(self, run, attempt_id, provider, step, spec, prepared, messages,
+                                         *, update_spec, safe_to_retry):
+        """Reconstruct one drained, output-free invocation on the same model."""
+        captured = dict(spec.managed_runtime) or self.local_models.runtime_identity(provider.profile.id)
+        physical_calls = 0
+
+        async def invoke():
+            nonlocal spec, prepared, physical_calls
+            if physical_calls:
+                self.repository.get_run_conversation(run['id'])
+                if run['id'] in self.rag_grounding.runs:
+                    self.rag_grounding.validate(run['id'])
+                await self._restore_managed_provider(provider, captured)
+                spec = replace(spec, spec_id=str(uuid.uuid4()), round_no=spec.round_no + 1,
+                    managed_runtime=self._managed_runtime_identity(provider.profile.id),
+                    status='prepared', spec_hash='')
+                self.execution_repository.save_invocation_spec(spec)
+                prepared = self._compile_model_request(run['id'], spec, messages)
+                update_spec(spec, prepared, False)
+            physical_calls += 1
+            dispatched = False
+            produced_output = False
+            if not self.local_models._runtime.alive:
+                raise CoreDataError('runtime_crashed', '本地推理进程已退出。')
+            actual = self.local_models.runtime_identity(provider.profile.id)
+            if {key: value for key, value in actual.items() if key != 'session_id'} != {
+                    key: value for key, value in captured.items() if key != 'session_id'}:
+                raise CoreDataError('model_recovery_identity_changed', '恢复期间模型或配置身份已变化。')
+            fresh = self._provider(self.local_models.get_profile(provider.profile.id))
+            provider.profile, provider.inner = fresh.profile, fresh.inner
+            activity = current_activity.get()
+            if activity is not None:
+                activity.resource(active=None, model_id=spec.model_id, device=captured['backend'],
+                                  context_length=captured['context_length'])
+            try:
+                self._validate_context_dispatch_authority(run, provider.profile, step)
+                async with ModelInvocationService.provider_session(provider) as ready:
+                    self._validate_context_dispatch_authority(run, ready.profile, step)
+                    self.execution_repository.mark_invocation_dispatched(spec.spec_id, prepared.request_fingerprint)
+                    dispatched = True
+                    update_spec(spec, prepared, True)
+                    await self._emit(run['id'], 'run.invocation_dispatched', {
+                        **self._invocation_outcome_data(spec), 'round_no': spec.round_no})
+                    self._validate_context_dispatch_authority(run, ready.profile, step)
+                    async with self.local_models.observe_activity(provider.profile.id):
+                        stream = self.model_invocation.stream_prepared(ready, spec, prepared).__aiter__()
+                        async with closing_provider_stream(stream):
+                            async for event in stream:
+                                produced_output = produced_output or event.kind not in {'provider_diagnostic', 'usage', 'finish'}
+                                yield event
+            except BaseException as error:
+                failure = error
+                if (not produced_output and not self.local_models._runtime.alive
+                        and getattr(error, 'code', None) in {'execution_plan_stale', 'provider_unavailable', 'model_not_loaded'}):
+                    failure = CoreDataError('runtime_crashed', '本地推理进程在首次输出前退出。')
+                if dispatched:
+                    code = getattr(failure, 'code', 'core_interrupted')
+                    if isinstance(error, asyncio.CancelledError) and not self.local_models._runtime.alive:
+                        code = 'runtime_crashed'
+                    self.execution_repository.finish_invocation(spec.spec_id,
+                        'cancelled' if code == 'core_interrupted' else 'failed', code)
+                    update_spec(spec, prepared, False)
+                    await self._emit(run['id'], 'run.invocation_failed', {
+                        **self._invocation_outcome_data(spec), 'error_code': code,
+                        'dispatched': True, 'produced_output': produced_output, 'usage_present': False})
+                if failure is not error:
+                    raise failure from error
+                raise
+
+        stream = monitored_events(invoke, diagnose=lambda activity: self._model_diagnostic(provider),
+            safe_to_retry=safe_to_retry, recoverable=self._managed_transport_failure)
+        async with closing_provider_stream(stream):
+            async for event in stream:
+                yield event
 
     def configure_provider(self, value: dict[str, Any]) -> dict[str, Any]:
         if str(value.get("id", "")).startswith("managed:"):
@@ -1241,6 +1330,7 @@ class ChatRunService:
                 pending_task={'task_type': rag_decision['task_type'], 'required': rag_decision['required'],
                               'request': rag_decision['query_context']} if rag_decision.get('continued_run_id') else None,
             )
+            profile = self._profile(profile_id)
             if advisor_intent is not None:
                 selected_ids = [*advisor_intent.get('read_attachment_ids', []),
                                 *(item['attachment_id'] for item in advisor_intent.get('read_requests', []))]
@@ -2065,6 +2155,14 @@ class ChatRunService:
         has_vision_specialist = False
         pending_action_created: dict[str, Any] | None = None
         try:
+            selected = self.repository.get_model_run(run_id)['provider_profile_id']
+            resident = self.local_models._runtime
+            if selected.startswith('managed:') and (resident is None or not resident.matches(selected)):
+                expected = self.local_models._runtime_identities.get(selected)
+                await run_stage('main_model_loading', lambda activity: self.local_models.recover(selected, expected),
+                    safe_to_retry=True, recoverable=self._managed_transport_failure,
+                    diagnose=lambda activity: Diagnostic(process_exited=self.local_models._runtime is not None
+                        and self.local_models._runtime.process is not None and self.local_models._runtime.process.poll() is not None))
             self.local_models.pin_run(run_id, self.repository.get_model_run(run_id)["provider_profile_id"])
             execution_plan = self.execution_coordinator.get_for_run(run_id)
             if execution_plan is not None:
@@ -2468,6 +2566,11 @@ class ChatRunService:
                         transient_retry_count += 1
                         continue
                     raise
+            resident = self.local_models._runtime
+            if (run['provider_profile_id'].startswith('managed:') and resident is not None
+                    and resident.profile is not None and resident.profile.id == run['provider_profile_id']):
+                profile = self._profile_for_step(resident.profile, execution_step) if execution_step else resident.profile
+                provider = self._provider(profile)
             degraded_advisories = (
                 execution_plan.get("degraded_capabilities", [])
                 if execution_plan is not None else []
@@ -3504,10 +3607,37 @@ class ChatRunService:
                 parsed, pending_action=pending_action,
             )
 
+        managed_identity = (self.local_models.runtime_identity(profile.id)
+            if isinstance(provider, ManagedLocalProvider) and profile.id.startswith('managed:') else None)
+
+        async def restore():
+            if intent_execution is not None:
+                request = intent_execution.state()['request']
+                if request.get('conversation_id'):
+                    self.repository.get_conversation(request['conversation_id'])
+            await self._restore_managed_provider(provider, managed_identity)
+
+        async def direct_classify(mode):
+            physical_calls = 0
+
+            async def invoke(activity):
+                nonlocal physical_calls
+                if physical_calls and managed_identity is not None:
+                    await restore()
+                physical_calls += 1
+                return await classify(mode)
+
+            return await run_stage('intent_identification', invoke,
+                safe_to_retry=managed_identity is not None, recoverable=self._managed_transport_failure,
+                diagnose=lambda activity: self._model_diagnostic(provider))
+
         try:
             if intent_execution is not None:
-                return await intent_execution.classify(classify), None
-            return await run_stage('intent_identification', lambda activity: classify("json_object")), None
+                return await intent_execution.classify(classify,
+                    recover=restore if managed_identity is not None else None,
+                    recoverable=self._managed_transport_failure,
+                    diagnose=lambda activity: self._model_diagnostic(provider)), None
+            return await direct_classify('json_object'), None
         except (ProviderError, ValueError, TypeError, json.JSONDecodeError, TimeoutError) as error:
             retry_without_json = (
                 isinstance(error, (ValueError, TypeError, json.JSONDecodeError))
@@ -3519,7 +3649,7 @@ class ChatRunService:
             if not retry_without_json:
                 return None, 'routing_intent_timeout' if isinstance(error, TimeoutError) else getattr(error, "code", "routing_intent_invalid")
             try:
-                return await run_stage('intent_identification', lambda activity: classify(None)), None
+                return await direct_classify(None), None
             except (
                 ProviderError, ValueError, TypeError, json.JSONDecodeError, TimeoutError,
             ) as retry_error:
@@ -3793,7 +3923,9 @@ class ChatRunService:
         apply_rag_contract: bool = True,
         response_schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
-        if monitored_local(provider) and current_activity.get() is None:
+        managed_recovery = (isinstance(provider, ManagedLocalProvider)
+            and provider.profile.id.startswith('managed:') and self.local_models._runtime is not None)
+        if monitored_local(provider) and current_activity.get() is None and not managed_recovery:
             return await run_stage('model_output', lambda activity: self._invoke_planned_step(
                 run, plan, step, attempt, provider, messages, max_output_tokens=max_output_tokens,
                 response_format=response_format, round_no=round_no, native_search_mode=native_search_mode,
@@ -3802,7 +3934,9 @@ class ChatRunService:
         managed_request = isinstance(provider, ManagedLocalProvider)
         if managed_request:
             await self._emit(run["id"], "run.state_changed", {"status": run["status"], "phase": "waitingModel"})
-        async with ModelInvocationService.provider_session(provider) as provider:
+        async with ModelInvocationService.provider_session(None if managed_recovery else provider) as session_provider:
+            if session_provider is not None:
+                provider = session_provider
             if managed_request:
                 await self._emit(run["id"], "run.state_changed", {"status": run["status"], "phase": "waitingOutput"})
             self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
@@ -3821,21 +3955,28 @@ class ChatRunService:
             prepared = self._compile_model_request(run['id'], spec, messages)
             if round_no == 1:
                 self.repository.bind_attempt_invocation_spec(attempt["id"], spec.spec_id)
-            self.execution_repository.mark_invocation_dispatched(
-                spec.spec_id, prepared.request_fingerprint,
-            )
-            await self._emit(run["id"], "run.invocation_dispatched", {
-                "plan_id": spec.plan_id, "step_id": spec.step_id, "spec_id": spec.spec_id,
-                "round_no": spec.round_no, "provider_profile_id": spec.provider_or_backend_id,
-                "model_id": spec.model_id, "route_id": spec.route_id,
-                "protocol_id": spec.protocol_id, "adapter_id": spec.adapter_id,
-            })
+            managed_dispatched = False
+            if not managed_recovery:
+                self.execution_repository.mark_invocation_dispatched(spec.spec_id, prepared.request_fingerprint)
+                await self._emit(run['id'], 'run.invocation_dispatched', {
+                    **self._invocation_outcome_data(spec), 'round_no': spec.round_no})
             try:
                 # Event delivery yields to settings/cancel handlers. Check again
                 # immediately before entering the captured provider adapter.
                 self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
-                async with self.local_models.observe_activity(provider.profile.id):
-                    result = await self.model_invocation.complete_prepared(provider, spec, prepared)
+                if managed_recovery:
+                    def update_spec(replacement, request, dispatched):
+                        nonlocal spec, prepared, managed_dispatched
+                        spec, prepared, managed_dispatched = replacement, request, dispatched
+
+                    result = await self.model_invocation.complete_prepared(provider, spec, prepared,
+                        stream_factory=lambda: self._recovering_managed_events(run, attempt['id'], provider,
+                            step, spec, prepared, messages, update_spec=update_spec,
+                            safe_to_retry=not self.tool_loop.repository.list_for_run(run['id'])
+                                and not self.repository.list_web_operations(run['id'])))
+                else:
+                    async with self.local_models.observe_activity(provider.profile.id):
+                        result = await self.model_invocation.complete_prepared(provider, spec, prepared)
                 content, usage, provider_events = result
                 validate_provider_completion(
                     content, next((event.finish_reason for event in reversed(provider_events)
@@ -3854,9 +3995,10 @@ class ChatRunService:
                         "connection_reset", "request_timeout", "stream_stalled",
                     } else "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
                 )
-                self.execution_repository.finish_invocation(
-                    spec.spec_id, terminal, getattr(error, "code", "core_interrupted"),
-                )
+                if not managed_recovery or managed_dispatched:
+                    self.execution_repository.finish_invocation(
+                        spec.spec_id, terminal, getattr(error, "code", "core_interrupted"),
+                    )
                 await self._emit(run["id"], "run.invocation_failed", {
                     **self._invocation_outcome_data(spec),
                     "error_code": getattr(error, "code", "core_interrupted"),
@@ -4468,6 +4610,9 @@ class ChatRunService:
                 raise
             current = self.repository.get_model_run(run["id"])
             partial = str((current.get("draft") or {}).get("content") or "")
+            if (isinstance(provider, ManagedLocalProvider) and provider.profile.id.startswith('managed:')
+                    and (partial or self.local_models._runtime is not None and not self.local_models._runtime.alive)):
+                raise
             operations = self.tool_loop.repository.list_for_run(run["id"])
             if not recovery_allowed(error, partial=partial, operations=operations):
                 raise
@@ -4654,34 +4799,35 @@ class ChatRunService:
                         self.repository.bind_attempt_invocation_spec(attempt_id, spec.spec_id)
                     if isinstance(provider, ManagedLocalProvider):
                         await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": "waitingModel"})
-                    ready_provider = await run_stage('model_queue', lambda activity:
-                        stream_cleanup.enter_async_context(ModelInvocationService.provider_session(provider)))
-                    if isinstance(provider, ManagedLocalProvider):
-                        await self._emit(run_id, "run.state_changed", {"status": "generating", "phase": "waitingOutput"})
-                    self._validate_context_dispatch_authority(run, getattr(ready_provider, "profile", None), execution_step)
-                    self.execution_repository.mark_invocation_dispatched(
-                        spec.spec_id, prepared.request_fingerprint,
-                    )
-                    invocation_dispatched = True
-                    await self._emit(run_id, "run.invocation_dispatched", {
-                        "plan_id": spec.plan_id, "step_id": spec.step_id,
-                        "spec_id": spec.spec_id, "round_no": spec.round_no,
-                        "provider_profile_id": spec.provider_or_backend_id,
-                        "model_id": spec.model_id, "route_id": spec.route_id,
-                        "protocol_id": spec.protocol_id, "adapter_id": spec.adapter_id,
-                    })
-                    self._validate_context_dispatch_authority(
-                        run, getattr(provider, "profile", None), execution_step,
-                    )
                     if not monitored_local(provider):
                         invocation_timeout.reschedule(asyncio.get_running_loop().time() + spec.total_timeout_ms / 1000)
                     stream_started = time.monotonic()
-                    stream = monitored_events(lambda: self.model_invocation.stream_prepared(
-                        ready_provider, spec, prepared).__aiter__(), diagnose=lambda activity: self._model_diagnostic(provider),
-                        process=getattr(self.local_models._runtime, 'process', None) if isinstance(provider, ManagedLocalProvider) else None,
-                        heartbeat=self.local_models._runtime.heartbeat if isinstance(provider, ManagedLocalProvider)
-                            and self.local_models._runtime is not None else None,
-                        job=getattr(self.local_models._runtime, 'job', None) if isinstance(provider, ManagedLocalProvider) else None).__aiter__()
+                    managed_recovery = (isinstance(provider, ManagedLocalProvider)
+                        and provider.profile.id.startswith('managed:') and self.local_models._runtime is not None)
+                    if managed_recovery:
+                        def update_spec(replacement, request, dispatched):
+                            nonlocal spec, prepared, invocation_round, invocation_dispatched
+                            spec, prepared = replacement, request
+                            invocation_round, invocation_dispatched = replacement.round_no, dispatched
+
+                        stream = self._recovering_managed_events(run, attempt_id, provider,
+                            execution_step, spec, prepared, request_messages, update_spec=update_spec,
+                            safe_to_retry=not visible_content and not self.tool_loop.repository.list_for_run(run_id)
+                                and not self.repository.list_web_operations(run_id)).__aiter__()
+                    else:
+                        ready_provider = await run_stage('model_queue', lambda activity:
+                            stream_cleanup.enter_async_context(ModelInvocationService.provider_session(provider)))
+                        if isinstance(provider, ManagedLocalProvider):
+                            await self._emit(run_id, 'run.state_changed', {'status': 'generating', 'phase': 'waitingOutput'})
+                        self._validate_context_dispatch_authority(run, getattr(ready_provider, 'profile', None), execution_step)
+                        self.execution_repository.mark_invocation_dispatched(spec.spec_id, prepared.request_fingerprint)
+                        invocation_dispatched = True
+                        await self._emit(run_id, 'run.invocation_dispatched', {
+                            **self._invocation_outcome_data(spec), 'round_no': spec.round_no})
+                        self._validate_context_dispatch_authority(run, getattr(provider, 'profile', None), execution_step)
+                        stream = monitored_events(lambda: self.model_invocation.stream_prepared(
+                            ready_provider, spec, prepared).__aiter__(),
+                            diagnose=lambda activity: self._model_diagnostic(provider)).__aiter__()
                     await stream_cleanup.enter_async_context(closing_provider_stream(stream))
                     while True:
                         try:
@@ -5300,7 +5446,11 @@ class ChatRunService:
                 raise CoreDataError('document_review_invalid', '审阅批次格式未通过校验。') from error
 
         identity = {'project_generation': state['generation'], 'model_id': run['model_id'],
-            'provider_id': profile.id, 'plan_hash': plan.get('plan_hash'), 'task_revision': 1}
+            'provider_id': profile.id, 'task_revision': 1,
+            'generation_config': {key: step.get(key) for key in ('provider_profile_id', 'model_id',
+                'protocol_id', 'invocation_route_id', 'route_config_fingerprint', 'capability_signature')},
+            'reasoning_effort': plan.get('reasoning_effort'),
+            'context_length': window, 'batch_token_allowance': allowance}
         source_scope = self.rag.project_state(state['project_id'])
         with self.repository._connect() as connection:
             versions = connection.execute('SELECT version_ids FROM rag_indexes WHERE id IN (SELECT value FROM json_each(?))',
@@ -5313,15 +5463,47 @@ class ChatRunService:
         if profile.id.startswith('managed:'):
             identity['managed_model'] = {key: value for key, value in self.local_models.runtime_identity(profile.id).items()
                                          if key != 'session_id'}
+        managed_expected = self.local_models.runtime_identity(profile.id) if profile.id.startswith('managed:') else None
+        reload_model = False
+        parent_task_id = None
+        if run.get('parent_run_id'):
+            parent = self.repository.get_model_run(run['parent_run_id'])
+            if (parent['conversation_id'], parent['user_message_id']) == (run['conversation_id'], run['user_message_id']):
+                with self.repository._connect() as connection:
+                    parent_root = connection.execute('SELECT id,intent_task_id FROM execution_wait_tasks WHERE run_id=?',
+                        (parent['id'],)).fetchone()
+                if parent_root is not None:
+                    parent_task_id = parent_root['id']
+                    if parent_root['intent_task_id'] and not parent_root['intent_task_id'].startswith('request:'):
+                        identity['task_revision'] = self.intent_sessions.get(parent_root['intent_task_id'])['revision']
 
         async def review(activity):
-            return await review_template(self.documents, run['id'], template['id'], request,
-                generate, evidence, lambda text, citations: self.rag_grounding.document_claim(run['id'], text, citations),
-                activity=activity, identity=identity, token_allowance=allowance)
+            nonlocal reload_model, profile
+            if reload_model:
+                self.rag_grounding.validate(run['id'])
+                self.documents.path_for(run['id'], template['id'])
+                profile = await self.local_models.recover(profile.id, managed_expected)
+                reload_model = False
+            try:
+                return await review_template(self.documents, run['id'], template['id'], request,
+                    generate, evidence, lambda text, citations: self.rag_grounding.document_claim(run['id'], text, citations),
+                    activity=activity, identity=identity, token_allowance=allowance, parent_task_id=parent_task_id)
+            except BaseException as error:
+                if managed_expected is not None and self._managed_transport_failure(error):
+                    reload_model = True
+                raise
+
+        def diagnose_review(activity):
+            nonlocal reload_model
+            diagnostic = self._model_diagnostic(self._provider(profile))
+            if managed_expected is not None and diagnostic.process_exited:
+                reload_model = True
+            return diagnostic
 
         result = await run_stage('document_review', review, safe_to_retry=True,
-            diagnose=lambda activity: self._model_diagnostic(self._provider(profile)),
-            recoverable=lambda error: getattr(error, 'code', None) == 'rag_worker_crash')
+            diagnose=diagnose_review,
+            recoverable=lambda error: getattr(error, 'code', None) == 'rag_worker_crash'
+                or managed_expected is not None and self._managed_transport_failure(error))
         return result['markdown']
 
     async def _fill_template_planned(self, run, attempt_id, template_id, request):

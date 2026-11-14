@@ -85,7 +85,8 @@ async def watch_process(process, activity, *, heartbeat=None, job=None):
         await asyncio.sleep(5)
 
 
-async def monitored_events(factory, *, stage='model_output', diagnose=None, process=None, heartbeat=None, job=None):
+async def monitored_events(factory, *, stage='model_output', diagnose=None, process=None, heartbeat=None, job=None,
+                           safe_to_retry=False, recoverable=None):
     """Monitor stream ownership, drain cancellation and preserve output ordering."""
     if current_monitor.get() is None or current_task_id.get() is None or current_activity.get() is not None:
         stream = factory()
@@ -96,16 +97,18 @@ async def monitored_events(factory, *, stage='model_output', diagnose=None, proc
             await stream.aclose()
         return
     queue = asyncio.Queue(maxsize=16)
-    delivered = False
+    produced = False
 
     async def consume(activity):
-        if delivered:
+        nonlocal produced
+        if produced:
             raise CoreDataError('execution_replay_unsafe', '模型已经输出内容，请保留当前草稿并通过运行重试恢复。')
         stream = factory()
         sampler = asyncio.create_task(watch_process(process, activity, heartbeat=heartbeat, job=job)) if process is not None else None
         try:
             async for event in stream:
                 if event.kind not in {'usage', 'provider_diagnostic'}:
+                    produced = produced or event.kind != 'finish'
                     activity.progress(kind=event.kind, characters=len(event.text or ''),
                                       **({'output_delivered': True} if event.kind != 'finish' else {}))
                 await queue.put(event)
@@ -115,7 +118,12 @@ async def monitored_events(factory, *, stage='model_output', diagnose=None, proc
                 sampler.cancel()
                 await asyncio.gather(sampler, return_exceptions=True)
 
-    operation = asyncio.create_task(run_stage(stage, consume, safe_to_retry=False, diagnose=diagnose))
+    def diagnose_safely(activity):
+        from agent.execution.execution_wait import Diagnostic
+        return diagnose(activity) if diagnose is not None and not produced else Diagnostic()
+
+    operation = asyncio.create_task(run_stage(stage, consume, safe_to_retry=safe_to_retry,
+        diagnose=diagnose_safely, recoverable=lambda error: not produced and recoverable is not None and recoverable(error)))
     pending = None
     try:
         while True:
@@ -123,7 +131,6 @@ async def monitored_events(factory, *, stage='model_output', diagnose=None, proc
             await asyncio.wait({pending, operation}, return_when=asyncio.FIRST_COMPLETED)
             if pending.done():
                 event = pending.result()
-                delivered = delivered or event.kind not in {'usage', 'provider_diagnostic', 'finish'}
                 yield event
                 pending = None
             elif operation.done():

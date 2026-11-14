@@ -74,8 +74,9 @@ class ModelInvocationService:
 
     async def complete_prepared(
         self, provider: Any, spec: InvocationSpec, prepared: PreparedRequest,
+        *, stream_factory=None,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
-        if monitored_local(provider) and current_activity.get() is None:
+        if monitored_local(provider) and current_activity.get() is None and stream_factory is None:
             return await run_stage('model_output', lambda activity: self.complete_prepared(provider, spec, prepared))
         content = ""
         usage: dict[str, int] = {}
@@ -84,10 +85,11 @@ class ModelInvocationService:
         diagnostic: dict[str, Any] = {}
         saw_activity = False
         try:
-            async with self.provider_session(provider) as ready_provider:
+            async with self.provider_session(provider if stream_factory is None else None) as ready_provider:
                 started = time.monotonic()
                 async with asyncio.timeout(None if monitored_local(provider) else spec.total_timeout_ms / 1000):
-                    stream = self.stream_prepared(ready_provider, spec, prepared).__aiter__()
+                    stream = (stream_factory() if stream_factory is not None else
+                              self.stream_prepared(ready_provider, spec, prepared)).__aiter__()
                     async with closing_provider_stream(stream):
                         while True:
                             try:

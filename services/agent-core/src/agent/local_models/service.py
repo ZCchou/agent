@@ -30,6 +30,7 @@ class LocalModelService:
         self._auto_load_job = None
         self.execution_monitor = None
         self.execution_policy = None
+        self._runtime_identities = {}
 
     @property
     def root(self):
@@ -71,11 +72,13 @@ class LocalModelService:
         self.get_profile(provider_id)
         runtime = self._runtime
         record = self.catalog.get(runtime.model_id)
-        return {"artifact_digest": record["digest"], "template_digest": record["template_digest"],
+        identity = {"artifact_digest": record["digest"], "template_digest": record["template_digest"],
                 "engine_version": runtime.engine.version, "engine_commit": runtime.engine.source_commit,
                 "backend": runtime.backend, "session_id": runtime.session_id,
                 "context_length": str(runtime.actual_context_length), "threads": str(record["threads"]),
                 "gpu_layers": str(runtime.gpu_layers_used)}
+        self._runtime_identities[provider_id] = dict(identity)
+        return identity
 
     def _backend(self):
         if self._runtime is None:
@@ -183,6 +186,24 @@ class LocalModelService:
     def release_run(self, run_id):
         if self._run_pins.pop(run_id, None) is not None and self._runtime is not None:
             self._runtime.touch()
+
+    async def recover(self, provider_id, expected_identity=None):
+        """Drain the previous engine and reload the exact captured model/config."""
+        model_id = provider_id.removeprefix('managed:')
+        record = self.catalog.get(model_id)
+        if expected_identity is not None and record['digest'] != expected_identity.get('artifact_digest'):
+            raise CoreDataError('model_recovery_identity_changed', '模型权重身份已变化，请重新选择模型后重试。')
+        async with self._permit:
+            guard = self.load_guard(record) if self.load_guard else nullcontext()
+            async with guard:
+                await self._backend().load(model_id, threading.Event())
+            actual = self.runtime_identity(provider_id)
+            expected = {key: value for key, value in (expected_identity or actual).items() if key != 'session_id'}
+            current = {key: value for key, value in actual.items() if key != 'session_id'}
+            if current != expected:
+                await self._backend().unload()
+                raise CoreDataError('model_recovery_identity_changed', '模型、设备或推理配置已变化，请核对配置后重试。')
+            return self.get_profile(provider_id)
 
     def prepare(self, model_id, preparation_id=None):
         self.catalog.get(model_id)

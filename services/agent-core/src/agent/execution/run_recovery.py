@@ -5,6 +5,7 @@ from typing import Any
 
 
 REASONS = {
+    'model_recovery_identity_changed': '恢复期间模型、设备或配置已变化，请核对后重新发送',
     'rag_rerank_timeout': '资料重排序等待已达到配置时限，请查看检索诊断',
     'rag_worker_crash': '检索进程已退出，请查看辅助模型与设备诊断',
     'execution_stalled': '执行阶段尚无可验证的进展，请查看任务详情',
@@ -115,7 +116,7 @@ def safe_code(error: BaseException) -> str:
 
 def recovery_allowed(error: BaseException, *, partial: str, operations: list[dict[str, Any]]) -> bool:
     code = getattr(error, "code", "internal_error")
-    if code.startswith(('rag_', 'ocr_', 'execution_')):
+    if code.startswith(('rag_', 'ocr_', 'execution_')) or code == 'model_recovery_identity_changed':
         return False
     if code.startswith('document_') or code in {'terminal_isolation_unavailable', 'rag_library_required', 'attachment_purpose_invalid'}:
         return False

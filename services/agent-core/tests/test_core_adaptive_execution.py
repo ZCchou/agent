@@ -281,7 +281,8 @@ def test_parser_adaptive_exchange_accepts_only_matching_worker_heartbeats():
     assert observed == [{'worker': 'document_parser'}]
 
 
-def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch):
+@pytest.mark.parametrize('linked_retry', [False, True])
+def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry):
     import hashlib
     import io
     import json
@@ -314,8 +315,16 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         original_client(transport=httpx.MockTransport(respond), **kwargs))
 
     async def exercise():
+        checkpoint_count = 0
+        cancellation = None
+
         async def emit(value):
-            pass
+            nonlocal checkpoint_count, cancellation
+            if (linked_retry and cancellation is None and value['event_type'] == 'execution.activity'
+                    and value['data'].get('stage') == 'document_review' and value['data'].get('event') == 'checkpoint'):
+                checkpoint_count += 1
+                if checkpoint_count == 2:
+                    cancellation = asyncio.create_task(service.cancel(value['run_id']))
 
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:19999/v1'
@@ -328,7 +337,8 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         service.rag.execution_monitor = service.execution_monitor
         document = Document()
         document.add_heading('技术内容', 1)
-        for index in range(12):
+        paragraph_count = 36
+        for index in range(paragraph_count):
             document.add_paragraph('检查项目 ' + str(index))
         table = document.add_table(rows=1, cols=2)
         table.cell(0, 0).text = '说明：核对所引用版本'
@@ -355,16 +365,38 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
             await service.rag.handle('library.bind', {'library_id': library, 'project_id': project['id'], 'enabled': True})
             result = await service.start({'conversation_id': work['id'], 'content': '请检查附件中的每个现有位置',
                 'attachments': [attachment], 'idempotency_key': 'semantic-review'})
-            await service.tasks[result['run']['id']]
+            await asyncio.gather(service.tasks[result['run']['id']], return_exceptions=True)
             run = core.get_model_run(result['run']['id'])
+            if linked_retry:
+                assert cancellation is not None
+                await cancellation
+                assert run['status'] == 'cancelled'
+                parent_root = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
+                with core._connect() as connection:
+                    saved = connection.execute('SELECT payload_json FROM execution_wait_checkpoints WHERE task_id=? AND stage=?',
+                        (parent_root['id'], 'document_review')).fetchall()
+                saved_targets = {target for row in saved for target in json.loads(row['payload_json'])['target_ids']}
+                assert saved_targets
+                batches.clear()
+                retried = await service.retry(run['id'])
+                await service.tasks[retried['id']]
+                run = core.get_model_run(retried['id'])
+                assert saved_targets.isdisjoint({field['id'] for batch in batches for field in batch['fields']})
+                assert service.execution_monitor.get_task(parent_root['id'])['status'] == 'cancelled'
             assert run['status'] == 'completed', (run['error_code'], run['error_message'])
             assert run['rag_decision']['template_review']
             assert run['rag_decision']['task_type'] == 'evidence_answer'
             assert len(batches) >= 2 and all(len(batch['fields']) <= 10 for batch in batches)
-            assert len({field['id'] for batch in batches for field in batch['fields']}) == 14
+            if not linked_retry:
+                assert len(batches) >= 4
+                assert len({field['id'] for batch in batches for field in batch['fields']}) == paragraph_count + 2
+                with core._connect() as connection:
+                    invocation_count = connection.execute('SELECT COUNT(*) FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=?',
+                        (run['id'],)).fetchone()[0]
+                assert invocation_count == len(batches)
             assert hashlib.sha256((tmp_path / attachment['storage_key']).read_bytes()).hexdigest() == original_hash
             assert not any(operation['tool_name'] == 'document.export' for operation in service.tool_loop.repository.list_for_run(run['id']))
-            assert '15' in run['assistant_message']['content']
+            assert str(paragraph_count + 3) in run['assistant_message']['content']
             root = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
             assert root['status'] == 'completed'
         finally:

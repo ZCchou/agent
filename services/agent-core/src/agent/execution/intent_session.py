@@ -85,9 +85,9 @@ class IntentExecution:
             attempt_wait_seconds=deadline - self.started)
         self.timer.reschedule(deadline)
 
-    async def classify(self, operation):
+    async def classify(self, operation, *, recover=None, recoverable=None, diagnose=None):
         if self.service.monitor is not None:
-            return await self._classify_monitored(operation)
+            return await self._classify_monitored(operation, recover=recover, recoverable=recoverable, diagnose=diagnose)
         mode = 'json_object'
         while True:
             state = self.state()
@@ -133,17 +133,28 @@ class IntentExecution:
             if code in {'routing_intent_invalid', 'response_format_unsupported'}:
                 mode = None
 
-    async def _classify_monitored(self, operation):
+    async def _classify_monitored(self, operation, *, recover=None, recoverable=None, diagnose=None):
         mode = 'json_object'
         # This is a format-repair limit. Elapsed time never consumes a call.
         for _ in range(3):
             state = self.state()
-            self.service._patch(self.identity, self.revision, status='identifying',
-                                attempts=state['attempts'] + 1, error=None,
-                                attempt_started_at=time.time(), attempt_wait_seconds=None)
             self.started = asyncio.get_running_loop().time()
+            physical_calls = 0
+
+            async def invoke(activity):
+                nonlocal physical_calls
+                if physical_calls and recover is not None:
+                    await recover()
+                physical_calls += 1
+                current = self.state()
+                self.service._patch(self.identity, self.revision, status='identifying',
+                    attempts=current['attempts'] + 1, error=None,
+                    attempt_started_at=time.time(), attempt_wait_seconds=None)
+                return await operation(mode)
+
             try:
-                result = await run_stage('intent_identification', lambda activity: operation(mode))
+                result = await run_stage('intent_identification', invoke, safe_to_retry=recover is not None,
+                    recoverable=recoverable, diagnose=diagnose)
                 return result
             except asyncio.CancelledError:
                 raise

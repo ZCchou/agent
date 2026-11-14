@@ -2244,7 +2244,7 @@ class CoreRepository:
                 "SELECT * FROM run_attempts WHERE run_id = ? ORDER BY attempt_number DESC LIMIT 1", (run_id,)
             ).fetchone()
             draft = connection.execute(
-                "SELECT content, updated_at FROM assistant_drafts WHERE run_id = ?", (run_id,)
+                "SELECT attempt_id, content, updated_at FROM assistant_drafts WHERE run_id = ?", (run_id,)
             ).fetchone()
             message = connection.execute(
                 """SELECT m.* FROM messages m JOIN model_runs r ON r.assistant_message_id = m.id
