@@ -22,7 +22,7 @@ def test_new_database_seeds_global_instructions_and_schema_v20(tmp_path) -> None
     ).hexdigest()
 
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 31
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 32
         assert connection.execute(
             "SELECT COUNT(*) FROM global_instructions WHERE id = 1"
         ).fetchone()[0] == 1

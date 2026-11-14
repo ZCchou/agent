@@ -397,7 +397,7 @@ def test_project_work_natural_language_tool_round_resumes_generation(tmp_path: P
         assert [(item["tool_name"], item["status"]) for item in operations] == [
             ("fs.list", "completed"),
         ]
-        event_types = [event["event_type"] for event in events]
+        event_types = [event["event_type"] for event in events if event["event_type"] != "execution.activity"]
         assert "run.tool_requested" in event_types
         assert "run.tool_completed" in event_types
         assert event_types[-1] == "run.completed"

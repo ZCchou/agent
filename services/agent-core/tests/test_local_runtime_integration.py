@@ -11,7 +11,7 @@ from test_rag_service import Engines, ready, wait_job
 
 def test_local_runtime_contract_upgrades_host_and_core_together():
     response = handle_message({"v": 25, "id": "contract", "type": "ping", "params": {}})
-    assert response["v"] == 24
+    assert response["v"] == 25
     assert response["result"]["schema_version"] == 32
     assert response["result"]["build_id"] == "schema32-agent-unified-v1"
     root = Path(__file__).resolve().parents[3]
@@ -47,12 +47,12 @@ def test_schema24_upgrade_keeps_project_dialogue_knowledge_and_rag(tmp_path):
             connection.execute("UPDATE schema_info SET version=24")
         upgraded = CoreRepository(tmp_path / "agent.db")
         with upgraded._connect() as connection:
-            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 31
+            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 32
             assert {table: [tuple(row) for row in connection.execute(f'SELECT * FROM "{table}"')]
                     for table in tables} == before
             assert connection.execute("SELECT COUNT(*) FROM local_models").fetchone()[0] == 0
             assert not connection.execute("PRAGMA foreign_key_check").fetchall()
-        backups = list(tmp_path.glob("agent.db.pre-schema31-*.bak"))
+        backups = list(tmp_path.glob("agent.db.pre-schema32-*.bak"))
         assert len(backups) == 1
         service = RagService(upgraded, Engines())
         assert service.read_evidence(project["id"], evidence["id"])["version_id"] == version

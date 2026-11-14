@@ -86,7 +86,7 @@ def test_real_schema28_upgrade_defaults_to_auto_and_preserves_history(tmp_path):
     assert restored['rag_mode'] == 'auto'
     assert restored['messages'][0]['content'] == 'Existing message'
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 31
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 32
         assert not connection.execute('PRAGMA foreign_key_check').fetchall()
 
 
