@@ -58,11 +58,24 @@ def _linked(path):
     return path.is_symlink() or bool(getattr(path.lstat(), "st_file_attributes", 0) & 0x400)
 
 
+def _raise_walk_error(error):
+    raise error
+
+
+def _model_file_error(error, root, operation):
+    if isinstance(error, PermissionError):
+        path = str(error.filename or root)
+        return CoreDataError('rag_model_access_denied',
+            f'辅助模型目录或文件 {path} 访问受限。请在资源管理器中确认当前 Windows 账户的读取权限，然后重新检测模型。',
+            {'path': path, 'winerror': getattr(error, 'winerror', None), 'operation': operation})
+    return CoreDataError('rag_model_error', f'{operation}: {error}')
+
+
 def _files(root):
     if _linked(root):
         raise ValueError("Model directory cannot be a symbolic link or junction")
     result = []
-    for directory, dirs, files in os.walk(root, followlinks=False):
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=_raise_walk_error):
         for name in dirs + files:
             path = Path(directory) / name
             if _linked(path):
@@ -407,7 +420,7 @@ class ModelStore:
             if manifest.get("files") != hashes or digest != record["digest"] or manifest.get("digest") != digest:
                 raise ValueError("Model integrity hash changed")
         except (OSError, ValueError, KeyError) as exc:
-            raise CoreDataError("rag_model_error", f"Model integrity verification failed: {exc}") from exc
+            raise _model_file_error(exc, root, 'Model integrity verification failed') from exc
         return root
 
     def _command(self, force=True):
@@ -465,7 +478,7 @@ class ModelStore:
                 result.append((path.relative_to(root).as_posix(), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
             return tuple(result)
         except (OSError, ValueError) as exc:
-            raise CoreDataError("rag_model_error", f"Model integrity stat check failed: {exc}") from exc
+            raise _model_file_error(exc, root, 'Model integrity stat check failed') from exc
 
     def _verified_path(self, record, root, force):
         path = root / record["id"]
@@ -625,15 +638,17 @@ class ModelStore:
                     checkpoint = partial if partial is not None else {}
                     pending_indices = [index for index in range(len(texts)) if index not in checkpoint]
                     completed = len(checkpoint)
+                    model_progress = {'model_role': record['role'], 'model_name': record['name']}
                     if progress:
-                        event = {'stage': 'reranking' if is_resident() else 'model_loading',
-                                 'completed': completed, 'total': len(texts)}
+                        inference_stage = 'reranking' if action == 'rerank' else 'embedding'
+                        event = {'stage': inference_stage if is_resident() else 'model_loading',
+                                 **model_progress, 'completed': completed, 'total': len(texts)}
                         pending = progress(event)
                         if inspect.isawaitable(pending):
                             await pending
                     async def worker_progress(event):
                         if progress:
-                            pending = progress({**event, 'completed': completed, 'total': len(texts)})
+                            pending = progress({**event, **model_progress, 'completed': completed, 'total': len(texts)})
                             if inspect.isawaitable(pending):
                                 await pending
                     if action == 'rerank' and len(pending_indices) > 1:
@@ -705,10 +720,10 @@ class ModelStore:
             self._save()
         return {"model_id": model_id, **result}
 
-    async def embed(self, model_id, texts, query=False):
+    async def embed(self, model_id, texts, query=False, *, progress=None):
         if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
             raise CoreDataError("rag_model_error", "texts must be a list of strings")
-        result = await self._request(model_id, "embed", texts=texts, query=bool(query))
+        result = await self._request(model_id, "embed", texts=texts, query=bool(query), progress=progress)
         dimension = self._record(model_id)["dimension"]
         if len(result) != len(texts) or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in result):
             raise CoreDataError("rag_model_error", "Inference returned invalid embedding dimensions or values")

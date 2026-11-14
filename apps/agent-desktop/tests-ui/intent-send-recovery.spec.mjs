@@ -1,26 +1,49 @@
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./tauri-mock.mjs";
 
-async function openRecoveryChat(page, initialFailure = null) {
+async function openRecoveryChat(page, initialFailure = null, managed = false) {
   await installTauriMock(page, { connect_model_provider: null });
-  await page.addInitScript((initialFailure) => {
+  await page.addInitScript(({ initialFailure, managed }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     window.intentStarts = [];
     window.intentTasks = [];
     let failedOnce = false;
     let accepted = null;
-    window.completeIntent = () => {
+    const listeners = new Map();
+    window.managedReady = false;
+    window.emitIntentRun = (event_type, data) => {
+      const handler = listeners.get('model-run-event');
+      window[`_${handler}`]({ event: 'model-run-event', id: 1, payload: {
+        run_id: 'recovered-run', event_type, data, timestamp: '2026-11-14T00:00:00Z',
+      } });
+    };
+    window.completeIntent = (status = 'completed') => {
       const task = window.intentTasks.at(-1);
       const now = "2026-11-13T10:00:00Z";
       const user = { id: "accepted-user", role: "user", content: task.request.content, conversation_id: "recovered-chat", attachments: [], created_at: now };
       const assistant = { id: "accepted-answer", role: "assistant", content: "Recovered answer", conversation_id: "recovered-chat", created_at: now };
       const conversation = { id: "recovered-chat", title: "Recovered conversation", kind: "standard_chat", category: "casual", resolved_category: "casual",
         project_id: null, chat_group_id: null, messages: [user, assistant], model_selection_mode: "fixed", provider_profile_id: "builtin-demo", model_id: "demo", created_at: now, updated_at: now };
-      const run = { id: "recovered-run", conversation_id: conversation.id, user_message_id: user.id, status: "completed", provider_profile_id: "builtin-demo", model_id: "demo", assistant_message: assistant, draft: null };
+      if (status !== 'completed') conversation.messages = [user];
+      const run = { id: "recovered-run", conversation_id: conversation.id, user_message_id: user.id, status, provider_profile_id: "builtin-demo", model_id: "demo", assistant_message: status === 'completed' ? assistant : null, draft: null };
       accepted = { status: "accepted", run, conversation, user_message: user, selection_decision: {} };
       Object.assign(task, { status: "completed", result: accepted });
     };
     window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === 'plugin:event|listen') listeners.set(args.event, args.handler);
+      if (managed && command === 'get_app_settings') {
+        const settings = structuredClone(await invoke(command, args));
+        settings.models.providers = [{ id: 'managed:status-model', name: 'Fixture local model', kind: 'openai_compatible', enabled: true,
+          models: [{ id: 'status-model', enabled: true, source: 'discovered', status: window.managedReady ? 'available' : 'unavailable',
+            allow_automatic_routing: true, tool_mode: 'text_only', capabilities: { text: 'yes', vision: 'no', tools: 'no', context_length: 8192 } }] }];
+        settings.models.default_provider_profile_id = 'managed:status-model';
+        settings.models.default_model_id = 'status-model';
+        return settings;
+      }
+      if (managed && command === 'local_model_request') {
+        if (args.action === 'runtime.release') return { released: true };
+        if (args.action === 'runtime.prepare') return { preparation_id: 'status-lease', state: window.managedReady ? 'ready' : 'loading' };
+      }
       if (command === "start_model_run") {
         window.intentStarts.push(structuredClone(args.request));
         let task = window.intentTasks.find((value) => value.request.idempotency_key === args.request.idempotency_key);
@@ -42,6 +65,7 @@ async function openRecoveryChat(page, initialFailure = null) {
         if (args.action === "list") return { tasks: structuredClone(window.intentTasks.filter((task) => task.scope === args.params.scope).reverse()) };
         const task = window.intentTasks.find((value) => value.id === args.params.task_id);
         if (args.action === "cancel") Object.assign(task, { status: "cancelled", error: { code: "cancelled_by_user", message: "Cancelled" } });
+        if (args.action === 'respond') Object.assign(task, { status: 'identifying', revision: task.revision + 1, clarification: null });
         return { task: structuredClone(task) };
       }
       if (command === "get_conversation" && args.conversationId === accepted?.conversation.id) return structuredClone(accepted.conversation);
@@ -50,12 +74,49 @@ async function openRecoveryChat(page, initialFailure = null) {
       if (command === "list_conversations" && accepted) return [structuredClone(accepted.conversation)];
       return invoke(command, args);
     };
-  }, initialFailure);
+  }, { initialFailure, managed });
   await page.goto(`${process.env.AGENT_UI_BASE_URL ?? "http://127.0.0.1:5173"}/tests-ui/fixtures/intent-recovery.html`);
   const editor = page.getByRole("textbox", { name: "Ask agent..." });
   await expect(editor).toBeEnabled();
   return editor;
 }
+
+test('cold local model transitions to intent recognition, clarification and actual run phases', async ({ page }) => {
+  const editor = await openRecoveryChat(page, null, true);
+  await send(page, editor);
+  const status = page.locator('.chat-run-message__status-copy');
+  await expect(status).toContainText('Loading Fixture local model');
+  await page.evaluate(() => { window.managedReady = true; });
+  await expect.poll(() => page.evaluate(() => window.intentStarts.length)).toBe(1);
+  await expect(status).toContainText('Identifying task intent');
+  await page.evaluate(() => Object.assign(window.intentTasks.at(-1), { status: 'waiting_user',
+    clarification: { summary: 'Choose scope', questions: [{ id: 'scope', question: 'Which scope?', options: ['One section', 'Whole template'] }] } }));
+  await expect(status).toContainText('Waiting for your clarification');
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(status).toContainText('Waiting for your clarification');
+  await page.getByRole('button', { name: 'Continue providing information', exact: true }).click();
+  await page.getByRole('radio', { name: 'One section', exact: true }).check();
+  await page.getByRole('button', { name: 'Confirm and continue', exact: true }).click();
+  await expect(status).toContainText('Identifying task intent');
+  await page.evaluate(() => window.completeIntent('building_context'));
+  await expect(page.getByLabel('Current scope')).toHaveText('recovered-chat');
+  await page.evaluate(() => window.emitIntentRun('run.state_changed', { status: 'building_context', phase: 'embedding' }));
+  await expect(status).toContainText('Embedding the query');
+  await page.evaluate(() => window.emitIntentRun('run.document_processing', { phase: 'reranking', completed: 4, total: 20 }));
+  await expect(status).toContainText('Reranking document evidence 4/20');
+  await page.evaluate(() => window.emitIntentRun('run.state_changed', { status: 'waiting_tool' }));
+  await expect(status).toContainText('Waiting for tool results');
+  await page.evaluate(() => window.emitIntentRun('run.state_changed', { status: 'waiting_permission' }));
+  await expect(status).toContainText('Waiting for operation approval');
+  await page.evaluate(() => window.emitIntentRun('run.state_changed', { status: 'generating', phase: 'waitingOutput' }));
+  await expect(status).toContainText('Waiting for model output');
+  await page.evaluate(() => window.emitIntentRun('run.chunk', { delta: 'The generated answer.' }));
+  await expect(status).toContainText('Generating answer');
+  await page.evaluate(() => window.emitIntentRun('run.completed', { message: {
+    id: 'finished-answer', conversation_id: 'recovered-chat', role: 'assistant', content: 'The generated answer.', created_at: '2026-11-14T00:00:00Z',
+  } }));
+  await expect(status).toHaveCount(0);
+});
 
 async function send(page, editor) {
   await editor.fill("Unchanged original question");
@@ -96,6 +157,29 @@ test("an uncertain admission response retains the unchanged send identity", asyn
   const starts = await page.evaluate(() => window.intentStarts);
   expect(starts[1].idempotency_key).toBe(starts[0].idempotency_key);
   expect(await page.evaluate(() => window.intentTasks.length)).toBe(1);
+});
+
+test('an older intent cannot overwrite a new model preparation status', async ({ page }) => {
+  const editor = await openRecoveryChat(page, 'uncertain', true);
+  await page.evaluate(() => { window.managedReady = true; });
+  await send(page, editor);
+  await expect(page.locator('.chat-error')).toContainText('Admission response lost');
+  await page.evaluate(async () => {
+    const { intentTasks } = await import('/src/services/tauri/intentTasks.ts');
+    intentTasks.update(structuredClone(window.intentTasks[0]));
+    window.managedReady = false;
+  });
+  await editor.fill('A different question');
+  await page.locator('.chat-composer').getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.locator('.chat-run-message__status-copy')).toContainText('Loading Fixture local model');
+  await page.evaluate(() => {
+    const status = document.querySelector('.chat-run-message__status-copy');
+    window.statusSamples = [];
+    window.statusObserver = new MutationObserver(() => window.statusSamples.push(status.textContent));
+    window.statusObserver.observe(status, { subtree: true, childList: true, characterData: true });
+  });
+  await page.waitForTimeout(2250);
+  expect(await page.evaluate(() => window.statusSamples.filter(value => value.includes('Identifying task intent')))).toEqual([]);
 });
 
 for (const completion of ["before", "after"]) test(`draft scope switch adopts completion ${completion} returning`, async ({ page }) => {

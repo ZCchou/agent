@@ -459,7 +459,12 @@ class RagService:
             if progress:
                 await progress("embedding")
             stage_started = time.perf_counter()
-            query_vectors = await self.models.embed(index['embedding_model_id'], [retrieval_query], query=True)
+            embed_options = {'query': True}
+            if progress:
+                parameters = inspect.signature(self.models.embed).parameters
+                if 'progress' in parameters or any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values()):
+                    embed_options['progress'] = progress
+            query_vectors = await self.models.embed(index['embedding_model_id'], [retrieval_query], **embed_options)
             log_event(logging.getLogger(__name__), logging.INFO, "rag_stage_completed", "RAG stage completed",
                       stage="embedding", duration_ms=round((time.perf_counter()-stage_started)*1000), count=1)
             if len(query_vectors) != 1:
@@ -510,7 +515,7 @@ class RagService:
         try:
             async with asyncio.timeout(RERANK_TIMEOUT):
                 for model_id, rows in reranker_groups.items():
-                    await scoring_progress({'stage': 'model_loading', 'completed': 0})
+                    await scoring_progress({'stage': 'preparing_rerank', 'completed': 0})
                     options = {'progress': scoring_progress, 'cache_key': cache_key, 'token_budget': 2048}
                     signature = inspect.signature(self.models.rerank)
                     if not any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()):

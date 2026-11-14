@@ -1,7 +1,7 @@
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
 import { ArrowDown, Bot, Database, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useConversationState } from "./useConversationState";
 import { useScopedAction } from "./useScopedAction";
 import { useTranslation } from "react-i18next";
@@ -59,6 +59,11 @@ const MODEL_RUN_STATUSES = new Set<ModelRun["status"]>([
   "queued", "building_context", "waiting_context", "waiting_permission", "waiting_budget", "generating", "waiting_tool",
   "completed", "failed", "cancelled", "interrupted",
 ]);
+const RUN_ACTIVITY_PHASES: Partial<Record<ModelRun['status'], string>> = {
+  queued: 'queuedRequest', building_context: 'assembling_context', generating: 'waitingOutput',
+  waiting_tool: 'waitingTool', waiting_permission: 'waitingPermission',
+  waiting_budget: 'waitingBudget', waiting_context: 'waitingContext',
+};
 
 function isModelRunStatus(value: unknown): value is ModelRun["status"] {
   return typeof value === "string" && MODEL_RUN_STATUSES.has(value as ModelRun["status"]);
@@ -115,7 +120,7 @@ export function ChatPage() {
   sendScopeRef.current = inspectorKey;
   const preparingRetryRef = useRef<{ cancelled: boolean } | null>(null);
   const submissionRef = useRef<{
-    optimisticId: string; scope: string; acceptedScope?: string; accepted: boolean; stopRequested: boolean;
+    optimisticId: string; scope: string; acceptedScope?: string; intentKey?: string; accepted: boolean; stopRequested: boolean;
   } | null>(null);
   const attachmentController = useAttachmentController(inspectorKey, currentPage === "chat" && coreOnline && !sending && !installing);
   const [error, setError] = useConversationState(inspectorKey, false);
@@ -168,6 +173,24 @@ export function ChatPage() {
   routingOptionsRef.current = routingOptions;
   const [runActivityLabel, setRunActivityLabel] = useConversationState<string | null>(inspectorKey, null);
   const pendingSendRef = useRef<{ signature: string; idempotencyKey: string } | null>(null);
+  const intentTask = useSyncExternalStore(intentTasks.subscribe, () => intentTasks.get(inspectorKey));
+  useEffect(() => {
+    const submission = submissionRef.current;
+    if (!intentTask || !submission || submission.accepted || submission.scope !== inspectorKey || !submission.intentKey
+      || intentTask.request.idempotency_key !== submission.intentKey) return;
+    const phases: Partial<Record<typeof intentTask.status, string>> = {
+      queued: 'preparingIntent', loading: 'loadingLocalModel', identifying: 'identifying',
+      waiting_user: intentTask.clarification ? 'waitingClarification' : 'intentPaused',
+      failed: 'intentPaused', interrupted: 'intentPaused',
+    };
+    const phase = phases[intentTask.status];
+    if (phase) setRunActivityLabel(tChat(`routing.status.${phase}`, { attempt: intentTask.attempts, max: 3 }));
+  }, [intentTask, inspectorKey, setRunActivityLabel, tChat]);
+
+  function showModelPreparation(state: string, model: string) {
+    const phase = state === 'ready' ? 'preparingRequest' : state === 'waiting' ? 'waitingModel' : 'loadingModel';
+    setRunActivityLabel(tChat(`routing.status.${phase}`, { model }));
+  }
   const editActionsRef = useRef({ begin: prepareMessageEdit, save: sendEditedMessage });
   editActionsRef.current = { begin: prepareMessageEdit, save: sendEditedMessage };
   const beginMessageEdit = useCallback(() => editActionsRef.current.begin(), []);
@@ -320,7 +343,10 @@ export function ChatPage() {
       } else if (event.event_type === "run.state_changed") {
         const phase = event.data.phase;
         if (typeof phase === "string") setRunActivityLabel(tChat(`routing.status.${phase}`, { defaultValue: tChat("routing.status.planning") }));
-        else if (event.data.status === "generating") setRunActivityLabel(tChat("routing.status.waitingOutput"));
+        else if (isModelRunStatus(event.data.status)) {
+          const activity = RUN_ACTIVITY_PHASES[event.data.status];
+          if (activity) setRunActivityLabel(tChat(`routing.status.${activity}`));
+        }
         const status = event.data.status;
         if (isModelRunStatus(status)) {
           setActiveRun((current) => current ? { ...current, status } : current);
@@ -518,7 +544,7 @@ export function ChatPage() {
       || (conversation !== null && conversation.id !== activeConversationId)
       || compactionBlocksSend || (!editedMessage && references.requiresChoice)) return;
     const submission = { optimisticId: `pending-${crypto.randomUUID()}`, scope: inspectorKey,
-      acceptedScope: undefined as string | undefined, accepted: false, stopRequested: false };
+      acceptedScope: undefined as string | undefined, intentKey: undefined as string | undefined, accepted: false, stopRequested: false };
     submissionRef.current = submission;
     runActionRef.current += 1;
     runIdRef.current = null;
@@ -544,7 +570,7 @@ export function ChatPage() {
     setErrorDetail(null);
     setFailedContent(null);
     setFailedEditMessage(null);
-    setRunActivityLabel(tChat("routing.status.planning"));
+    setRunActivityLabel(tChat("routing.status.preparingRequest"));
     clearStreamingContent();
     let releaseModel: (() => Promise<void>) | undefined;
     let sendIdentity: string | undefined;
@@ -572,7 +598,7 @@ export function ChatPage() {
       if (selected?.provider.id.startsWith("managed:")) {
         releaseModel = await prepareLocalModel(localModelRepository, selected.model.id,
           () => !isCurrent() || submission.stopRequested,
-          (state, elapsed) => { if (isCurrent()) setRunActivityLabel(tChat(`routing.status.${state === "waiting" ? "waitingModel" : "loadingModel"}`, { model: selected?.provider.name, elapsed })); });
+          (state) => { if (isCurrent()) showModelPreparation(state, selected?.provider.name ?? ''); });
         if (!isCurrent() || submission.stopRequested) return;
         settings = await settingsRepository.getAppSettings();
         candidates = selectableModels(settings, project, scope, true);
@@ -583,6 +609,7 @@ export function ChatPage() {
         throw new Error(tChat(selected ? "errors.localModelNotLoaded" : "errors.selectCompatibleModel"));
       }
       if (!automaticMode && effectiveKind === "project_work" && selected.model.tool_mode === "unknown") {
+        setRunActivityLabel(tChat('routing.status.checkingTools'));
         settings = await modelCatalogRepository.probeTools(selected.provider.id, selected.model.id);
         candidates = selectableModels(settings, project, scope, true);
         selected = resolveSelectedModel(candidates, selected.provider.id, selected.model.id);
@@ -591,6 +618,7 @@ export function ChatPage() {
           throw new Error(tChat(selected ? "errors.localModelNotLoaded" : "errors.selectCompatibleModel"));
         }
       }
+      setRunActivityLabel(tChat('routing.status.preparingRequest'));
       await providerRepository.connect(selected.provider.id);
       if (!isCurrent()) return;
       const sendSignature = JSON.stringify({
@@ -611,6 +639,8 @@ export function ChatPage() {
         pendingSendRef.current = { signature: sendSignature, idempotencyKey: crypto.randomUUID() };
       }
       sendIdentity = pendingSendRef.current.idempotencyKey;
+      submission.intentKey = sendIdentity;
+      setRunActivityLabel(tChat('routing.status.identifying', { attempt: 1, max: 3 }));
       const started = await modelRunRepository.start({
         intentScope: inspectorKey,
         conversationId: conversation?.id, kind: conversation ? undefined : draft.kind,
@@ -671,6 +701,8 @@ export function ChatPage() {
       webSearch.clearAcceptedOneShot();
       let acceptedConversation = started.conversation;
       runIdRef.current = started.run.id; setLastRunId(started.run.id); setActiveRun(started.run); setConversation(acceptedConversation);
+      const activity = RUN_ACTIVITY_PHASES[started.run.status];
+      setRunActivityLabel(activity ? tChat(`routing.status.${activity}`) : null);
       setMessages((current) => {
         if (editedMessage) return acceptedConversation.messages;
         const saved = current.filter((item) => item.id !== submission.optimisticId);
@@ -860,7 +892,7 @@ export function ChatPage() {
       previous = run;
       return await withPreparedLocalModel(localModelRepository, run.provider_profile_id, run.model_id,
         () => ticket.cancelled || sendScopeRef.current !== scope,
-        (state, elapsed) => setRunActivityLabel(tChat(`routing.status.${state === "waiting" ? "waitingModel" : "loadingModel"}`, { model: run.model_id, elapsed })),
+        (state) => { if (!ticket.cancelled && sendScopeRef.current === scope) showModelPreparation(state, run.model_id); },
         operation ?? (() => modelRunRepository.retry(runId, strategy, web)));
     } catch (value) {
       if (ticket.cancelled && previous) return previous;
