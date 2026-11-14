@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -448,6 +448,21 @@ class CoreRepository:
                 try:
                     migrate_intent_tasks(connection)
                     connection.execute('UPDATE schema_info SET version = 31')
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.execute('PRAGMA foreign_keys = ON')
+                version = 31
+            if version == 31:
+                from agent.migrations.v32_execution_wait import migrate as migrate_execution_wait
+                connection.execute('PRAGMA foreign_keys = OFF')
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_execution_wait(connection)
+                    connection.execute('UPDATE schema_info SET version = 32')
                     self._validate_database(connection)
                     connection.commit()
                 except Exception:
@@ -1859,6 +1874,9 @@ class CoreRepository:
             table = "projects" if entity_type == "project" else "conversations" if entity_type == "conversation" else None
             if table is None:
                 raise CoreDataError("invalid_trash_entity", "Trash entity type is not supported.")
+            if connection.execute(f'SELECT 1 FROM {table} WHERE id=? AND deleted_at IS NOT NULL',
+                                  (entity_id,)).fetchone() is None:
+                raise CoreDataError("trash_item_not_found", "The trash item does not exist.")
             if entity_type == "project":
                 candidates = [row[0] for row in connection.execute(
                     """SELECT storage_key FROM (
@@ -1883,6 +1901,9 @@ class CoreRepository:
                          WHERE m.conversation_id = ?)""",
                     (entity_id, entity_id),
                 ).fetchall()]
+            self._remove_execution_history(connection,
+                project_ids=[entity_id] if entity_type == 'project' else [],
+                conversation_ids=[entity_id] if entity_type == 'conversation' else [])
             cursor = connection.execute(
                 f"DELETE FROM {table} WHERE id = ? AND deleted_at IS NOT NULL", (entity_id,)
             )
@@ -1896,6 +1917,21 @@ class CoreRepository:
             ).fetchone() is None]
         return {"entity_type": entity_type, "id": entity_id, "deleted": True,
                 "storage_keys": orphaned}
+
+    @staticmethod
+    def _remove_execution_history(connection, *, project_ids, conversation_ids):
+        parameters = {'projects': json.dumps(project_ids), 'conversations': json.dumps(conversation_ids)}
+        conversations = '''SELECT id FROM conversations
+            WHERE id IN (SELECT value FROM json_each(:conversations))
+               OR project_id IN (SELECT value FROM json_each(:projects))'''
+        intents = f'''SELECT id FROM intent_tasks
+            WHERE json_extract(state_json,'$.request.project_id') IN (SELECT value FROM json_each(:projects))
+               OR json_extract(state_json,'$.request.conversation_id') IN ({conversations})'''
+        connection.execute(f'''DELETE FROM execution_wait_tasks
+            WHERE project_id IN (SELECT value FROM json_each(:projects))
+               OR run_id IN (SELECT id FROM model_runs WHERE conversation_id IN ({conversations}))
+               OR intent_task_id IN ({intents})''', parameters)
+        connection.execute(f'DELETE FROM intent_tasks WHERE id IN ({intents})', parameters)
 
     def empty_trash(self, expired_only: bool = False) -> dict[str, Any]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=TRASH_RETENTION_DAYS)).isoformat(
@@ -1933,6 +1969,7 @@ class CoreRepository:
                     WHERE {' OR '.join(attachment_clauses)})""",
                 [*attachment_parameters, *attachment_parameters],
             ).fetchall()]
+            self._remove_execution_history(connection, project_ids=project_ids, conversation_ids=conversation_ids)
             connection.execute(f"DELETE FROM conversations WHERE deleted_at IS NOT NULL{predicate}", parameters)
             connection.execute(f"DELETE FROM projects WHERE deleted_at IS NOT NULL{predicate}", parameters)
             orphaned = [key for key in candidates if connection.execute(
@@ -1978,7 +2015,7 @@ class CoreRepository:
             active = connection.execute(
                 """SELECT 1 FROM model_runs WHERE conversation_id = ? AND status IN
                        ('queued','building_context','waiting_context','waiting_permission',
-                        'waiting_budget','generating','waiting_tool') LIMIT 1""",
+                        'waiting_budget','generating','waiting_tool','waiting_recovery') LIMIT 1""",
                 (conversation_id,),
             ).fetchone()
             if active:
@@ -2133,7 +2170,7 @@ class CoreRepository:
                 active = connection.execute(
                     """SELECT 1 FROM model_runs WHERE conversation_id = ?
                        AND status IN ('queued','building_context','waiting_context','waiting_permission',
-                                      'waiting_budget','generating','waiting_tool') LIMIT 1""",
+                                      'waiting_budget','generating','waiting_tool','waiting_recovery') LIMIT 1""",
                     (conversation_id,),
                 ).fetchone()
                 if active is not None:
@@ -2536,7 +2573,7 @@ class CoreRepository:
             rows = connection.execute(
                 """SELECT id FROM model_runs
                    WHERE status IN ('queued','building_context','waiting_context','waiting_permission',
-                                    'waiting_budget','generating','waiting_tool')"""
+                                    'waiting_budget','generating','waiting_tool','waiting_recovery')"""
             ).fetchall()
         return [self.get_model_run(row["id"]) for row in rows]
 
@@ -2544,7 +2581,7 @@ class CoreRepository:
         with self._connect() as connection:
             runs = connection.execute("""SELECT COUNT(*) FROM model_runs WHERE status IN
                 ('queued','building_context','waiting_context','waiting_permission',
-                 'waiting_budget','generating','waiting_tool')""").fetchone()[0]
+                 'waiting_budget','generating','waiting_tool','waiting_recovery')""").fetchone()[0]
             tools = connection.execute("""SELECT COUNT(*) FROM tool_operations WHERE status IN
                 ('requested','validating','reviewing','waiting_user','executing')""").fetchone()[0]
             local_jobs = connection.execute("""SELECT COUNT(*) FROM local_model_jobs
@@ -2645,7 +2682,7 @@ class CoreRepository:
             active = connection.execute(
                 """SELECT 1 FROM model_runs WHERE conversation_id = ? AND status IN
                    ('queued','building_context','waiting_context','waiting_permission',
-                    'waiting_budget','generating','waiting_tool') LIMIT 1""",
+                    'waiting_budget','generating','waiting_tool','waiting_recovery') LIMIT 1""",
                 (parent["conversation_id"],),
             ).fetchone()
             if active is not None:
@@ -2808,13 +2845,13 @@ class CoreRepository:
             ids = [row["id"] for row in connection.execute(
                 """SELECT id FROM model_runs
                    WHERE status IN ('queued','building_context','waiting_permission',
-                                    'waiting_budget','generating','waiting_tool')"""
+                                    'waiting_budget','generating','waiting_tool','waiting_recovery')"""
             ).fetchall()]
             connection.execute(
                 """UPDATE model_runs SET status = 'interrupted', error_code = 'core_interrupted',
                        error_message = 'The Core stopped before generation completed.', finished_at = ?
                    WHERE status IN ('queued','building_context','waiting_permission',
-                                    'waiting_budget','generating','waiting_tool')""", (now,)
+                                    'waiting_budget','generating','waiting_tool','waiting_recovery')""", (now,)
             )
             connection.execute(
                 """UPDATE web_operations SET status = 'unknown_outcome',

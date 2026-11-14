@@ -10,15 +10,15 @@ from test_rag_service import Engines, ready, wait_job
 
 
 def test_local_runtime_contract_upgrades_host_and_core_together():
-    response = handle_message({"v": 24, "id": "contract", "type": "ping", "params": {}})
+    response = handle_message({"v": 25, "id": "contract", "type": "ping", "params": {}})
     assert response["v"] == 24
-    assert response["result"]["schema_version"] == 31
-    assert response["result"]["build_id"] == "schema31-agent-unified-v1"
+    assert response["result"]["schema_version"] == 32
+    assert response["result"]["build_id"] == "schema32-agent-unified-v1"
     root = Path(__file__).resolve().parents[3]
     host = (root / "apps/agent-desktop/src-tauri/src/core_bridge.rs").read_text(encoding="utf-8")
-    assert "PROTOCOL_VERSION: u64 = 24;" in host
-    assert "EXPECTED_SCHEMA_VERSION: u64 = 31;" in host
-    assert '"schema31-agent-unified-v1"' in host
+    assert "PROTOCOL_VERSION: u64 = 25;" in host
+    assert "EXPECTED_SCHEMA_VERSION: u64 = 32;" in host
+    assert '"schema32-agent-unified-v1"' in host
 
 
 def test_schema24_upgrade_keeps_project_dialogue_knowledge_and_rag(tmp_path):
@@ -65,7 +65,7 @@ def test_managed_model_management_uses_public_core_ipc_without_credentials(tmp_p
         async def sink(event):
             pass
         service = ChatRunService(CoreRepository(tmp_path / "agent.db"), sink, offline=True)
-        response = await handle_async_message({"v": 24, "id": "models", "type": "local_model.request",
+        response = await handle_async_message({"v": 25, "id": "models", "type": "local_model.request",
             "params": {"action": "model.list", "params": {}}}, service)
         assert response.get("result", {}).get("models") == [], response
         assert "root" in response["result"]
@@ -144,7 +144,7 @@ def test_update_preparation_blocks_model_and_document_mutations_but_allows_statu
     async def scenario():
         service = ChatRunService(CoreRepository(tmp_path / "agent.db"), lambda event: asyncio.sleep(0))
         async def rpc(kind, params):
-            return await handle_async_message({"v": 24, "id": "update", "type": kind, "params": params}, service)
+            return await handle_async_message({"v": 25, "id": "update", "type": kind, "params": params}, service)
         assert (await rpc("app.update.prepare", {"update_id": "upgrade"}))["result"]["ready"]
         for kind, action in (("local_model.request", "model.import"), ("local_model.request", "runtime.load"),
                              ("rag.request", "document.import"), ("rag.request", "index.build")):

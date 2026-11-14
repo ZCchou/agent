@@ -1,5 +1,13 @@
 import rag from "./rag";
 const common = {
+  executionWait: {
+    title: "Execution and waiting", mode: "Waiting policy", adaptive: "Adaptive waiting", custom: "Custom waiting limit",
+    notice: "Long-running notice (seconds)", probe: "No-progress diagnostic threshold (seconds)", unlimited: "Unlimited total waiting",
+    total: "Total waiting limit (minutes)", recoveries: "Automatic recoveries after consecutive failures (0–2)",
+    hint: "Continue while work progresses. Recover confirmed failures and preserve progress when attention is needed. Settings apply to new tasks.",
+    legacyTitle: "Previous waiting settings", legacy: "The saved intent timeout is {{seconds}} seconds, available as a reference for custom waiting.",
+    saveError: "Could not save waiting settings. Try again.",
+  },
   routingDuration: { timeout: "Intent recognition timeout (seconds)", budget: "Up to 3 attempts, {{seconds}} seconds total recognition budget.", main: "Main model idle residence", auxiliary: "Auxiliary model idle residence", manual: "Until manually unloaded", custom: "Custom", customMinutes: "Custom minutes (1–1440)", minutes: "{{count}} minutes", residenceHint: "Changes apply immediately and restart idle timers. Active and pinned models stay loaded. Auxiliary models may be reclaimed under memory pressure." },
   rag,
   buttonAudit: {

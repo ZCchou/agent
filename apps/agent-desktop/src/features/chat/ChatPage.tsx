@@ -54,15 +54,17 @@ import { RoutingBudgetPrompt } from "./RoutingBudgetPrompt";
 import { ConversationRoutingControl, type RoutingModelOption } from "./ConversationRoutingControl";
 import { applyRunFailure, runErrorTranslationKey } from "./runErrors";
 import { documentProcessingLabel } from "./documentProcessing";
+import { ExecutionTaskCard } from "./ExecutionTaskCard";
 
 const MODEL_RUN_STATUSES = new Set<ModelRun["status"]>([
-  "queued", "building_context", "waiting_context", "waiting_permission", "waiting_budget", "generating", "waiting_tool",
+  "queued", "building_context", "waiting_context", "waiting_permission", "waiting_budget", "generating", "waiting_tool", "waiting_recovery",
   "completed", "failed", "cancelled", "interrupted",
 ]);
 const RUN_ACTIVITY_PHASES: Partial<Record<ModelRun['status'], string>> = {
   queued: 'queuedRequest', building_context: 'assembling_context', generating: 'waitingOutput',
   waiting_tool: 'waitingTool', waiting_permission: 'waitingPermission',
   waiting_budget: 'waitingBudget', waiting_context: 'waitingContext',
+  waiting_recovery: 'waitingRecovery',
 };
 
 function isModelRunStatus(value: unknown): value is ModelRun["status"] {
@@ -181,6 +183,7 @@ export function ChatPage() {
     const phases: Partial<Record<typeof intentTask.status, string>> = {
       queued: 'preparingIntent', loading: 'loadingLocalModel', identifying: 'identifying',
       waiting_user: intentTask.clarification ? 'waitingClarification' : 'intentPaused',
+      waiting_recovery: 'waitingRecovery',
       failed: 'intentPaused', interrupted: 'intentPaused',
     };
     const phase = phases[intentTask.status];
@@ -1171,6 +1174,13 @@ export function ChatPage() {
 
   const effectiveKind = conversation?.kind ?? draft.kind;
   const source = conversation?.derived_from_conversation_id ?? null;
+  const preparingSubmission = sending && submissionRef.current && !submissionRef.current.accepted;
+  const preparingTask = preparingSubmission && intentTask?.request.idempotency_key === submissionRef.current?.intentKey
+    ? intentTask : null;
+  const executionOwner = preparingTask ? { kind: "intent" as const, id: preparingTask.id }
+    : !preparingSubmission && activeRun ? { kind: "run" as const, id: activeRun.id } : null;
+  const monitoredExecution = preparingTask?.execution_task_id
+    ?? (!preparingSubmission ? activeRun?.execution_task_id : undefined);
 
   return (
     <div className="chat-page">
@@ -1233,9 +1243,12 @@ export function ChatPage() {
           referenceDisabled={sending}
           onBeginEdit={beginMessageEdit} onEdit={editMessage} editDisabled={!coreOnline || sending || stopping}
           onChangeSetResolved={refreshChangeSets} />
-        {sending ? (
+        <ExecutionTaskCard enabled={coreOnline && currentPage === "chat" && Boolean(monitoredExecution)}
+          owner={executionOwner}
+          onSettings={() => setCurrentPage("models")} />
+        {sending && (!monitoredExecution || streamingContent) ? (
           <AssistantRunMessage status={activeRun?.status ?? "queued"} content={streamingContent}
-            activityLabel={runActivityLabel}
+            activityLabel={monitoredExecution ? null : runActivityLabel}
             onProjectFile={effectiveKind === "project_work" ? openProjectFile : undefined}
             onProjectDirectory={effectiveKind === "project_work" ? openProjectDirectory : undefined} />
         ) : null}

@@ -2,10 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import type { StartedModelRun } from "../repositories/ModelRunRepository";
 
 export interface IntentTask {
+  execution_task_id?: string;
   id: string;
   scope: string;
   revision: number;
-  status: "queued" | "loading" | "identifying" | "waiting_user" | "completed" | "failed" | "cancelled" | "interrupted";
+  status: "queued" | "loading" | "identifying" | "waiting_user" | "waiting_recovery" | "completed" | "failed" | "cancelled" | "interrupted";
   request: Record<string, unknown>;
   attempts: number;
   elapsed_seconds: number;
@@ -22,7 +23,7 @@ export interface IntentTask {
 
 type IntentAction = "respond" | "extend" | "retry" | "cancel";
 type Waiter = { resolve(value: StartedModelRun): void; reject(error: Error): void };
-const active = (task: IntentTask) => ["queued", "loading", "identifying"].includes(task.status);
+const active = (task: IntentTask) => ["queued", "loading", "identifying", "waiting_recovery"].includes(task.status);
 
 export class IntentTaskStore {
   private tasks = new Map<string, IntentTask>();

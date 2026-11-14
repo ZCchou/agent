@@ -15,7 +15,7 @@ def test_unified_agent_has_separate_app_and_protocol_identity():
     credentials = (root / 'apps/agent-desktop/src-tauri/src/credentials.rs').read_text()
     assert 'io.github.zcchou.agent.airworthiness Model Providers' in credentials
     assert (CORE_VERSION, PROTOCOL_VERSION, SCHEMA_VERSION, BUILD_ID) == (
-        '0.16.0-preview.4', 24, 31, 'schema31-agent-unified-v1')
+        '0.16.0-preview.5', 25, 32, 'schema32-agent-unified-v1')
 
 
 @pytest.mark.parametrize('config_name', ['tauri.document-preview.conf.json', 'tauri.conf.json'])

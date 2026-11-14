@@ -104,7 +104,8 @@ fn accept_run_event(sequences: &mut HashMap<String, u64>, response: &Value) -> b
     };
     if !matches!(
         event_type,
-        "run.state_changed"
+        "execution.activity"
+            | "run.state_changed"
             | "run.document_processing"
             | "run.chunk"
             | "run.draft_checkpoint"

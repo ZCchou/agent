@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:agent:reliability-repair:v1",
   "title": "agent reliability contracts",
-  "version": { "product": "0.16.0-preview.4", "ipc": 24, "schema": 31, "build_id": "schema31-agent-unified-v1" },
+  "version": { "product": "0.16.0-preview.5", "ipc": 25, "schema": 32, "build_id": "schema32-agent-unified-v1" },
   "policy": {
     "compaction": { "output_ceiling": 8192, "max_provider_calls": 3, "deadline_seconds": 120, "first_output_seconds": 60, "chunk_seconds": 30, "safety_margin_min_tokens": 128, "safety_margin_fraction": 0.05 },
     "search": { "max_files": 10000, "max_entries": 20000, "max_depth": 128, "max_read_bytes": 67108864, "max_file_bytes": 1048576, "max_duration_ms": 2000, "max_parallel": 2, "max_queued": 8, "snapshot_ttl_seconds": 60, "max_snapshots": 32, "max_snapshot_bytes": 16777216 },

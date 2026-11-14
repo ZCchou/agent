@@ -59,14 +59,14 @@ def test_global_instruction_protocol_round_trip(tmp_path) -> None:
     repository = CoreRepository(tmp_path / "global-instructions-protocol.db")
 
     loaded = handle_message(
-        {"v": 24, "id": "get", "type": "memory.global_instructions.get", "params": {}},
+        {"v": 25, "id": "get", "type": "memory.global_instructions.get", "params": {}},
         repository,
     )
     assert loaded["result"]["global_instructions"]["revision"] == 1
 
     saved = handle_message(
         {
-            "v": 24,
+            "v": 25,
             "id": "update",
             "type": "memory.global_instructions.update",
             "params": {"content": "使用简洁中文回答。", "enabled": True},
@@ -76,7 +76,7 @@ def test_global_instruction_protocol_round_trip(tmp_path) -> None:
     assert saved["result"]["global_instructions"]["content"] == "使用简洁中文回答。"
 
     reset = handle_message(
-        {"v": 24, "id": "reset", "type": "memory.global_instructions.reset", "params": {}},
+        {"v": 25, "id": "reset", "type": "memory.global_instructions.reset", "params": {}},
         repository,
     )
     assert reset["result"]["global_instructions"]["revision"] == 3

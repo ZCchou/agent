@@ -224,6 +224,13 @@ export interface WebSearchSettings {
   default_region: string;
   backends: SearchBackendSettings[];
 }
+export interface ExecutionWaitPolicy {
+  mode: "adaptive" | "custom";
+  long_running_notice_seconds: number;
+  no_progress_probe_seconds: number;
+  max_total_seconds: number | null;
+  max_auto_recoveries: number;
+}
 export interface RoutingPreferences {
   new_conversation_mode: "automatic";
   default_preset: "quality" | "balanced" | "economy" | "local_first";
@@ -234,6 +241,7 @@ export interface RoutingPreferences {
   intent_timeout_seconds: number;
   main_model_idle_seconds: number;
   auxiliary_model_idle_seconds: number;
+  execution_wait?: ExecutionWaitPolicy;
 }
 export interface ModelSettings {
   providers: ProviderProfileSettings[];
