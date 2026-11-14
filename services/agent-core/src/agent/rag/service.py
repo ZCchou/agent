@@ -19,9 +19,9 @@ from agent.rag.documents import MAX_FILE_BYTES, MAX_TEXT_CHARS, SUPPORTED_SUFFIX
 from agent.rag.repository import RagRepository, identifier, required_text
 from agent.rag.retrieval import candidates, load_vector_extension, vector_blob, explicit_subject, matches_subject, reference_material
 from agent.storage import CoreDataError, _utc_now
+from agent.execution.execution_wait import ExecutionMonitor, current_activity, current_task_id, current_monitor, Diagnostic
 
 DOCUMENT_PARSE_TIMEOUT = 125
-RERANK_TIMEOUT = 90
 SEARCH_QUERY_MAX_CHARS = 2000
 MEDIA_TYPES = {'.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown'}
@@ -29,12 +29,16 @@ LEGACY_SPLITTING_WARNING = 'Reimport the original documents and rebuild their in
 
 
 class RagService:
-    def __init__(self, repository, models=None, *, parser=None):
+    def __init__(self, repository, models=None, *, parser=None, rerank_timeout=None):
         self.repository = RagRepository(repository)
         if models is None:
             from agent.rag.models import ModelStore
             models = ModelStore(self.repository.data_dir)
         self.models = models
+        self.execution_monitor = ExecutionMonitor(repository)
+        if hasattr(models, 'execution_monitor'):
+            models.execution_monitor = self.execution_monitor
+        self.rerank_timeout = rerank_timeout
         self.parser = parser if parser is not None else ParserService(self.repository.data_dir)
         self._tasks = {}
         self._closed = False
@@ -162,6 +166,7 @@ class RagService:
             return self.repository.bind(params)
         if action == 'library.remove':
             result = self.repository.remove_library(params.get('library_id'))
+            self.execution_monitor.invalidate_sources(library_id=params.get('library_id'))
             for job in self.repository.jobs(params.get('library_id')):
                 self.repository.terminate_task(job['id'], 'library_removal')
                 task = self._tasks.get(job['id'])
@@ -191,6 +196,7 @@ class RagService:
         if action == 'document.withdraw':
             preview = self.repository.preview(params.get('version_id'), limit=1)
             result = self.repository.withdraw(params.get('version_id'))
+            self.execution_monitor.invalidate_sources(version_id=params.get('version_id'))
             job_id = preview['version']['ocr_summary'].get('job_id')
             if job_id:
                 job = self.repository.job(job_id)
@@ -368,6 +374,25 @@ class RagService:
                 'external_untrusted': True, 'search_id': search_id, 'aliases': aliases}
 
     async def search(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None, retrieval_scope=None):
+        return await self._search_operation(lambda: self._search_once(project_id, query, run_id, library_ids,
+            version_ids, limit, progress, retrieval_scope), project_id=project_id)
+
+    async def _search_operation(self, operation, *, project_id=None):
+        if current_task_id.get() is not None:
+            return await operation()
+        monitor = self.execution_monitor
+        task_id = monitor.start_task(run_id='rag-search-' + identifier(), project_id=project_id)['id']
+        try:
+            with monitor.associate(task_id):
+                result = await operation()
+        except BaseException as error:
+            monitor.finish_task(task_id, 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
+                                error_code=getattr(error, 'code', None))
+            raise
+        monitor.finish_task(task_id)
+        return result
+
+    async def _search_once(self, project_id, query, run_id=None, library_ids=None, version_ids=None, limit=8, progress=None, retrieval_scope=None):
         if self._closed:
             raise CoreDataError('rag_closed', 'The RAG service is closed.')
         query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)
@@ -446,9 +471,56 @@ class RagService:
             await result
 
     async def _retrieve_indexes(self, indexes, query, version_ids=None, limit=8, progress=None, retrieval_scope=None, cache_context=None):
+        if current_activity.get() is not None:
+            return await self._retrieve_indexes_once(indexes, query, version_ids, limit, progress,
+                                                     retrieval_scope, cache_context)
+        monitor = current_monitor.get() or self.execution_monitor
+        task_id = current_task_id.get()
+        owned = task_id is None
+        if owned:
+            task_id = monitor.start_task(run_id='rag-search-' + identifier())['id']
+        async def operation(activity):
+            async def report(event):
+                details = event if isinstance(event, dict) else {'stage': event}
+                activity.progress(**details)
+                if progress:
+                    pending = progress(event)
+                    if inspect.isawaitable(pending):
+                        await pending
+            return await self._retrieve_indexes_once(indexes, query, version_ids, limit, report,
+                                                     retrieval_scope, cache_context)
+        diagnose = getattr(self.models, 'diagnose', lambda activity: Diagnostic())
+        try:
+            result = await monitor.execute_stage(task_id, 'rag_retrieval', operation,
+                safe_to_retry=True, diagnose=diagnose,
+                recoverable=lambda error: isinstance(error, CoreDataError) and error.code == 'rag_worker_crash')
+        except BaseException as error:
+            if owned:
+                monitor.finish_task(task_id, 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
+                                    error_code=getattr(error, 'code', None))
+            raise
+        if owned:
+            monitor.finish_task(task_id)
+        return result
+
+    async def _retrieve_indexes_once(self, indexes, query, version_ids=None, limit=8, progress=None, retrieval_scope=None, cache_context=None):
         if retrieval_scope not in (None, 'focused', 'broad'):
             raise CoreDataError('rag_invalid_request', 'Retrieval scope must be focused or broad.')
         candidate_count = 20 if retrieval_scope == 'focused' else 40
+        sources = {'library_ids': sorted({index['library_id'] for index in indexes}),
+                   'index_ids': sorted({index['id'] for index in indexes}),
+                   'version_ids': sorted(set(version_ids) if version_ids is not None else
+                                         {version for index in indexes for version in json.loads(index['version_ids'])})}
+        activity = current_activity.get()
+        if activity:
+            activity.progress(stage='retrieval_scope', sources=sources)
+        # Register source ownership before rechecking it so source removal can
+        # fence every later batch write from an in-flight retrieval.
+        with closing(self.repository.connect()) as connection:
+            for index in indexes:
+                self.repository.library(connection, index['library_id'])
+                if not connection.execute('SELECT 1 FROM rag_indexes WHERE id=?', (index['id'],)).fetchone():
+                    raise CoreDataError('rag_generation_changed', 'The retrieval index changed. Search again.')
         subject = explicit_subject(query)
         retrieval_query = subject or query
         retrieved = []
@@ -493,7 +565,7 @@ class RagService:
         shortlisted = retrieved[:candidate_count]
         cache_key = (cache_context, retrieval_query, tuple(version_ids or ()), candidate_count,
                      tuple((index['id'], index['embedding_digest'], index['reranker_digest']) for index in indexes),
-                     tuple((row['id'], row['text_hash'], row['text']) for row in shortlisted))
+                     tuple((row['id'], row['text_hash']) for row in shortlisted))
         attempt = self._rerank_attempts.setdefault(cache_key, shortlisted)
         self._rerank_attempts.move_to_end(cache_key)
         while len(self._rerank_attempts) > 8:
@@ -513,10 +585,11 @@ class RagService:
                 await progress({**event, 'completed': completed, 'total': len(shortlisted),
                                 'elapsed_ms': round((time.perf_counter() - stage_started) * 1000)})
         try:
-            async with asyncio.timeout(RERANK_TIMEOUT):
+            async with asyncio.timeout(self.rerank_timeout):
                 for model_id, rows in reranker_groups.items():
                     await scoring_progress({'stage': 'preparing_rerank', 'completed': 0})
-                    options = {'progress': scoring_progress, 'cache_key': cache_key, 'token_budget': 2048}
+                    options = {'progress': scoring_progress, 'cache_key': cache_key, 'token_budget': 2048,
+                               'checkpoint_context': sources}
                     signature = inspect.signature(self.models.rerank)
                     if not any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()):
                         options = {key: value for key, value in options.items() if key in signature.parameters}
@@ -532,8 +605,8 @@ class RagService:
             log_event(logging.getLogger(__name__), logging.INFO, 'rag_stage_completed', 'RAG stage completed',
                       stage='reranking', duration_ms=round((time.perf_counter() - stage_started)*1000), count=completed)
         except TimeoutError as exc:
-            raise CoreDataError('rag_rerank_timeout', '辅助检索重排超过 90 秒，可重试继续。',
-                                {'completed': completed, 'total': len(shortlisted), 'timeout_seconds': RERANK_TIMEOUT,
+            raise CoreDataError('rag_rerank_timeout', '辅助检索重排超过自定义时间预算，可重试继续。',
+                                {'completed': completed, 'total': len(shortlisted), 'timeout_seconds': self.rerank_timeout,
                                  'retryable': True}) from exc
         self._rerank_attempts.pop(cache_key, None)
         ranked.sort(key=lambda row: (-row['score'], -row['fusion_score'], row['id']))
@@ -543,13 +616,17 @@ class RagService:
         return chosen, index_by_chunk
 
     async def search_library(self, library_id, query):
+        return await self._search_operation(lambda: self._search_library_once(library_id, query))
+
+    async def _search_library_once(self, library_id, query):
         query = required_text(query, 'Search query', SEARCH_QUERY_MAX_CHARS)
         with closing(self.repository.connect()) as c:
             library = self.repository.library(c, library_id)
             index = c.execute('SELECT * FROM rag_indexes WHERE id=?', (library['active_index_id'],)).fetchone()
             if not index:
                 raise CoreDataError('rag_no_index', 'This library has no ready retrieval index.')
-        chosen, _ = await self._retrieve_indexes([dict(index)], query)
+        chosen, _ = await self._retrieve_indexes([dict(index)], query,
+                                                cache_context=(library_id, library['generation']))
         with closing(self.repository.connect()) as c:
             current = self.repository.library(c, library_id)
             if current['generation'] != library['generation']:

@@ -263,7 +263,7 @@ def test_deadline_after_a_completed_batch_returns_counts_and_resumes(tmp_path, m
                 deadlines[-1].reschedule(asyncio.get_running_loop().time() - 1)
         try:
             with pytest.raises(CoreDataError) as failure:
-                await store.rerank(records[0]['id'], 'query', ['1', '2', '3'], progress=expire_after_batch)
+                await store.rerank(records[0]['id'], 'query', ['1', '2', '3'], progress=expire_after_batch, timeout=90)
             assert failure.value.code == 'rag_rerank_timeout'
             assert failure.value.details['completed'] == 2
             assert not store._resident_workers
@@ -323,7 +323,7 @@ def test_service_deadline_retains_candidates_and_publishes_only_complete_ranking
             await ready(service, library)
             assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
             await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
-            monkeypatch.setattr(module, 'RERANK_TIMEOUT', 0)
+            service.rerank_timeout = 0
             with pytest.raises(CoreDataError) as failure:
                 await service.search(project, '失效')
             assert failure.value.code == 'rag_rerank_timeout'
@@ -333,7 +333,7 @@ def test_service_deadline_retains_candidates_and_publishes_only_complete_ranking
                 assert connection.execute('SELECT count(*) FROM rag_searches').fetchone()[0] == 0
                 assert connection.execute('SELECT count(*) FROM rag_evidence').fetchone()[0] == 0
             engine.paused = False
-            monkeypatch.setattr(module, 'RERANK_TIMEOUT', 90)
+            service.rerank_timeout = None
             assert len((await service.search(project, '失效'))['evidence']) == 1
             assert not service._rerank_attempts
         finally:
