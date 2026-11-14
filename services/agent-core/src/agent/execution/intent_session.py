@@ -177,9 +177,10 @@ class IntentExecution:
 
 
 class IntentService:
-    def __init__(self, repository, start, *, timeout_seconds=90, monitor=None, policy=None):
+    def __init__(self, repository, start, *, timeout_seconds=90, monitor=None, policy=None, preparation=None):
         self.repository, self.start = repository, start
         self.monitor, self.policy = monitor, policy
+        self.preparation = preparation
         self.timeout_seconds = timeout_seconds
         self.tasks = {}
         self.executions = {}
@@ -376,17 +377,28 @@ class IntentService:
         if not isinstance(key, str) or not 1 <= len(key) <= 512:
             raise CoreDataError('invalid_params', '请求身份无效。')
         request['idempotency_key'] = key
+        semantic_request = {name: value for name, value in request.items() if name != 'model_preparation_id'}
         try:
-            fingerprint = hashlib.sha256(json.dumps({'request': request, 'scope': scope}, sort_keys=True,
-                                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+            serialized = json.dumps({'request': semantic_request, 'scope': scope}, sort_keys=True,
+                                    ensure_ascii=False, allow_nan=False)
+            fingerprint = hashlib.sha256(serialized.encode()).hexdigest()
         except (TypeError, ValueError) as error:
             raise CoreDataError('invalid_params', '请求包含无效数据。') from error
         with self.repository._connect() as connection:
             previous = connection.execute('SELECT id,fingerprint FROM intent_tasks WHERE idempotency_key=?', (key,)).fetchone()
             if previous is not None:
                 if previous['fingerprint'] != fingerprint:
-                    raise CoreDataError('idempotency_conflict', 'The request key already identifies a different request.')
+                    prior = self._read(previous['id'])
+                    prior_request = {name: value for name, value in prior['request'].items() if name != 'model_preparation_id'}
+                    if json.dumps({'request': prior_request, 'scope': prior['scope']}, sort_keys=True,
+                                  ensure_ascii=False, allow_nan=False) != serialized:
+                        raise CoreDataError('idempotency_conflict', 'The request key already identifies a different request.')
                 return {'task': self.get(previous['id'])}
+            receipt = None
+            if request.get('model_preparation_id') is not None:
+                if self.preparation is None:
+                    raise CoreDataError('model_preparation_expired', '模型加载预约无法验证，请重新发送。')
+                receipt = self.preparation(request)
             timeout = self.timeout_seconds() if callable(self.timeout_seconds) else self.timeout_seconds
             if type(timeout) is not int or not 30 <= timeout <= 180:
                 raise CoreDataError('invalid_settings', '任务识别等待时间须为 30 至 180 秒。')
@@ -395,6 +407,8 @@ class IntentService:
             state = {'id': identity, 'scope': scope, 'revision': 1, 'status': 'queued', 'request': request,
                      'attempts': 0, 'active_seconds': 0, 'timeout_seconds': timeout, 'answers': {},
                      'clarification': None, 'error': None, 'result': None, 'created_at': now, 'updated_at': now}
+            if receipt is not None and receipt.get('execution_task_id'):
+                state['preload_execution_task_id'] = receipt['execution_task_id']
             connection.execute('INSERT INTO intent_tasks VALUES (?,?,?,?,?,?,?,?)',
                 (identity, key, fingerprint, scope, 1, json.dumps(state, ensure_ascii=False), now, now))
         if self.monitor is not None:

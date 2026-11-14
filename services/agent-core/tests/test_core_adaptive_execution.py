@@ -5,6 +5,53 @@ import pytest
 from agent.storage import CoreDataError, CoreRepository
 
 
+def test_readiness_raw_logs_are_diagnostics_without_claiming_loading_progress(monkeypatch):
+    from types import SimpleNamespace
+    import httpx
+    from agent.local_models import runtime as local_runtime
+    from agent.execution.execution_wait import current_activity
+
+    progress, resources, heartbeats = [], [], []
+    activity = SimpleNamespace(progress=lambda **data: progress.append(data),
+        resource=lambda **data: resources.append(data), heartbeat=lambda **data: heartbeats.append(data))
+    runtime = local_runtime.ManagedRuntime.__new__(local_runtime.ManagedRuntime)
+    runtime.process = SimpleNamespace(poll=lambda: None)
+    runtime.job = None
+    runtime._output = SimpleNamespace(byte_count=10)
+    probes = 0
+
+    def respond(request):
+        nonlocal probes
+        if request.url.path == '/health':
+            probes += 1
+            runtime._output.byte_count += 10
+            return httpx.Response(503 if probes == 1 else 200, json={'status': 'loading'})
+        if request.url.path == '/v1/models':
+            return httpx.Response(200, json={'data': [{'id': 'model'}]})
+        return httpx.Response(200, json={'total_slots': 1})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(local_runtime.httpx, 'AsyncClient', lambda **kwargs:
+        original(transport=httpx.MockTransport(respond), **kwargs))
+
+    async def sample(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(local_runtime, 'watch_process', sample)
+
+    async def scenario():
+        token = current_activity.set(activity)
+        try:
+            await runtime._readiness('http://127.0.0.1', 'token', 'model', None, asyncio.Event())
+        finally:
+            current_activity.reset(token)
+
+    asyncio.run(scenario())
+    assert progress == []
+    assert [item['log_bytes'] for item in resources] == [10, 20]
+    assert [item['health_status'] for item in heartbeats] == [503, 200]
+
+
 def test_intent_adaptive_wait_ignores_legacy_elapsed_budget(tmp_path):
     from agent.execution.execution_wait import ExecutionMonitor
     from agent.execution.intent_session import IntentService, current_intent
@@ -247,6 +294,22 @@ def test_process_liveness_and_flat_cpu_keep_gpu_activity_unknown(monkeypatch):
         assert heartbeats == []
 
     asyncio.run(exercise())
+
+
+def test_loading_primary_process_is_live_and_absent_process_is_unknown():
+    from types import SimpleNamespace
+    from agent.local_provider import ManagedLocalProvider
+    from agent.runtime import ChatRunService
+
+    service = ChatRunService.__new__(ChatRunService)
+    service.local_models = SimpleNamespace(_runtime=SimpleNamespace(alive=False,
+        process=SimpleNamespace(poll=lambda: None)))
+    provider = ManagedLocalProvider.__new__(ManagedLocalProvider)
+    assert not service._model_diagnostic(provider).process_exited
+    service.local_models._runtime.process = None
+    assert not service._model_diagnostic(provider).process_exited
+    service.local_models._runtime.process = SimpleNamespace(poll=lambda: 23)
+    assert service._model_diagnostic(provider).process_exited
 
 
 def test_parser_adaptive_exchange_accepts_only_matching_worker_heartbeats():

@@ -198,7 +198,15 @@ class ChatRunService:
         self.context.context_repository.interrupt_compactions()
         self.intent_sessions = IntentService(repository, self.start,
             timeout_seconds=lambda: self.routing_preferences.get('intent_timeout_seconds', 90),
-            monitor=self.execution_monitor, policy=lambda: self.routing_preferences.get('execution_wait'))
+            monitor=self.execution_monitor, policy=lambda: self.routing_preferences.get('execution_wait'),
+            preparation=self._model_preparation_receipt)
+
+    def _model_preparation_receipt(self, request):
+        selection = request.get('selection')
+        selection = selection if isinstance(selection, dict) else {}
+        return self.local_models.preparation_receipt(request.get('model_preparation_id'),
+            provider_id=request.get('provider_profile_id') or selection.get('provider_profile_id'),
+            model_id=request.get('model_id') or selection.get('model_id'))
 
     def _execution_activity(self, snapshot):
         """Persist business pause status before forwarding the task's fenced event."""
@@ -246,15 +254,25 @@ class ChatRunService:
         self._execution_events.add(task)
         task.add_done_callback(self._execution_events.discard)
 
-    @staticmethod
-    def _execution_snapshot(root):
+    def _execution_snapshot(self, root):
         result = {**root, 'execution_task_id': root['id']}
+        if root.get('intent_task_id') and not root['intent_task_id'].startswith('request:'):
+            with self.repository._connect() as connection:
+                intent = connection.execute('SELECT state_json FROM intent_tasks WHERE id=?',
+                    (root['intent_task_id'],)).fetchone()
+            preload = json.loads(intent['state_json']).get('preload_execution_task_id') if intent else None
+            if preload:
+                result['preload_execution_task_id'] = preload
         if (root['status'] == 'waiting_recovery' and root.get('stage') == 'model_output'
                 and (root.get('progress') or {}).get('details', {}).get('output_delivered')):
             result['can_retry'] = False
             result['capabilities'] = {**root.get('capabilities', {}), 'retry': False}
             result['recovery_action'] = 'run_retry'
             result['recovery_run_id'] = root.get('run_id')
+        if (str(root.get('run_id') or '').startswith('local_model:')
+                and root.get('replay_kind') != 'local_model_load'):
+            result['can_retry'] = False
+            result['capabilities'] = {**result.get('capabilities', {}), 'retry': False}
         return result
 
     def execution_status(self, params):
@@ -282,11 +300,16 @@ class ChatRunService:
         root = self.execution_status(params)
         if action == 'status':
             return {'task': root}
+        if action == 'retry' and root['status'] in {'failed', 'interrupted'}:
+            if str(root.get('run_id') or '').startswith('local_model:'):
+                self.local_models.validate_execution_resume(root['id'])
         result = self.execution_monitor.control(root['id'], action,
             revision=params.get('revision'), idempotency_key=params.get('idempotency_key'))
         if action == 'retry' and root['status'] in {'failed', 'interrupted'}:
             run_id, intent_id = result.get('run_id'), result.get('intent_task_id')
-            if root.get('replay_kind') == 'rag_search':
+            if root.get('replay_kind') == 'local_model_load':
+                self.local_models.resume_execution(root['id'])
+            elif root.get('replay_kind') == 'rag_search':
                 self.rag.resume_execution(root['id'])
             elif run_id and not run_id.startswith(('local_model:', 'rag-search-')) and run_id not in self.run_tasks:
                 await self.retry(run_id)
@@ -294,6 +317,8 @@ class ChatRunService:
                 state = self.intent_sessions.get(intent_id)
                 await self.intent_sessions.handle('retry', {'task_id': intent_id, 'revision': state['revision']})
         if action == 'cancel':
+            if str(root.get('run_id') or '').startswith('local_model:'):
+                self.local_models.cancel_execution(root['id'])
             if root.get('replay_kind') == 'rag_search':
                 self.rag.cancel_execution(root['id'])
             # Wake the business owner immediately, including between leaf stages.
@@ -313,7 +338,8 @@ class ChatRunService:
     def _model_diagnostic(self, provider):
         if isinstance(provider, ManagedLocalProvider):
             runtime = self.local_models._runtime
-            return Diagnostic(process_exited=runtime is not None and not runtime.alive)
+            process = runtime.process if runtime is not None else None
+            return Diagnostic(process_exited=process is not None and process.poll() is not None)
         return Diagnostic()
 
     @staticmethod
