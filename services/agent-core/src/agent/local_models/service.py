@@ -28,6 +28,8 @@ class LocalModelService:
         self._preparations = {}
         self._run_pins = {}
         self._auto_load_job = None
+        self.execution_monitor = None
+        self.execution_policy = None
 
     @property
     def root(self):
@@ -178,6 +180,10 @@ class LocalModelService:
             self.get_profile(provider_id)
             self._run_pins[run_id] = provider_id.removeprefix("managed:")
 
+    def release_run(self, run_id):
+        if self._run_pins.pop(run_id, None) is not None and self._runtime is not None:
+            self._runtime.touch()
+
     def prepare(self, model_id, preparation_id=None):
         self.catalog.get(model_id)
         self.pinned()
@@ -225,12 +231,35 @@ class LocalModelService:
             connection.execute("INSERT INTO local_model_jobs(id,kind,model_id,status,progress,created_at,updated_at) VALUES (?,?,?,'queued',0,?,?)",
                                (job_id, kind, model_id, now(), now()))
         self._operation = kind
+        root = None
+        if self.execution_monitor is not None:
+            root = self.execution_monitor.start_task(run_id='local_model:' + job_id,
+                policy=self.execution_policy() if callable(self.execution_policy) else self.execution_policy)
         event = threading.Event()
         task = asyncio.create_task(self._run_job(job_id, kind, event, path=path, model_id=model_id, configuration=configuration))
         self._jobs[job_id] = (task, event)
-        return {"job": next(job for job in self.catalog.jobs() if job["id"] == job_id)}
+        result = {"job": next(job for job in self.catalog.jobs() if job["id"] == job_id)}
+        if root is not None:
+            result['execution_task_id'] = root['id']
+            result['job']['execution_task_id'] = root['id']
+        return result
 
     async def _run_job(self, job_id, kind, event, *, path, model_id, configuration=None):
+        if self.execution_monitor is None:
+            return await self._run_job_business(job_id, kind, event, path=path, model_id=model_id, configuration=configuration)
+        from agent.execution.activity import associate
+        root = self.execution_monitor.start_task(run_id='local_model:' + job_id,
+            policy=self.execution_policy() if callable(self.execution_policy) else self.execution_policy)
+        with associate(self.execution_monitor, root['id']):
+            try:
+                await self._run_job_business(job_id, kind, event, path=path, model_id=model_id, configuration=configuration)
+            finally:
+                job = next(job for job in self.catalog.jobs() if job['id'] == job_id)
+                self.execution_monitor.finish_task(root['id'], job['status'] if job['status'] in
+                    {'completed', 'cancelled', 'failed'} else 'interrupted',
+                    error_code=(job.get('error') or {}).get('code'))
+
+    async def _run_job_business(self, job_id, kind, event, *, path, model_id, configuration=None):
         worker = None
         try:
             self.catalog.update_job(job_id, "running")
@@ -250,7 +279,13 @@ class LocalModelService:
                         self.catalog.configure(model_id, configuration)
                     guard = self.load_guard(self.catalog.get(model_id)) if self.load_guard else nullcontext()
                     async with guard:
-                        await self._backend().load(model_id, event)
+                        from agent.execution.activity import run_stage
+                        from agent.execution.execution_wait import Diagnostic
+                        await run_stage('main_model_loading', lambda activity: self._backend().load(model_id, event),
+                            safe_to_retry=True, diagnose=lambda activity: Diagnostic(process_exited=
+                                self._runtime is not None and self._runtime.process is not None
+                                and self._runtime.process.poll() is not None),
+                            recoverable=lambda error: getattr(error, 'code', None) == 'runtime_crashed')
             else:
                 operation = self.catalog.import_model if kind == "model.import" else self.catalog.migrate_root
                 worker = asyncio.create_task(asyncio.to_thread(operation, path, job_id, event))
@@ -307,7 +342,13 @@ class LocalModelService:
     async def invocation(self, provider_id):
         profile = self.get_profile(provider_id)
         session = self._runtime.session_id
+        from agent.execution.execution_wait import current_activity
+        activity = current_activity.get()
+        if activity is not None:
+            activity.queue(waiting=self._permit.locked(), resource='main_model')
         async with self._permit:
+            if activity is not None:
+                activity.queue(waiting=False, resource='main_model')
             current = self.get_profile(provider_id)
             if self._runtime.session_id != session \
                     or (current.base_url, current.api_key) != (profile.base_url, profile.api_key):
@@ -317,6 +358,22 @@ class LocalModelService:
                 yield profile
             finally:
                 self._runtime.touch()
+
+    @asynccontextmanager
+    async def observe_activity(self, provider_id):
+        from agent.execution.execution_wait import current_activity
+        from agent.execution.activity import watch_process
+        activity = current_activity.get()
+        runtime = self._runtime
+        sampler = None
+        if activity is not None and runtime is not None and runtime.matches(provider_id):
+            sampler = asyncio.create_task(watch_process(runtime.process, activity, heartbeat=runtime.heartbeat, job=runtime.job))
+        try:
+            yield
+        finally:
+            if sampler is not None:
+                sampler.cancel()
+                await asyncio.gather(sampler, return_exceptions=True)
 
     async def close(self):
         self._closed = True

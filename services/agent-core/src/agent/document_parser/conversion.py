@@ -12,6 +12,8 @@ import time
 
 from agent.infrastructure.processes import launch_contained
 from agent.storage import CoreDataError
+from agent.execution.execution_wait import current_activity, current_task_id
+from agent.execution.activity import process_counters
 
 CONVERSION_TIMEOUT = 90
 CONVERSION_MEMORY = 1024 * 1024 * 1024
@@ -86,13 +88,23 @@ def convert_office(path, output_suffix, *, cancel=None):
         try:
             process, job = launch_contained(command, memory_limit=CONVERSION_MEMORY,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=stage)
-            deadline = time.monotonic() + CONVERSION_TIMEOUT
+            deadline = None if current_task_id.get() is not None else time.monotonic() + CONVERSION_TIMEOUT
+            activity, previous, sampled_at = current_activity.get(), None, 0
             while True:
                 if cancel is not None and cancel.is_set():
                     raise CoreDataError('rag_office_conversion_cancelled', 'Local Office conversion was cancelled.')
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = deadline - time.monotonic() if deadline is not None else .2
+                if deadline is not None and remaining <= 0:
                     raise CoreDataError('rag_office_conversion_timeout', 'Local Office conversion exceeded 90 seconds.')
+                if activity is not None and time.monotonic() - sampled_at >= 5:
+                    metrics = process_counters(process, job)
+                    active = None
+                    if metrics is not None and previous is not None:
+                        values = [metrics[key] > previous[key] for key in metrics
+                                  if metrics[key] is not None and previous[key] is not None]
+                        active = True if any(values) else None
+                    activity.resource(active=active, process_alive=process.poll() is None, **(metrics or {}))
+                    previous, sampled_at = metrics, time.monotonic()
                 try:
                     returncode = process.wait(timeout=min(.2, remaining))
                     break

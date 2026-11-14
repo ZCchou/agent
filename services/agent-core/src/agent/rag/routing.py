@@ -127,11 +127,15 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
         result['task_type'] = 'attachment_extract'
     elif decision['task_type'] != 'document_export':
         result['task_type'] = 'evidence_answer' if result['required'] else 'chat'
-    for key in ('read_attachment_ids', 'read_requests', 'task_scope', 'retrieval_scope', 'allow_simulated_data', 'clarification'):
+    for key in ('read_attachment_ids', 'read_requests', 'task_scope', 'retrieval_scope', 'allow_simulated_data', 'clarification', 'document_workflow'):
         if key in intent:
             result[key] = intent[key]
     if intent.get('task_scope_source') == 'user_explicit':
         result['task_scope_source'] = 'user_explicit'
+    if intent.get('document_workflow') == 'review_nonempty' and intent.get('task_scope') == 'full':
+        result.update(template_review=True, required=True, reason='semantic_evidence')
+        if 'document_export' not in intent.get('task_kinds', []):
+            result['task_type'] = 'evidence_answer'
     return result
 
 
@@ -169,6 +173,7 @@ def routing_intent_schema(attachment_ids, *, pending_action=False):
         'read_attachment_ids': {'type': 'array', 'maxItems': min(8, len(attachment_ids)), 'items': identity},
         'read_requests': {'type': 'array', 'maxItems': min(8, len(attachment_ids)), 'items': object_schema(read_properties)},
         'task_scope': choice(('full', 'section', 'unspecified')), 'retrieval_scope': choice(('focused', 'broad')),
+        'document_workflow': choice(('none', 'review_nonempty')),
         'allow_simulated_data': {'type': 'boolean'},
         'clarification': {'anyOf': [{'type': 'null'}, clarification]},
     })

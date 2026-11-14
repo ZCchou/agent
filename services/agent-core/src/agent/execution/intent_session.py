@@ -10,6 +10,7 @@ import time
 import uuid
 
 from agent.storage import CoreDataError, _utc_now
+from agent.execution.activity import associate, run_stage
 
 
 current_intent = ContextVar('current_intent', default=None)
@@ -65,6 +66,8 @@ class IntentExecution:
         return 0 if self.started is None else max(0, asyncio.get_running_loop().time() - self.started)
 
     def remaining_budget(self):
+        if self.service.monitor is not None:
+            return float('inf')
         state = self.state()
         return max(0, state['timeout_seconds'] * 3 - state['active_seconds'] - self.elapsed())
 
@@ -83,6 +86,8 @@ class IntentExecution:
         self.timer.reschedule(deadline)
 
     async def classify(self, operation):
+        if self.service.monitor is not None:
+            return await self._classify_monitored(operation)
         mode = 'json_object'
         while True:
             state = self.state()
@@ -128,10 +133,42 @@ class IntentExecution:
             if code in {'routing_intent_invalid', 'response_format_unsupported'}:
                 mode = None
 
+    async def _classify_monitored(self, operation):
+        mode = 'json_object'
+        # This is a format-repair limit. Elapsed time never consumes a call.
+        for _ in range(3):
+            state = self.state()
+            self.service._patch(self.identity, self.revision, status='identifying',
+                                attempts=state['attempts'] + 1, error=None,
+                                attempt_started_at=time.time(), attempt_wait_seconds=None)
+            self.started = asyncio.get_running_loop().time()
+            try:
+                result = await run_stage('intent_identification', lambda activity: operation(mode))
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                code = ('routing_intent_invalid' if isinstance(error, (ValueError, TypeError))
+                        else getattr(error, 'code', 'routing_intent_unavailable'))
+                if code not in {'routing_intent_invalid', 'response_format_unsupported'}:
+                    raise
+                mode = None
+                failure = error
+            finally:
+                elapsed = self.elapsed()
+                self.started = None
+                current = self.state()
+                if current['revision'] == self.revision:
+                    self.service._patch(self.identity, self.revision,
+                        active_seconds=current['active_seconds'] + elapsed, attempt_started_at=None)
+        raise IntentAwaitRetry(getattr(failure, 'code', 'routing_intent_invalid'),
+                              '任务识别结果连续三次未通过格式校验，请检查模型配置。') from failure
+
 
 class IntentService:
-    def __init__(self, repository, start, *, timeout_seconds=90):
+    def __init__(self, repository, start, *, timeout_seconds=90, monitor=None, policy=None):
         self.repository, self.start = repository, start
+        self.monitor, self.policy = monitor, policy
         self.timeout_seconds = timeout_seconds
         self.tasks = {}
         self.executions = {}
@@ -176,6 +213,12 @@ class IntentService:
 
     def get(self, identity):
         state = self._read(identity)
+        if self.monitor is not None and not state.get('execution_task_id'):
+            root = self.monitor.start_task(intent_task_id=identity,
+                policy=self.policy() if callable(self.policy) else self.policy)
+            if state['status'] == 'interrupted':
+                self.monitor.finish_task(root['id'], 'interrupted', error_code='core_interrupted')
+            state = self._patch(identity, state['revision'], execution_task_id=root['id'])
         execution = self.executions.get(identity)
         elapsed = execution.elapsed() if execution else 0
         used = state['active_seconds'] + elapsed
@@ -191,6 +234,15 @@ class IntentService:
                               and not state.get('clarification') and state['attempts'] < 3
                               and state['budget_remaining_seconds'] > 0
                               and (state.get('error') or {}).get('code') in RECOVERY_CODES)
+        if self.monitor is not None:
+            state.update(budget_seconds=None, budget_remaining_seconds=None, remaining_seconds=None,
+                         can_extend=False)
+            root = self.monitor.get_task(state['execution_task_id'])
+            state['execution'] = root
+            if root['status'] == 'waiting_recovery' and state['status'] in LIVE_STATES:
+                state['status'] = 'waiting_recovery'
+            state['can_retry'] = (state['status'] in {'waiting_user', 'interrupted', 'failed'}
+                                  and not state.get('clarification'))
         return state
 
     def _launch(self, identity):
@@ -211,19 +263,33 @@ class IntentService:
             request = deepcopy(state['request'])
             if state.get('answers'):
                 request['_intent_answers'] = deepcopy(state['answers'])
-            result = await self.start(request)
+            if self.monitor is not None:
+                with associate(self.monitor, state['execution_task_id']):
+                    result = await self.start(request)
+                root = self.monitor.get_task(state['execution_task_id'])
+                if root['run_id'] is None:
+                    self.monitor.finish_task(root['id'])
+            else:
+                result = await self.start(request)
             self._patch(identity, revision, status='completed', result=result, clarification=None, error=None)
         except IntentClarification as question:
             self._patch(identity, revision, status='waiting_user', clarification=question.value, error=None)
         except IntentAwaitRetry as error:
             self._patch(identity, revision, status='waiting_user', error={'code': error.code, 'message': str(error)})
+            if self.monitor is not None:
+                self.monitor.finish_task(state['execution_task_id'], 'failed', error_code=error.code)
         except asyncio.CancelledError:
             state = self._read(identity)
             if state['revision'] == revision and state['status'] in LIVE_STATES:
                 self._patch(identity, revision, status='interrupted' if self._closed else 'cancelled',
                             error={'code': 'core_interrupted' if self._closed else 'cancelled_by_user',
                                    'message': '任务识别已中断。' if self._closed else '任务识别已取消。'})
+            if self.monitor is not None:
+                self.monitor.finish_task(state['execution_task_id'], 'interrupted' if self._closed else 'cancelled')
         except Exception as error:
+            if self.monitor is not None:
+                self.monitor.finish_task(state['execution_task_id'], 'failed',
+                                         error_code=getattr(error, 'code', 'routing_intent_unavailable'))
             self._patch(identity, revision, status='failed', error={
                 'code': getattr(error, 'code', 'routing_intent_unavailable'),
                 'message': str(error) if isinstance(error, CoreDataError) else '任务准备失败，请检查模型和附件状态。',
@@ -264,6 +330,10 @@ class IntentService:
                 if state['status'] == 'completed':
                     raise CoreDataError('intent_request_ended', '任务已经进入正式执行，请停止对应运行。')
                 task = self.tasks.get(identity)
+                if self.monitor is not None:
+                    root = self.monitor.get_task(state['execution_task_id'])
+                    self.monitor.control(root['id'], 'cancel', revision=root['revision'],
+                                         idempotency_key='intent-cancel-' + str(state['revision']))
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -272,6 +342,10 @@ class IntentService:
             elif action == 'retry':
                 if not state['can_retry']:
                     raise CoreDataError('intent_budget_exhausted', '当前任务需要补充信息或已经用完尝试预算。')
+                if self.monitor is not None:
+                    previous_root = self.monitor.get_task(state['execution_task_id'])
+                    self.monitor.control(previous_root['id'], 'retry', revision=previous_root['revision'],
+                        idempotency_key='intent-retry-' + str(previous_root['revision']))
                 self._patch(identity, state['revision'], status='queued', error=None)
                 self._launch(identity)
             elif action == 'respond':
@@ -312,6 +386,10 @@ class IntentService:
                      'clarification': None, 'error': None, 'result': None, 'created_at': now, 'updated_at': now}
             connection.execute('INSERT INTO intent_tasks VALUES (?,?,?,?,?,?,?,?)',
                 (identity, key, fingerprint, scope, 1, json.dumps(state, ensure_ascii=False), now, now))
+        if self.monitor is not None:
+            root = self.monitor.start_task(intent_task_id=identity,
+                project_id=request.get('project_id'), policy=self.policy() if callable(self.policy) else self.policy)
+            self._patch(identity, 1, execution_task_id=root['id'])
         self._launch(identity)
         return {'task': self.get(identity)}
 

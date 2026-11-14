@@ -20,6 +20,8 @@ import httpx
 from agent.infrastructure.processes import launch_contained, restrict_file
 from agent.providers import ProviderProfile
 from agent.storage import CoreDataError
+from agent.execution.execution_wait import current_activity, current_task_id
+from agent.execution.activity import watch_process
 from .catalog import canonical, cancellation
 from .manifest import RuntimeManifest
 from .paths import checked_path
@@ -52,6 +54,7 @@ class _Output:
         self._gpu_layers = 0
         self._backends = set()
         self._context_length = None
+        self.byte_count = 0
         self.thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
         self.thread.start()
 
@@ -60,6 +63,7 @@ class _Output:
             while block := os.read(stream.fileno(), 4096):
                 with self.lock:
                     self._capture_facts(block)
+                    self.byte_count += len(block)
                     self.data.extend(block)
                     del self.data[:-65536]
         except (OSError, ValueError):
@@ -200,7 +204,7 @@ class ManagedRuntime:
             candidates = [backend for backend in ("cuda", "vulkan", "cpu") if backend in engines] if record["device"] == "auto" else [record["device"]]
             if not candidates:
                 raise CoreDataError("backend_unavailable", "No managed llama.cpp backend is installed.")
-            deadline = time.monotonic() + self.load_timeout
+            deadline = None if current_task_id.get() is not None else time.monotonic() + self.load_timeout
             for backend in candidates:
                 cancel()
                 if backend not in engines:
@@ -307,28 +311,54 @@ class ManagedRuntime:
                 raise CoreDataError("runtime_dependency", message) from exc
 
     async def _readiness(self, base_url, token, model_id, deadline, event):
-        async with httpx.AsyncClient(timeout=1, trust_env=False, headers={"Authorization": "Bearer " + token}) as client:
-            while time.monotonic() < deadline:
-                cancellation(event)
-                if self.process.poll() is not None:
-                    await asyncio.to_thread(self._output.thread.join, 0.2)
-                    raise process_failure(self._output.text(), self.process.returncode)
-                try:
-                    health = await client.get(base_url + "/health")
-                    if health.status_code == 200:
-                        models = await client.get(base_url + "/v1/models")
-                        if models.status_code in (401, 403):
-                            raise CoreDataError("runtime_authentication", "The local runtime did not accept its session credential.")
-                        models.raise_for_status()
-                        if [item.get("id") for item in models.json().get("data", [])] != [model_id]:
-                            raise CoreDataError("runtime_identity", "The local runtime returned an unexpected model identity.")
-                        props = await client.get(base_url + "/props")
-                        props.raise_for_status()
-                        return props.json()
-                except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                    pass
-                await asyncio.sleep(0.1)
+        activity = current_activity.get()
+        sampler = asyncio.create_task(watch_process(self.process, activity, job=self.job)) if activity is not None else None
+        reported_bytes = 0
+        try:
+            async with httpx.AsyncClient(timeout=1, trust_env=False, headers={"Authorization": "Bearer " + token}) as client:
+                while deadline is None or time.monotonic() < deadline:
+                    cancellation(event)
+                    if self.process.poll() is not None:
+                        await asyncio.to_thread(self._output.thread.join, 0.2)
+                        raise process_failure(self._output.text(), self.process.returncode)
+                    if activity is not None and self._output.byte_count != reported_bytes:
+                        reported_bytes = self._output.byte_count
+                        activity.progress(log_bytes=reported_bytes)
+                    try:
+                        health = await client.get(base_url + "/health")
+                        if activity is not None:
+                            activity.heartbeat(health_status=health.status_code)
+                        if health.status_code == 200:
+                            models = await client.get(base_url + "/v1/models")
+                            if models.status_code in (401, 403):
+                                raise CoreDataError("runtime_authentication", "The local runtime did not accept its session credential.")
+                            models.raise_for_status()
+                            if [item.get("id") for item in models.json().get("data", [])] != [model_id]:
+                                raise CoreDataError("runtime_identity", "The local runtime returned an unexpected model identity.")
+                            props = await client.get(base_url + "/props")
+                            props.raise_for_status()
+                            return props.json()
+                    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                        pass
+                    await asyncio.sleep(0.1)
+        finally:
+            if sampler is not None:
+                sampler.cancel()
+                await asyncio.gather(sampler, return_exceptions=True)
         raise CoreDataError("runtime_load_timeout", "The model did not become ready within the load timeout.")
+
+    async def heartbeat(self, activity):
+        profile = self.profile
+        if profile is None:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=1, trust_env=False,
+                headers={'Authorization': 'Bearer ' + profile.api_key}) as client:
+                response = await client.get(profile.base_url.removesuffix('/v1') + '/health')
+                activity.heartbeat(health_status=response.status_code)
+        except httpx.HTTPError:
+            # A failed probe provides no CPU/GPU activity measurement.
+            pass
 
     async def _stop_child(self):
         self.profile = None

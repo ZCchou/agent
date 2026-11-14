@@ -5,6 +5,19 @@ from typing import Any
 
 
 REASONS = {
+    'rag_rerank_timeout': '资料重排序等待已达到配置时限，请查看检索诊断',
+    'rag_worker_crash': '检索进程已退出，请查看辅助模型与设备诊断',
+    'execution_stalled': '执行阶段尚无可验证的进展，请查看任务详情',
+    'execution_recovery_exhausted': '当前阶段连续恢复后仍未取得进展，请检查配置后手动恢复',
+    'execution_activity_uncertain': '当前执行活动尚无法确认，可继续等待或查看诊断',
+    'execution_replay_unsafe': '模型已输出内容，请保留草稿并通过运行重试恢复',
+    'rag_document_timeout': '文档解析等待已达到配置时限，请查看解析诊断',
+    'rag_parser_failed': '文档解析进程未完成，请检查原件与解析诊断',
+    'rag_office_conversion_failed': 'Office 文档转换失败，请检查原件与转换组件',
+    'rag_office_conversion_timeout': 'Office 文档转换等待已达到配置时限',
+    'ocr_runtime_missing': 'OCR 组件尚未安装，请导入离线 OCR 组件',
+    'ocr_runtime_invalid': 'OCR 组件完整性校验失败，请重新导入组件',
+    'ocr_result_invalid': 'OCR 结果未通过校验，请检查页面与识别模型',
     'rag_library_required': '当前任务需要项目资料，请在项目中启用资料库',
     'attachment_purpose_invalid': '附件用途与本轮选择不一致，请重新选择用途',
     'document_template_required': '请上传待填写的 DOCX 模板或明确指定项目内模板路径',
@@ -102,6 +115,8 @@ def safe_code(error: BaseException) -> str:
 
 def recovery_allowed(error: BaseException, *, partial: str, operations: list[dict[str, Any]]) -> bool:
     code = getattr(error, "code", "internal_error")
+    if code.startswith(('rag_', 'ocr_', 'execution_')):
+        return False
     if code.startswith('document_') or code in {'terminal_isolation_unavailable', 'rag_library_required', 'attachment_purpose_invalid'}:
         return False
     if code in {
