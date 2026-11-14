@@ -112,6 +112,7 @@ fn accept_run_event(sequences: &mut HashMap<String, u64>, response: &Value) -> b
             | "run.completed"
             | "run.failed"
             | "run.cancelled"
+            | "run.interrupted"
             | "run.tool_requested"
             | "run.tool_status_changed"
             | "run.change_set_ready"
@@ -163,6 +164,7 @@ fn terminal_event_run_id(response: &Value) -> Option<&str> {
         "run.completed"
             | "run.failed"
             | "run.cancelled"
+            | "run.interrupted"
             | "run.context_compaction_completed"
             | "run.context_compaction_failed"
     )

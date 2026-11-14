@@ -93,6 +93,49 @@ def execute(setup, artifact, generate=None, *, identity=None, allowance=16000,
     return asyncio.run(monitor.execute_stage(root['id'], 'document_review', operation))
 
 
+def test_restored_batches_do_not_reset_repeated_failure_recovery_limit(setup):
+    workflow, run, monitor, root, sources = setup
+    document = Document()
+    for index in range(11):
+        document.add_paragraph(f'Requirement {index}')
+    artifact = register(workflow, run, document)
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch['index'])
+        if batch['index'] == 0:
+            return sources.response(batch)
+        if calls.count(1) > 3:
+            raise AssertionError('restored work reset the recovery limit')
+        raise CoreDataError('runtime_crashed', 'Worker exited')
+
+    async def scenario():
+        async def operation(activity):
+            return await review_template(workflow, run['id'], artifact['id'], 'review all',
+                generate, sources.evidence, sources.resolve, activity=activity,
+                identity={'task_revision': 'intent-1', 'project_generation': sources.generation})
+        task = asyncio.create_task(monitor.execute_stage(root['id'], 'document_review', operation,
+            safe_to_retry=True, recoverable=lambda error: isinstance(error, CoreDataError)
+                and error.code == 'runtime_crashed'))
+        try:
+            while not task.done() and monitor.get_task(root['id'])['status'] != 'waiting_recovery':
+                await asyncio.sleep(0)
+            if task.done():
+                await task
+            current = monitor.get_task(root['id'])
+            assert current['auto_recoveries'] == 2
+            assert calls == [0, 1, 1, 1]
+            monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='end-probe')
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_inventory_covers_nonempty_nested_targets_and_duplicate_chapters_without_source_write(setup):
     workflow, run, _, _, sources = setup
     document = Document()

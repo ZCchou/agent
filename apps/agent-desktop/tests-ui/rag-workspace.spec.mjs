@@ -165,8 +165,10 @@ async function setup(page, scenario = {}) {
           return { models: [], root: "", runtime: { available: true } };
         case "ocr.model.list":
           return { models: [], runtime: { available: true } };
-        case "library.search":
-          return {
+        case "search.start":
+          return { task: { id: "library-search-task", revision: 0, attempt: 1, status: "running" } };
+        case "search.status":
+          return { task: { id: "library-search-task", revision: 0, attempt: 1, status: "completed" }, result: {
             evidence: [
               {
                 id: "c",
@@ -177,7 +179,7 @@ async function setup(page, scenario = {}) {
                 score: 1,
               },
             ],
-          };
+          } };
         default:
           throw new Error(args.action);
       }

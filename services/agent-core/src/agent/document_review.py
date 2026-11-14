@@ -397,13 +397,15 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         workflow.path_for(run_id, template_id)
         payload = {'format_version': 1, 'target_ids': batch['target_ids'], 'response': response,
                    'results': normalized, 'evidence_sources': context['evidence']}
-        if not activity.checkpoint(checkpoint_key, checkpoint_identity, payload):
+        if (not restored or inherited_from is not None) and not activity.checkpoint(
+                checkpoint_key, checkpoint_identity, payload):
             raise CoreDataError('document_review_stale', '审阅阶段身份已变化，旧批次结果未发布。')
         results.update({result['target_id']: result for result in normalized})
         batches.append({'index': index, 'target_ids': batch['target_ids'], 'restored': restored,
                         'inherited_from': inherited_from})
         remaining = remaining[len(page):]
-        activity.progress(completed=len(results), total=len(fields), kind='document_review')
+        if not activity.progress(completed=len(results), total=len(fields), kind='document_review'):
+            raise CoreDataError('document_review_stale', '审阅阶段身份已变化，旧批次结果未发布。')
     ordered = [results[field['id']] for field in fields]
     reviewed = sum(result['status'] == 'reviewed' for result in ordered)
     report = {'template_id': template_id, 'template_sha256': template['sha256'],

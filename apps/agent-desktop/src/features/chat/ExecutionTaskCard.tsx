@@ -7,13 +7,15 @@ import { Button } from "../../components/ui/Button";
 import { acceptExecutionSnapshot, controlExecutionTask, getExecutionTask,
   type ExecutionOwner, type ExecutionTaskSnapshot } from "../../services/tauri/executionTasks";
 
-export function ExecutionTaskCard({ owner, enabled, onSettings }: {
+export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onRunRetry }: {
   owner: ExecutionOwner | null; enabled: boolean; onSettings(): void;
+  onRecovered?(): void; onRunRetry?(runId: string): Promise<void>;
 }) {
   const { t } = useTranslation("chat");
   const [task, setTask] = useState<ExecutionTaskSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [pollEpoch, setPollEpoch] = useState(0);
   const ownerKey = owner ? `${owner.kind}:${owner.id}` : "";
   const currentOwnerKey = useRef(ownerKey);
   currentOwnerKey.current = ownerKey;
@@ -46,26 +48,33 @@ export function ExecutionTaskCard({ owner, enabled, onSettings }: {
     }
     void poll();
     return () => { disposed = true; if (timer) clearTimeout(timer); unlisten?.(); };
-  }, [owner?.kind, owner?.id, enabled]);
+  }, [owner?.kind, owner?.id, enabled, pollEpoch]);
   if (!enabled || !owner || !task || !acceptExecutionSnapshot(null, task, owner)
     || task.status === "completed" || task.status === "cancelled") return null;
   const details = task.current_stage?.details ?? {};
   const completed = task.current_stage?.completed;
   const total = task.current_stage?.total;
-  const paused = task.status === "waiting_recovery" || task.status === "interrupted";
+  const paused = task.status === "waiting_recovery" || task.status === "interrupted" || task.status === "failed";
   const stage = typeof details.stage === "string" ? details.stage
     : typeof details.phase === "string" ? details.phase : task.stage ?? "preparingRequest";
   const label = t(`execution.stages.${stage}`, {
     defaultValue: t(`routing.status.${stage}`, { defaultValue: t("execution.stages.processing") }),
   });
-  async function act(action: "continue" | "retry" | "cancel") {
+  async function act(action: "continue" | "retry" | "cancel" | "run_retry") {
     if (!task || busy) return;
     const taskId = task.id;
     const actionOwner = ownerKey;
     setBusy(true); setError("");
     try {
-      const next = await controlExecutionTask(task, action);
-      if (currentOwnerKey.current === actionOwner) setTask((current) => current?.id === taskId ? next : current);
+      if (action === "run_retry") {
+        if (task.recovery_run_id && onRunRetry) await onRunRetry(task.recovery_run_id);
+      } else {
+        const next = await controlExecutionTask(task, action);
+        if (currentOwnerKey.current === actionOwner) {
+          setTask((current) => current?.id === taskId && owner && acceptExecutionSnapshot(current, next, owner) ? next : current);
+          if (action === "retry") { setPollEpoch(value => value + 1); onRecovered?.(); }
+        }
+      }
     } catch (value) { if (currentOwnerKey.current === actionOwner) setError(value instanceof Error ? value.message : String(value)); }
     finally { if (currentOwnerKey.current === actionOwner) setBusy(false); }
   }
@@ -81,6 +90,8 @@ export function ExecutionTaskCard({ owner, enabled, onSettings }: {
       {typeof task.elapsed_seconds === "number" ? <span>{t("execution.elapsed", { seconds: Math.floor(task.elapsed_seconds) })}</span> : null}
       {typeof task.seconds_since_progress === "number" ? <span>{t("execution.lastProgress", { seconds: Math.floor(task.seconds_since_progress) })}</span> : null}
     </div>
+    {task.status === "running" && (task.elapsed_seconds ?? 0) >= (task.policy?.long_running_notice_seconds ?? 90)
+      ? <p>{t("execution.takingLonger")}</p> : null}
     {paused ? <p>{t("execution.retained")}</p> : null}
     <details><summary>{t("execution.details")}</summary>
       <p>{t("execution.recoveries", { count: task.auto_recoveries })}</p>
@@ -90,6 +101,7 @@ export function ExecutionTaskCard({ owner, enabled, onSettings }: {
     <div className="execution-task-card__actions">
       {paused && task.can_continue !== false ? <Button busy={busy} icon={<Activity />} onClick={() => void act("continue")}>{t("execution.continue")}</Button> : null}
       {paused && task.can_retry !== false ? <Button busy={busy} icon={<RotateCcw />} onClick={() => void act("retry")}>{t("execution.retry")}</Button> : null}
+      {paused && task.recovery_action === "run_retry" && onRunRetry ? <Button busy={busy} icon={<RotateCcw />} onClick={() => void act("run_retry")}>{t("execution.retryRun")}</Button> : null}
       {paused || task.status === "failed" ? <Button disabled={busy} icon={<Settings />} onClick={onSettings}>{t("execution.settings")}</Button> : null}
       {task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
     </div>

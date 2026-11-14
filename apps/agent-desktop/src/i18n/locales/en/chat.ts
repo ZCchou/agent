@@ -3,7 +3,8 @@ const chat = {
     title: "Task execution status", needsAttention: "Task needs attention", count: "Completed {{completed}}/{{total}}",
     elapsed: "Running for {{seconds}} seconds", lastProgress: "Last progress {{seconds}} seconds ago", details: "View details",
     recoveries: "{{count}} consecutive automatic recoveries", retained: "The task and completed progress are saved. Choose how to continue.",
-    continue: "Continue waiting", retry: "Recover current stage", cancel: "Cancel task", settings: "Adjust model settings",
+    takingLonger: "Processing is taking longer. Execution progress is being monitored.",
+    continue: "Continue waiting", retry: "Recover current stage", retryRun: "Keep draft and regenerate", cancel: "Cancel task", settings: "Adjust model settings",
     stages: {
       processing: "Processing task", rag_retrieval: "Searching project libraries", rag_embed: "Embedding search query",
       rag_rerank: "Reranking candidates", integrity_verification: "Verifying model files", worker_starting: "Starting inference worker",

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ExecutionWaitPolicy } from "../../types/settings";
 
-export type ExecutionOwner = { kind: "intent" | "run"; id: string };
+export type ExecutionOwner = { kind: "intent" | "run" | "task"; id: string };
 export interface ExecutionTaskSnapshot {
   id: string;
   revision: number;
@@ -11,6 +12,7 @@ export interface ExecutionTaskSnapshot {
   intent_task_id?: string | null;
   stage?: string | null;
   auto_recoveries: number;
+  policy?: ExecutionWaitPolicy;
   created_at: number;
   updated_at: number;
   elapsed_seconds?: number;
@@ -19,6 +21,8 @@ export interface ExecutionTaskSnapshot {
   can_continue?: boolean;
   can_retry?: boolean;
   can_cancel?: boolean;
+  recovery_action?: "run_retry";
+  recovery_run_id?: string;
   current_stage?: {
     completed?: number | null; total?: number | null; progress_at?: number;
     details?: Record<string, unknown>; details_json?: string;
@@ -28,7 +32,8 @@ export interface ExecutionTaskSnapshot {
 export function acceptExecutionSnapshot(previous: ExecutionTaskSnapshot | null, next: ExecutionTaskSnapshot,
   owner: ExecutionOwner): boolean {
   if (!next || typeof next.id !== "string" || !Number.isInteger(next.revision) || !Number.isInteger(next.attempt)) return false;
-  if ((owner.kind === "run" ? next.run_id : next.intent_task_id) !== owner.id) return false;
+  const ownerId = owner.kind === "task" ? next.id : owner.kind === "run" ? next.run_id : next.intent_task_id;
+  if (ownerId !== owner.id) return false;
   if (!previous || previous.id !== next.id) return true;
   if (next.revision !== previous.revision) return next.revision > previous.revision;
   if (next.attempt !== previous.attempt) return next.attempt > previous.attempt;
@@ -37,7 +42,7 @@ export function acceptExecutionSnapshot(previous: ExecutionTaskSnapshot | null, 
 
 export async function getExecutionTask(owner: ExecutionOwner): Promise<ExecutionTaskSnapshot | null> {
   const result = await invoke<{ task: ExecutionTaskSnapshot | null }>("execution_request", {
-    action: "status", params: { owner_kind: owner.kind, owner_id: owner.id },
+    action: "status", params: owner.kind === "task" ? { task_id: owner.id } : { owner_kind: owner.kind, owner_id: owner.id },
   });
   return result?.task ?? null;
 }

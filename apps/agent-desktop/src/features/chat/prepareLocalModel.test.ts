@@ -12,6 +12,16 @@ it("waits for readiness and releases the reservation after sending", async () =>
   expect(release).toHaveBeenCalledWith("lease");
 });
 
+it("reports the load task and verified reservation through readiness", async () => {
+  const loading = { preparation_id: "lease", state: "loading" as const, execution_task_id: "load-root" };
+  const ready = { ...loading, state: "ready" as const };
+  const prepare = vi.fn().mockResolvedValueOnce(loading).mockResolvedValueOnce(ready);
+  const progress = vi.fn();
+  const finish = await prepareLocalModel({ prepare, release: vi.fn() }, "model", () => false, progress, async () => undefined);
+  expect(progress.mock.calls.map((call) => call[2])).toEqual([loading, ready]);
+  await finish();
+});
+
 it("cancellation releases the waiter and prevents sending", async () => {
   let cancelled = false;
   const release = vi.fn(async () => undefined);

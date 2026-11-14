@@ -8,7 +8,7 @@ from agent.storage import CoreDataError, CoreRepository
 
 def test_ping_returns_valid_envelope() -> None:
     result = handle_message({"v": 25, "id": "req-001", "type": "ping", "params": {}})
-    assert result["v"] == 24
+    assert result["v"] == 25
     assert result["id"] == "req-001"
     assert result["type"] == "ping"
     assert result["result"] == {
@@ -19,7 +19,7 @@ def test_ping_returns_valid_envelope() -> None:
 
 def test_unknown_message_keeps_correlation_fields() -> None:
     result = handle_message({"v": 25, "id": "req-002", "type": "unknown", "params": {}})
-    assert result["v"] == 24
+    assert result["v"] == 25
     assert result["id"] == "req-002"
     assert result["type"] == "unknown"
     assert result["error"]["code"] == "unsupported_message_type"

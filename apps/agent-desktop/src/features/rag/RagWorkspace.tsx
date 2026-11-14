@@ -15,6 +15,7 @@ import { IndexVersionPicker } from "./RagPage";
 import { ImportWizard, suspendedImportLibrary } from "./ImportWizard";
 import { DocumentViewer } from "./DocumentViewer";
 import { BindProjectDialog } from "./ProjectLibraries";
+import { ExecutionTaskCard } from "../chat/ExecutionTaskCard";
 import { TaskCenter, TaskProgress } from "./RagTasks";
 import {
   activeTask,
@@ -32,7 +33,7 @@ const displayCache = {
 };
 const detailCache = new Map<string, { query: string; withdrawn: boolean }>();
 let listQuery = "";
-const searchCache = new Map<string, { query: string; items: RagEvidence[] }>();
+const searchCache = new Map<string, { query: string; items: RagEvidence[]; taskId?: string | null }>();
 const savedScrolls = new Map<string, number>();
 function initialView(): RagView {
   try {
@@ -348,6 +349,7 @@ export function RagWorkspace() {
             )}
             {view.tab === "search" && (
               <LibrarySearch
+                key={library.id}
                 library={library}
                 onOpen={(id) => goDocument(library.id, id)}
               />
@@ -571,15 +573,25 @@ function LibrarySearch({
   library: RagLibrary;
   onOpen: (id: string) => void;
 }) {
+  const { coreOnline, setCurrentPage } = useApp();
   const [query, setQuery] = useState(searchCache.get(library.id)?.query ?? "");
   const [items, setItems] = useState<RagEvidence[]>(
     searchCache.get(library.id)?.items ?? [],
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [taskId, setTaskId] = useState<string | null>(searchCache.get(library.id)?.taskId ?? null);
   useEffect(() => {
-    searchCache.set(library.id, { query, items });
-  }, [library.id, query, items]);
+    searchCache.set(library.id, { query, items, taskId });
+  }, [library.id, query, items, taskId]);
+  function runSearch() {
+    if (!query.trim()) return;
+    setBusy(true); setError("");
+    void ragRepository.searchLibrary(library.id, query, { onTaskId: setTaskId })
+      .then((result) => setItems(result.evidence))
+      .catch((value) => setError(String(value)))
+      .finally(() => setBusy(false));
+  }
   return (
     <>
       <h3>检索测试</h3>
@@ -593,18 +605,12 @@ function LibrarySearch({
         onSubmit={(e) => {
           e.preventDefault();
           if (busy || !query.trim()) return;
-          setBusy(true);
-          setError("");
-          void ragRepository
-            .searchLibrary(library.id, query)
-            .then((result) => setItems(result.evidence))
-            .catch((e) => setError(String(e)))
-            .finally(() => setBusy(false));
+          runSearch();
         }}
       >
         <label>
           检索问题
-          <input value={query} onChange={(e) => setQuery(e.target.value)} />
+          <input value={query} disabled={busy} onChange={(e) => { setQuery(e.target.value); setTaskId(null); }} />
         </label>
         <Button
           type="submit"
@@ -613,6 +619,8 @@ function LibrarySearch({
           {busy ? "正在检索…" : "检索条款"}
         </Button>
       </form>
+      <ExecutionTaskCard owner={taskId ? { kind: "task", id: taskId } : null} enabled={coreOnline && Boolean(taskId)}
+        onSettings={() => setCurrentPage("models")} onRecovered={runSearch} />
       {error && <p role="alert">{error}</p>}
       {items.map((item, index) => (
         <article className="rag-search-result" key={item.id ?? index}>

@@ -9,7 +9,7 @@ export async function prepareLocalModel(
   repository: ModelPreparationRepository,
   modelId: string,
   cancelled: () => boolean,
-  progress: (state: string, elapsed: number) => void,
+  progress: (state: string, elapsed: number, receipt: LocalModelPreparation) => void,
   pause = () => new Promise<void>((resolve) => window.setTimeout(resolve, 500)),
 ): Promise<() => Promise<void>> {
   let preparationId: string | undefined;
@@ -31,7 +31,7 @@ export async function prepareLocalModel(
         const error = result.job?.error;
         throw new Error(typeof error === "object" && error ? `${error.code} · ${error.message}` : String(error ?? "model_loading_failed"));
       }
-      progress(result.state, Math.floor((Date.now() - started) / 1000));
+      progress(result.state, Math.floor((Date.now() - started) / 1000), result);
       if (result.state === "ready") return release;
       await pause();
     }

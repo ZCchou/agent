@@ -11,6 +11,7 @@ export class TauriModelRunRepository implements ModelRunRepository {
     intentTasks.begin(scope);
     const response = await invoke<StartedModelRun | { task: IntentTask }>("start_model_run", { request: {
       intent_async: true, intent_scope: scope,
+      ...(input.modelPreparationId ? { model_preparation_id: input.modelPreparationId } : {}),
       conversation_id: input.conversationId ?? null, kind: input.kind ?? null,
       category: input.category ?? null, chat_group_id: input.chatGroupId ?? null,
       project_id: input.projectId ?? null, content: input.content,

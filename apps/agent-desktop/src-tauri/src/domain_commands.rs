@@ -241,6 +241,8 @@ pub struct ModelRunStartRequest {
     pub intent_async: bool,
     #[serde(default, skip_serializing)]
     pub intent_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_preparation_id: Option<String>,
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_message_id: Option<String>,

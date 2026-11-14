@@ -323,7 +323,7 @@ class ManagedRuntime:
                         raise process_failure(self._output.text(), self.process.returncode)
                     if activity is not None and self._output.byte_count != reported_bytes:
                         reported_bytes = self._output.byte_count
-                        activity.progress(log_bytes=reported_bytes)
+                        activity.resource(log_bytes=reported_bytes)
                     try:
                         health = await client.get(base_url + "/health")
                         if activity is not None:

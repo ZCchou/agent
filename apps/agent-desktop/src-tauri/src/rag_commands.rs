@@ -148,6 +148,17 @@ fn validate_params(action: &str, params: &Value) -> Result<(), String> {
         "document.history" => &["document_id"],
         "document.inspect" => &["library_id", "paths", "grant_id"],
         "library.search" => &["library_id", "query"],
+        "search.start" => &[
+            "search_action",
+            "idempotency_key",
+            "project_id",
+            "library_id",
+            "query",
+            "library_ids",
+            "version_ids",
+            "limit",
+        ],
+        "search.status" => &["execution_task_id"],
         "job.detail" => &["job_id"],
         "job.resume" => &["job_id", "accept_partial"],
         "library.create" => &["name", "embedding_model_id", "reranker_model_id"],
@@ -287,12 +298,17 @@ pub async fn rag_request(
         .lock()
         .map_err(|_| "Unable to authorize selected files")?
         .authorize(&action, &mut params)?;
+    let timeout = if matches!(action.as_str(), "search.start" | "search.status") {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(600)
+    };
     request_core_with_timeout(
         &app,
         &manager,
         "rag.request",
         json!({"action": action, "params": params}),
-        Duration::from_secs(600),
+        timeout,
     )
     .await
 }

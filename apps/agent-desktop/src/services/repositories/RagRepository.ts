@@ -1,6 +1,7 @@
 import type { RagDocument, RagFileInspection, RagTaskDetail } from "../../types/rag";
 import type { OcrImportOptions, OcrCatalog, OcrPage, RagPathKind, RagPathSelection, RagProfile, RagModelList, RagLibrary, RagLibraryDraft, RagDocumentPreview, RagDocumentConfirmation, RagJob, RagSearchResult } from "../../types/rag";
 
+export interface RagSearchOptions { onTaskId?(taskId: string): void }
 export interface RagRepository {
   overview(projectId?: string): Promise<{ libraries: RagLibrary[] }>;
   documents(libraryId: string, offset?: number, query?: string, includeWithdrawn?: boolean): Promise<{ documents: RagDocument[]; total: number }>;
@@ -8,7 +9,7 @@ export interface RagRepository {
   inspectDocuments(libraryId: string, selection: RagPathSelection): Promise<{ files: RagFileInspection[] }>;
   taskDetail(jobId: string): Promise<RagTaskDetail>;
   resumeJob(jobId: string, acceptPartial?: boolean): Promise<unknown>;
-  searchLibrary(libraryId: string, query: string): Promise<RagSearchResult>;
+  searchLibrary(libraryId: string, query: string, options?: RagSearchOptions): Promise<RagSearchResult>;
   updateMetadata(confirmation: RagDocumentConfirmation): Promise<unknown>;
   openOriginal(versionId: string): Promise<void>;
   selectPaths(kind: RagPathKind, modelFile?: boolean): Promise<RagPathSelection | null>;
@@ -38,6 +39,6 @@ export interface RagRepository {
   pauseJob(jobId: string): Promise<unknown>;
   cancelJob(jobId: string): Promise<unknown>;
   buildIndex(libraryId: string, versionIds?: string[]): Promise<unknown>;
-  search(projectId: string, query: string, libraryIds?: string[]): Promise<RagSearchResult>;
+  search(projectId: string, query: string, libraryIds?: string[], options?: RagSearchOptions): Promise<RagSearchResult>;
   previewEvidence(projectId: string, evidenceId: string, offset?: number, length?: number): Promise<Record<string, unknown>>;
 }

@@ -3,7 +3,8 @@ const chat = {
     title: "任务运行状态", needsAttention: "任务需要处理", count: "已完成 {{completed}}/{{total}}",
     elapsed: "已运行 {{seconds}} 秒", lastProgress: "最近进展于 {{seconds}} 秒前", details: "查看详情",
     recoveries: "连续自动恢复 {{count}} 次", retained: "任务和已完成进度已保留，请选择后续操作。",
-    continue: "继续等待", retry: "恢复当前阶段", cancel: "取消任务", settings: "调整模型设置",
+    takingLonger: "处理耗时较长，正在持续监控执行进展。",
+    continue: "继续等待", retry: "恢复当前阶段", retryRun: "保留草稿并重新生成", cancel: "取消任务", settings: "调整模型设置",
     stages: {
       processing: "正在处理任务", rag_retrieval: "正在检索项目资料", rag_embed: "正在生成检索向量",
       rag_rerank: "正在重排序", integrity_verification: "正在校验模型文件", worker_starting: "正在启动推理进程",
