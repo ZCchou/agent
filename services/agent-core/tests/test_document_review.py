@@ -127,6 +127,60 @@ def test_model_classifies_authoring_guidance_without_treating_it_as_equipment_fa
     assert '编写说明' in result['markdown']
 
 
+def test_review_schema_selects_only_current_targets_and_quote_identifiers():
+    from agent.document_contracts import document_batch_schema
+    schema = document_batch_schema({'stage': 'review',
+        'fields': [{'id': 'p-2', 'field_type': 'instruction'}, {'id': 'p-3', 'field_type': 'example'}],
+        'evidence': [{'id': 'source-1', 'quote_options': [{'quote_id': 'quote-1', 'text': '原文。'}]}]}, [])
+    results = schema['properties']['response']['anyOf'][0]['properties']['results']
+    assert results['minItems'] == results['maxItems'] == 2
+    properties = results['items']['properties']
+    assert properties['target_id']['enum'] == ['p-2', 'p-3']
+    citation = properties['evidence']['items']['properties']
+    assert citation['id']['enum'] == ['source-1']
+    assert citation['quote_id']['enum'] == ['quote-1']
+
+
+def test_review_schema_disallows_citations_when_no_evidence_is_available():
+    from agent.document_contracts import document_batch_schema
+    schema = document_batch_schema({'stage': 'review', 'fields': [{'id': 'p-2', 'field_type': 'content'}]}, [])
+    results = schema['properties']['response']['anyOf'][0]['properties']['results']
+    assert results['items']['properties']['evidence']['maxItems'] == 0
+
+
+def test_review_fit_reserves_instruction_and_current_response_schema():
+    from agent.context_engine.policy import estimate_tokens
+    from agent.document_review import _fits
+
+    batch = {'stage': 'review', 'fields': [{'id': 'p-1', 'field_type': 'content', 'text': '试验目的'}]}
+    context = {'evidence': [{'id': 'evidence-1', 'quote_options': [
+        {'quote_id': f'quote-{index}', 'text': '实际条款原文。'} for index in range(40)]}]}
+    old_allowance = estimate_tokens({'batch': batch, 'evidence': context}) + 256
+    assert not _fits(batch, context, old_allowance)
+
+
+def test_schema_compatibility_retry_consumes_one_of_the_three_model_calls(setup):
+    workflow, run, monitor, root, sources = setup
+    document = Document()
+    document.add_paragraph(SOURCE)
+    artifact = register(workflow, run, document)
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch.get('format_error'))
+        if len(calls) == 1:
+            raise ProviderError('response_format_unsupported', 'Schema unavailable')
+        return sources.response(batch)
+
+    result = execute(setup, artifact, generate)
+    assert calls == [None, 'response_format_unsupported']
+    assert result['report']['coverage']['reviewed'] == 1
+    with workflow.repository._connect() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM execution_wait_activity WHERE task_id=? AND kind='progress' "
+            "AND json_extract(payload_json,'$.review_call_number') IS NOT NULL", (root['id'],)).fetchone()[0]
+    assert count == 2
+
+
 def test_restored_batches_do_not_reset_repeated_failure_recovery_limit(setup):
     workflow, run, monitor, root, sources = setup
     document = Document()

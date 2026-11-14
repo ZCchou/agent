@@ -3994,7 +3994,7 @@ class ChatRunService:
             )
             if response_schema is not None:
                 spec = replace(spec, response_format='json_schema',
-                               response_schema_json=json.dumps(response_schema, sort_keys=True))
+                               response_schema_json=json.dumps(response_schema, sort_keys=True), spec_hash='')
             self.execution_repository.save_invocation_spec(spec)
             prepared = self._compile_model_request(run['id'], spec, messages)
             if round_no == 1:
@@ -5416,7 +5416,8 @@ class ChatRunService:
         return content + '\n\n[打开文件](<' + output_path + '>)\n\n[打开所在目录](project-dir:.)'
 
     async def _review_template_planned(self, run, attempt_id, attachment, request):
-        from agent.document_review import REVIEW_INSTRUCTION, review_template
+        from agent.document_review import REVIEW_INSTRUCTION, review_request, review_template
+        from agent.document_contracts import document_batch_schema
         from agent.rag.grounding import evidence_for_model, evidence_with_quotes, quote_options
         from agent.rag.service import SEARCH_QUERY_MAX_CHARS
         state = self.rag_grounding.runs.get(run['id'])
@@ -5426,11 +5427,14 @@ class ChatRunService:
         template = self.documents.register_template(run['id'], original.read_bytes(), attachment['name'])
         profile = self._profile(run['provider_profile_id'])
         window = (profile.model_capabilities or {}).get(run['model_id'], {}).get('context_length') or 8192
-        allowance = max(512, min(12000, window // 3))
+        output_tokens = min(4096, max(512, window // 3))
+        _, _, _, input_limit = resolve_budget(context_window=window, max_output_tokens=output_tokens)
+        allowance = min(12000, input_limit)
         plan = self.execution_coordinator.get_for_run(run['id'])
         if plan is None:
             raise CoreDataError('execution_plan_stale', '全篇审阅的模型调用计划不可用。')
         step = next(item for item in plan['steps'] if item['step_type'] == 'final_response')
+        schema_available = step.get('protocol_id') in {'openai_chat', 'ollama_chat'}
         with self.repository._connect() as connection:
             attempt = dict(connection.execute('SELECT * FROM run_attempts WHERE id=? AND run_id=?',
                 (attempt_id, run['id'])).fetchone())
@@ -5461,31 +5465,37 @@ class ChatRunService:
             return {'evidence': presented, 'generation': found['generation']}
 
         async def generate(batch, sources):
+            nonlocal schema_available
             self.rag_grounding.validate(run['id'])
-            messages = [{'role': 'system', 'content': REVIEW_INSTRUCTION}, {'role': 'user',
-                'content': json.dumps({'batch': batch, 'sources': sources}, ensure_ascii=False)}]
+            if batch.get('format_error') == 'response_format_unsupported':
+                schema_available = False
+            messages, schema = review_request(batch, sources, structured=schema_available)
             with self.repository._connect() as connection:
                 round_no = connection.execute('SELECT COALESCE(MAX(round_no),0)+1 FROM invocation_specs WHERE step_id=? AND attempt_no=?',
                     (step['id'], attempt['attempt_number'])).fetchone()[0]
             text, usage, _ = await self._invoke_planned_step(run, plan, step, attempt,
                 self._provider(self._profile_for_step(profile, step)), messages,
-                max_output_tokens=min(4096, max(512, batch['token_budget'])), response_format='json_object',
-                round_no=round_no, apply_rag_contract=False)
+                max_output_tokens=output_tokens, response_format='json_object',
+                round_no=round_no, apply_rag_contract=False, response_schema=schema)
             if usage:
                 self.repository.update_attempt_usage(attempt_id, usage)
                 self.execution_repository.update_step_usage(step['id'], usage)
             try:
-                return json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
+                result = json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
+                if isinstance(result, dict) and set(result) == {'response'} and isinstance(result['response'], dict):
+                    return result['response']
+                return result
             except (ValueError, TypeError) as error:
                 raise CoreDataError('document_review_invalid', '审阅批次格式未通过校验。') from error
 
         identity = {'project_generation': state['generation'], 'model_id': run['model_id'],
-            'review_instruction_digest': stable_hash(REVIEW_INSTRUCTION),
+            'review_instruction_digest': stable_hash({'instruction': REVIEW_INSTRUCTION,
+                'schema': document_batch_schema({'stage': 'review', 'fields': []}, [])}),
             'provider_id': profile.id, 'task_revision': 1,
             'generation_config': {key: step.get(key) for key in ('provider_profile_id', 'model_id',
                 'protocol_id', 'invocation_route_id', 'route_config_fingerprint', 'capability_signature')},
             'reasoning_effort': plan.get('reasoning_effort'),
-            'context_length': window, 'batch_token_allowance': allowance}
+            'context_length': window, 'batch_token_allowance': allowance, 'batch_output_tokens': output_tokens}
         source_scope = self.rag.project_state(state['project_id'])
         with self.repository._connect() as connection:
             versions = connection.execute('SELECT version_ids FROM rag_indexes WHERE id IN (SELECT value FROM json_each(?))',
