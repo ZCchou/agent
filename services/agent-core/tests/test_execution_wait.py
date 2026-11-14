@@ -50,9 +50,9 @@ def test_root_rebind_controls_and_terminal_outcome(foundation):
     with monitor.associate(root['id']):
         assert wait.current_task_id.get() == root['id']
     assert wait.current_task_id.get() is None
-    response = monitor.control(root['id'], 'continue', revision=0, idempotency_key='once')
+    response = monitor.control(root['id'], 'retry', revision=0, idempotency_key='once')
     assert response['revision'] == 1
-    assert monitor.control(root['id'], 'continue', revision=0, idempotency_key='once') == response
+    assert monitor.control(root['id'], 'retry', revision=0, idempotency_key='once') == response
     with pytest.raises(CoreDataError, match='revision'):
         monitor.control(root['id'], 'retry', revision=0, idempotency_key='different')
     monitor.finish_task(root['id'])
@@ -190,6 +190,114 @@ def test_recoverable_failure_pauses_after_two_recoveries_and_manual_retry(founda
 
     assert asyncio.run(scenario()) == 'manual success'
     assert calls == 4
+
+
+def test_continue_rejects_exhausted_failures_until_manual_retry(foundation):
+    _, monitor, clock = foundation
+    root = monitor.start_task(run_id='exhausted-continue')
+    calls, drained = [], []
+
+    class WorkerExited(Exception):
+        pass
+
+    async def operation(activity):
+        calls.append(activity.attempt)
+        try:
+            if activity.attempt <= 3:
+                raise WorkerExited('worker exited')
+            assert drained == [1, 2, 3]
+            return 'manual recovery'
+        finally:
+            drained.append(activity.attempt)
+
+    async def scenario():
+        task = asyncio.create_task(monitor.execute_stage(root['id'], 'worker', operation,
+            safe_to_retry=True, recoverable=lambda error: isinstance(error, WorkerExited)))
+        while calls != [1, 2, 3] or monitor.get_task(root['id'])['status'] != 'waiting_recovery':
+            await asyncio.sleep(0)
+        current = monitor.get_task(root['id'])
+        with pytest.raises(CoreDataError) as rejected:
+            monitor.control(root['id'], 'continue', revision=current['revision'], idempotency_key='continue')
+        assert rejected.value.code == 'execution_continue_unavailable'
+        assert current['can_continue'] is False
+        assert current['capabilities']['continue'] is False
+        until = clock.now + 100
+        while clock.now < until:
+            await asyncio.sleep(0)
+        paused = monitor.get_task(root['id'])
+        assert paused['status'] == 'waiting_recovery'
+        assert paused['current_stage']['status'] == 'waiting_recovery'
+        assert paused['revision'] == current['revision']
+        assert calls == [1, 2, 3]
+        assert task.done() is False
+        monitor.control(root['id'], 'retry', revision=paused['revision'], idempotency_key='retry')
+        return await task
+
+    assert asyncio.run(scenario()) == 'manual recovery'
+    assert calls == [1, 2, 3, 4]
+
+
+def test_continue_requires_a_live_stage_and_terminal_capabilities_disable_it(foundation):
+    _, monitor, _ = foundation
+    root = monitor.start_task(run_id='before-stage')
+    assert monitor.get_task(root['id'])['can_continue'] is False
+    with pytest.raises(CoreDataError) as rejected:
+        monitor.control(root['id'], 'continue', revision=root['revision'], idempotency_key='no-stage')
+    assert rejected.value.code == 'execution_continue_unavailable'
+
+    async def operation(activity):
+        return 1
+
+    asyncio.run(monitor.execute_stage(root['id'], 'completed-stage', operation))
+    assert monitor.get_task(root['id'])['can_continue'] is False
+    current = monitor.get_task(root['id'])
+    with pytest.raises(CoreDataError):
+        monitor.control(root['id'], 'continue', revision=current['revision'], idempotency_key='finished-stage')
+    for status in ('failed', 'interrupted'):
+        terminal = monitor.start_task(run_id=status)
+        monitor.finish_task(terminal['id'], status)
+        assert monitor.get_task(terminal['id'])['can_continue'] is False
+
+
+@pytest.mark.parametrize('pause', ['uncertain', 'custom'])
+def test_continue_preserves_live_uncertain_and_custom_waits(foundation, pause):
+    _, monitor, clock = foundation
+    policy = {'mode': 'custom', 'max_total_seconds': 60} if pause == 'custom' else None
+    root = monitor.start_task(run_id='live-' + pause, policy=policy)
+    calls, drained = [], []
+
+    async def operation(activity):
+        calls.append(activity.attempt)
+        try:
+            while True:
+                if pause == 'custom':
+                    activity.heartbeat()
+                    activity.progress(completed=1)
+                await asyncio.sleep(0)
+        finally:
+            drained.append(activity.attempt)
+
+    async def scenario():
+        task = asyncio.create_task(monitor.execute_stage(root['id'], 'worker', operation))
+        while monitor.get_task(root['id'])['status'] != 'waiting_recovery':
+            await asyncio.sleep(0)
+        current = monitor.get_task(root['id'])
+        assert current['can_continue'] is True
+        response = monitor.control(root['id'], 'continue', revision=current['revision'], idempotency_key='continue')
+        assert response['status'] == 'running'
+        until = clock.now + 5
+        while clock.now < until:
+            await asyncio.sleep(0)
+        assert monitor.get_task(root['id'])['status'] == 'running'
+        assert calls == [1]
+        assert drained == []
+        current = monitor.get_task(root['id'])
+        monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='cancel')
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert drained == [1]
 
 
 def test_side_effects_and_unclassified_typed_errors_are_never_automatically_retried(foundation):

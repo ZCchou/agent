@@ -163,12 +163,19 @@ class ExecutionMonitor:
         task['seconds_since_progress'] = max(0, self.active_clock() - activity.progress_clock) \
             if activity is not None else max(0, self.clock() - stages[-1]['progress_at']) if stages else 0
         task['capabilities'] = {
-            'continue': task['status'] not in TERMINAL,
+            'continue': self._can_continue(task, task['current_stage']),
             'retry': task['status'] not in {'completed', 'cancelled'},
             'cancel': task['status'] not in TERMINAL,
         }
         task.update({f'can_{key}': value for key, value in task['capabilities'].items()})
         return task
+
+    @staticmethod
+    def _can_continue(task, stage) -> bool:
+        return task['status'] not in TERMINAL \
+            and task['error_code'] != 'execution_recovery_required' \
+            and task['command'] != 'retry' \
+            and stage is not None and stage['status'] in {'running', 'waiting_recovery'}
 
     def start_task(self, *, intent_task_id: str | None = None, run_id: str | None = None,
                    project_id: str | None = None, policy: ExecutionWaitPolicy | dict | None = None,
@@ -223,6 +230,13 @@ class ExecutionMonitor:
             if task['revision'] != revision:
                 raise CoreDataError('execution_revision_conflict', 'The task revision has changed.',
                                     {'revision': task['revision']})
+            if action == 'continue' and task['status'] not in TERMINAL:
+                stage = connection.execute(
+                    'SELECT status FROM execution_wait_stages WHERE task_id=? AND attempt=?',
+                    (task_id, task['attempt'])).fetchone()
+                if not self._can_continue(task, stage):
+                    raise CoreDataError('execution_continue_unavailable',
+                                        'The execution request requires retry before waiting can continue.')
             may_resume = action == 'retry' and task['status'] in {'failed', 'interrupted'}
             if action != 'status' and (task['status'] not in TERMINAL or may_resume):
                 status = 'cancelled' if action == 'cancel' else 'running'
