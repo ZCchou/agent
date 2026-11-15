@@ -8,7 +8,7 @@ from test_local_models_catalog import finish
 from test_local_models_runtime import fake_runtime, imported
 
 
-def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), partial_crash=False, invalid_review=False):
+def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), partial_crash=False, invalid_review=False, tool_first=False):
     import test_local_models_runtime as fixtures
     script = fixtures._SERVER
     start = script.index('    def do_POST(self):')
@@ -42,6 +42,18 @@ def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), parti
                 'explanation_code': 'managed_intent', 'follow_up': 'none', 'rag_requirement': 'not_needed',
                 'read_attachment_ids': identifiers[:1], 'read_requests': [], 'task_scope': 'unspecified',
                 'retrieval_scope': 'focused', 'document_workflow': 'none', 'allow_simulated_data': False, 'clarification': None})
+        elif value.get('phase') == 'goal_verification':
+            execution = value.get('execution_plan', {})
+            proposal = None if value.get('requirements') else {
+                'source_scopes': execution.get('source_scopes') or [
+                    {'source_id': item['source_id'], 'operation': item['operation'], 'scope': 'full', 'target_ids': [], 'reason': ''}
+                    for item in value.get('observed_sources', [])],
+                'deliverables': [{'path': item['path'], 'format': item['path'].rsplit('.', 1)[-1]}
+                    for item in execution.get('deliverables', [])],
+                'success_criteria': execution.get('success_criteria', [])}
+            content = json.dumps({'status': 'satisfied', 'summary': 'Original goal verified',
+                'unmet_requirements': [], 'questions': [], 'goal_requirements': proposal,
+                'evidence_required': value.get('evidence_generation') is not None})
         elif 'batch' in value:
             source = value['sources']['evidence'][0]
             content = json.dumps({'results': [{'target_id': field['id'], 'status': 'reviewed',
@@ -70,8 +82,48 @@ def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), parti
         post = post.replace('self.wfile.write(data)', "self.wfile.write((format(len(data), 'x') + '\\r\\n').encode() + data + b'\\r\\n')")
     if invalid_review:
         post = post.replace("for field in value['batch']['fields']]", "for field in []]")
+    if tool_first:
+        post = post.replace("        self.send_response(200)", """        if len(records) == 1:
+            call = {'index': 0, 'id': 'discover-plan', 'type': 'function', 'function': {
+                'name': 'tools_discover', 'arguments': json.dumps({'names': ['task.update_plan']})}}
+            data = ('data: ' + json.dumps({'choices': [{'delta': {'tool_calls': [call]}, 'finish_reason': 'tool_calls'}]}) + '\\n\\ndata: [DONE]\\n\\n').encode()
+        elif len(records) == 2:
+            call = {'index': 0, 'id': 'plan-once', 'type': 'function', 'function': {
+                'name': 'task_update_plan', 'arguments': json.dumps({
+                    'expected_revision': 0, 'steps': [], 'success_criteria': ['Explain current task state']})}}
+            data = ('data: ' + json.dumps({'choices': [{'delta': {'tool_calls': [call]}, 'finish_reason': 'tool_calls'}]}) + '\\n\\ndata: [DONE]\\n\\n').encode()
+        self.send_response(200)""")
     monkeypatch.setattr(fixtures, '_SERVER', script[:start] + post + script[end:])
     return fake_runtime(tmp_path / 'runtime'), counter
+
+
+def test_main_model_recovers_current_call_after_committed_plan_without_replaying_tool(tmp_path, monkeypatch):
+    async def scenario():
+        async def emit(event):
+            pass
+        runtime, counter = recovering_runtime(tmp_path, monkeypatch, failures=0, crash_requests=(3,), tool_first=True)
+        core = CoreRepository(tmp_path / 'core.db')
+        service = ChatRunService(core, emit)
+        service.local_models.runtime_root = runtime
+        model = await imported(service.local_models, tmp_path / 'model.gguf')
+        await finish(service.local_models, await service.local_models.handle('runtime.load', {'model_id': model['id']}))
+        service.local_models.set_tool_mode(model['provider_profile_id'], 'native', verified=True)
+        project = core.create_project('Recovery', 'work')
+        chat = core.create_conversation('project_work', 'Recovery', project_id=project['id'])
+        try:
+            response = await service.start({'conversation_id': chat['id'], 'content': 'Explain local task state.',
+                'idempotency_key': 'after-plan', 'provider_profile_id': model['provider_profile_id'], 'model_id': model['id']})
+            run_id = response['run']['id']
+            await asyncio.wait_for(service.run_tasks[run_id], 30)
+            run = core.get_model_run(run_id)
+            assert run['status'] == 'completed', (run['error_code'], run['error_message'])
+            operations = service.tool_loop.repository.list_for_run(run_id)
+            assert [item['tool_name'] for item in operations] == ['tools.discover', 'task.update_plan']
+            assert all(item['status'] == 'completed' for item in operations)
+            assert len(json.loads(counter.read_text())) == 4
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
 
 
 def test_main_invocation_replaces_auxiliary_loading_progress(tmp_path, monkeypatch):
@@ -260,7 +312,7 @@ def test_managed_engine_death_during_intent_restarts_same_root_before_run(tmp_pa
             assert run['status'] == 'completed', (run['error_code'], run['error_message'])
             assert state['execution_task_id'] == service.execution_status({'owner_kind': 'run', 'owner_id': run_id})['id']
             requests = json.loads(counter.read_text())
-            assert len(requests) == 3 and requests[0] != requests[1] == requests[2]
+            assert len(requests) == 4 and requests[0] != requests[1] == requests[2] == requests[3]
         finally:
             await service.shutdown()
 
@@ -347,7 +399,7 @@ def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_ro
                 calls = connection.execute('SELECT i.status FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=?',
                     (run['id'],)).fetchall()
             assert saved >= 4
-            assert len(calls) == len(batches) and sum(row['status'] == 'failed' for row in calls) == 1
+            assert len(calls) == len(batches) + 1 and sum(row['status'] == 'failed' for row in calls) == 1
             assert not service.tool_loop.repository.list_for_run(run['id'])
         finally:
             await service.shutdown()

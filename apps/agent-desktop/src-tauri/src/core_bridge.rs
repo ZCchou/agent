@@ -12,10 +12,10 @@ use crate::{
     logging::{events as log_events, AppLogger, LogLevel},
 };
 
-pub(crate) const PROTOCOL_VERSION: u64 = 27;
+pub(crate) const PROTOCOL_VERSION: u64 = 28;
 const EXPECTED_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const EXPECTED_SCHEMA_VERSION: u64 = 34;
-const EXPECTED_BUILD_ID: &str = "schema34-agent-unified-v1";
+const EXPECTED_SCHEMA_VERSION: u64 = 35;
+const EXPECTED_BUILD_ID: &str = "schema35-agent-unified-v1";
 const CORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // Automatic start preparation may make two bounded 30-second intent calls
 // before returning a run. Control RPCs must not inherit that longer wait.
@@ -565,9 +565,9 @@ mod tests {
         let manager = std::sync::Mutex::new(crate::core_process_manager::CoreProcessManager::new());
         manager.lock().unwrap().reset_process_state();
         let owner = manager.lock().unwrap().request_owner();
-        let response = json!({"v": 27, "id": "current", "type": "ping", "result": {
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 27,
-            "schema_version": 34, "build_id": "schema34-agent-unified-v1"
+        let response = json!({"v": 28, "id": "current", "type": "ping", "result": {
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 28,
+            "schema_version": 35, "build_id": "schema35-agent-unified-v1"
         }});
         assert!(super::finish_core_response(
             &manager,
@@ -617,7 +617,7 @@ mod tests {
     fn current_ipc_ping_rejects_each_incompatible_core_identity() {
         let current = json!({
             "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 26,
-            "schema_version": 33, "build_id": "schema34-agent-unified-v1"
+            "schema_version": 33, "build_id": "schema35-agent-unified-v1"
         });
         for (field, wrong_value) in [
             ("core_version", json!("0.13.0")),

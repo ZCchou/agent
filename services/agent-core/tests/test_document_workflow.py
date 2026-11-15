@@ -27,6 +27,32 @@ def workflow(tmp_path):
     return core, run, DocumentWorkflow(core)
 
 
+@pytest.mark.parametrize('change', ['delete', 'overwrite'])
+def test_completion_checks_actual_published_document_bytes(tmp_path, change):
+    _, run, docs = workflow(tmp_path)
+    artifact = docs.create(run['id'], '真实交付内容', 'docx')
+    path = tmp_path / '交付.docx'
+    path.write_bytes(docs.path_for(run['id'], artifact['id']).read_bytes())
+    docs.record_publication(run['id'], artifact['id'], {'status': 'published',
+        'path': path.name, 'absolute_path': str(path), 'sha256': artifact['sha256']})
+    assert docs.verify_publication(run['id'], artifact['id'])
+    if change == 'delete':
+        path.unlink()
+    else:
+        path.write_text('不是原文档', encoding='utf-8')
+    with pytest.raises(CoreDataError, match='交付'):
+        docs.verify_publication(run['id'], artifact['id'])
+
+
+def test_final_checker_reads_authenticated_document_content_with_truncation(tmp_path):
+    _, run, docs = workflow(tmp_path)
+    artifact = docs.create(run['id'], '错误的振动试验答案\n' + '长正文' * 1000, 'docx')
+    preview = docs.verification_content(run['id'], artifact['id'], max_characters=400)
+    assert '错误的振动试验答案' in str(preview['items'])
+    assert preview['truncated'] and preview['total_characters'] > 400
+    assert sum(len(item['text']) for item in preview['items']) <= 400
+
+
 def test_inspect_and_fill_docx_paragraph_and_table_keep_original(tmp_path):
     core, run, service = workflow(tmp_path)
     payload = template_bytes()
@@ -150,16 +176,33 @@ def test_project_template_import_requires_a_live_bound_operation(tmp_path):
 
 
 @pytest.mark.parametrize('destination', [None, '振动目的.docx'])
-def test_text_only_model_uses_application_owned_document_publication(tmp_path, monkeypatch, destination):
+@pytest.mark.parametrize('needs_correction', [False, True])
+def test_text_only_model_uses_application_owned_document_publication(tmp_path, monkeypatch, destination, needs_correction):
     import asyncio
     import json
     import httpx
     from test_tool_continuation_retry import fixture, configuration
     original = httpx.AsyncClient
     payloads = []
+    generations, checks = [], []
     def respond(request):
         payloads.append(json.loads(request.content))
-        chunk = {'choices': [{'delta': {'content': '欢迎使用本地智能体。'}, 'finish_reason': 'stop'}]}
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payloads[-1])
+        if checked is not None:
+            value = json.loads(payloads[-1]['messages'][-1]['content'])
+            checks.append(value)
+            assert len(value['outputs']) == 1
+            result = json.loads(checked)
+            if value['requirements'] is None:
+                result['goal_requirements']['deliverables'] = [{'path': destination, 'format': 'docx'}]
+            if '错误答案' in json.dumps(value['outputs'][0]['content'], ensure_ascii=False):
+                result.update(status='needs_work', unmet_requirements=['实际Word文档没有写欢迎语，请修正正文后重新保存'])
+            content = json.dumps(result)
+        else:
+            content = '错误答案，没有完成欢迎语。' if needs_correction and not generations else '欢迎使用本地智能体。'
+            generations.append(content)
+        chunk = {'choices': [{'delta': {'content': content}, 'finish_reason': 'stop'}]}
         return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def exercise():
@@ -173,7 +216,7 @@ def test_text_only_model_uses_application_owned_document_publication(tmp_path, m
                 destination = tmp_path / operation['arguments']['path']
                 destination.write_bytes(service.documents.path_for(operation['run_id'], artifact['id']).read_bytes())
                 published.append(destination)
-                service.resolve_tool(operation['id'], True, json.dumps({'status': 'published', 'path': destination.name, 'sha256': artifact['sha256']}))
+                service.resolve_tool(operation['id'], True, json.dumps({'status': 'published', 'path': str(destination), 'sha256': artifact['sha256']}))
         config = configuration()
         config['model_tool_modes']['model'] = 'text_only'
         core, project, work, service = await fixture(tmp_path, sink, config)
@@ -183,7 +226,8 @@ def test_text_only_model_uses_application_owned_document_publication(tmp_path, m
             await service.tasks[response['run']['id']]
             run = core.get_model_run(response['run']['id'])
             assert run['status'] == 'completed', run.get('error_message')
-            assert len(published) == 1
+            assert len(published) == (2 if needs_correction else 1)
+            assert len(checks) == len(published)
             if destination:
                 assert published[0].name == destination
             assert '欢迎使用' in '\n'.join(p.text for p in Document(published[0]).paragraphs)

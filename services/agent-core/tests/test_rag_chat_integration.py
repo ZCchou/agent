@@ -84,25 +84,34 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
             chunk = {"choices": [{"delta": {"content": "继续核查历史资料。"}, "finish_reason": "stop"}]}
             return httpx.Response(200, text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
         requests.append(payload)
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload)
+        if checked is not None:
+            chunk = {'choices': [{'delta': {'content': checked}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n')
         records = []
         for message in payload["messages"]:
             try:
                 value = json.loads(message.get("content", ""))
             except (ValueError, TypeError):
                 continue
+            if not isinstance(value, dict):
+                continue
             if isinstance(value.get("evidence"), dict):
                 records.append(value["evidence"])
             elif isinstance(value.get("evidence"), list):
                 records.extend(value["evidence"])
-        assert records, "RAG evidence must precede every generation"
-        assert any("适航资料问答输出约定" in message.get("content", "") for message in payload["messages"])
+        first_action = mode != 'text_only' and len(requests) == 1
+        assert records or first_action, "Evidence must precede professional answer generation"
+        if not first_action:
+            assert any("适航资料问答输出约定" in message.get("content", "") for message in payload["messages"])
         if mode == 'text_only':
             assert all('Use the current runtime capability observation when planning requested work and continuations.'
                        not in message.get('content', '') for message in payload['messages'])
         if mode == 'native' and 'tools' in payload:
             assert 'fs_list' in json.dumps(payload['tools'])
         constrained = payload.get("response_format", {}).get("type") == "json_schema"
-        if mode == "structured" and not constrained:
+        if mode == "structured" and not constrained and not first_action:
             assert "Serialize the claims JSON" in payload["messages"][0]["content"]
         if mode != "text_only" and len(requests) == 1:
             delta = {"tool_calls": [{"index": 0, "id": "retrieve", "type": "function", "function": {
@@ -168,12 +177,15 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
             assert "rag-evidence:rag-" in run["assistant_message"]["content"]
             assert "草案" in run["assistant_message"]["content"]
         assert all("claims" not in event["data"].get("delta", "") for event in events if event["event_type"] == "run.chunk")
-        assert len(requests) == (1 if mode == "text_only" else 3) + int(corrupt_quote or repair_first)
-        assert requests[-1]["response_format"]["type"] == "json_schema"
-        assert "tools" not in requests[-1]
-        assert requests[-1]["max_tokens"] <= 512
+        from goal_check_support import goal_check_content
+        answers = [payload for payload in requests if goal_check_content(payload) is None]
+        assert len(answers) == (1 if mode == "text_only" else 3) + int(corrupt_quote or repair_first)
+        assert len(requests) - len(answers) == int(mode != 'text_only' and not corrupt_quote)
+        assert answers[-1]["response_format"]["type"] == "json_schema"
+        assert "tools" not in answers[-1]
+        assert answers[-1]["max_tokens"] <= 512
         if corrupt_quote or repair_first:
-            repair = next(json.loads(message['content']) for message in requests[-1]['messages']
+            repair = next(json.loads(message['content']) for message in answers[-1]['messages']
                           if 'invalid_answer' in message.get('content', ''))
             assert 'validation_details' in repair
             assert repair['allowed_quotes']

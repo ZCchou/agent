@@ -374,8 +374,9 @@ def test_parser_adaptive_exchange_accepts_only_matching_worker_heartbeats():
     assert observed == [{'worker': 'document_parser'}]
 
 
-@pytest.mark.parametrize('linked_retry,long_targets', [(False, False), (True, False), (False, True)])
-def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry, long_targets):
+@pytest.mark.parametrize('linked_retry,long_targets,correction', [
+    (False, False, False), (True, False, False), (False, True, False), (False, False, True)])
+def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry, long_targets, correction):
     import hashlib
     import io
     import json
@@ -389,10 +390,21 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
 
     original_client = httpx.AsyncClient
     batches = []
+    goal_checks = []
 
     def respond(request):
         payload = json.loads(request.content)
         value = json.loads(payload['messages'][-1]['content'])
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload)
+        if checked is not None:
+            goal_checks.append(value)
+            if correction and len(goal_checks) == 1:
+                result = json.loads(checked)
+                result.update(status='needs_work', unmet_requirements=['请进一步核对适用性说明'])
+                checked = json.dumps(result)
+            chunk = {'choices': [{'delta': {'content': checked}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n')
         batch, sources = value['batch'], value['sources']['evidence']
         batches.append(batch)
         assert sources
@@ -447,6 +459,10 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         document.save(payload)
         attachment = source_attachment(tmp_path, payload.getvalue(), 'attached.docx')
         attachment['purpose'] = 'reference'
+        other = source_attachment(tmp_path, payload.getvalue(), 'other.docx') if correction else None
+        if other:
+            other['id'] = 'unselected-docx'
+            other['artifacts'][0]['artifact_id'] = 'unselected-source'
         original_hash = attachment['sha256']
 
         async def advisor(**params):
@@ -464,7 +480,7 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
                 {'library_id': library})))['status'] == 'completed'
             await service.rag.handle('library.bind', {'library_id': library, 'project_id': project['id'], 'enabled': True})
             result = await service.start({'conversation_id': work['id'], 'content': '请检查附件中的每个现有位置',
-                'attachments': [attachment], 'idempotency_key': 'semantic-review'})
+                'attachments': [other, attachment] if other else [attachment], 'idempotency_key': 'semantic-review'})
             await asyncio.gather(service.tasks[result['run']['id']], return_exceptions=True)
             run = core.get_model_run(result['run']['id'])
             if linked_retry:
@@ -493,7 +509,8 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
                 with core._connect() as connection:
                     invocation_count = connection.execute('SELECT COUNT(*) FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=?',
                         (run['id'],)).fetchone()[0]
-                assert invocation_count == len(batches)
+                assert invocation_count == len(batches) + len(goal_checks)
+            assert len(goal_checks) == (2 if correction else 1)
             assert hashlib.sha256((tmp_path / attachment['storage_key']).read_bytes()).hexdigest() == original_hash
             assert not any(operation['tool_name'] == 'document.export' for operation in service.tool_loop.repository.list_for_run(run['id']))
             assert str(paragraph_count + 3) in run['assistant_message']['content']

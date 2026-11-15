@@ -350,6 +350,22 @@ class FakeModelProvider(ModelProvider):
         self, model_id: str, messages: list[dict[str, Any]], *, tools: bool,
         options: GenerationOptions | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        if options and options.response_schema and 'goal_requirements' in options.response_schema.get('properties', {}):
+            value = json.loads(next(message['content'] for message in reversed(messages) if message['role'] == 'user'))
+            proposal = None
+            if value.get('requirements') is None:
+                execution = value.get('execution_plan', {})
+                scopes = execution.get('source_scopes') or [
+                    {'source_id': item['source_id'], 'operation': item['operation'], 'scope': 'full', 'target_ids': [], 'reason': ''}
+                    for item in value.get('observed_sources', [])]
+                proposal = {'source_scopes': scopes, 'success_criteria': execution.get('success_criteria', []),
+                    'deliverables': [{'path': item['path'], 'format': item['path'].rsplit('.', 1)[-1]}
+                        for item in execution.get('deliverables', [])]}
+            yield ProviderEvent('text_delta', text=json.dumps({'status': 'satisfied',
+                'summary': 'Demo task result checked against its recorded requirements.',
+                'unmet_requirements': [], 'questions': [], 'goal_requirements': proposal,
+                'evidence_required': bool(value.get('evidence_generation') is not None)}, ensure_ascii=False))
+            return
         if options and options.purpose == "intent_analysis":
             request = next((
                 str(message.get("content") or "")

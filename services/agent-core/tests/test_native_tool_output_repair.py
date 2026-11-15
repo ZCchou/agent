@@ -67,13 +67,13 @@ def test_progress_malformed_call_recovers_after_completed_file_effect(tmp_path, 
         assert SECRET not in json.dumps(failed) + caplog.text
         assert PROGRESS not in caplog.text
         assert configuration()["api_key"] not in caplog.text
-        assert len(requests) == 4
+        assert len(requests) == 5
         corrected_messages = requests[2][1]["messages"]
         assert SECRET not in json.dumps(corrected_messages)
         assert any(message.get("role") == "tool" for message in corrected_messages)
         with repository._connect() as connection:
             audit = list(connection.execute("SELECT status,error_code FROM invocation_specs WHERE plan_id=? ORDER BY round_no", (run["execution_plan_id"],)))
-        assert [row[0] for row in audit] == ["completed", "failed", "completed", "completed"]
+        assert [row[0] for row in audit] == ["completed", "failed", "completed", "completed", "completed"]
     asyncio.run(scenario())
 
 
@@ -98,7 +98,7 @@ def test_correction_is_bounded_per_tool_round_and_whole_attempt(tmp_path, monkey
         assert run["status"] == "completed"
         assert "model_tool_protocol_failed" in run["assistant_message"]["content"]
         assert not requests[-1][1].get("tools")
-        assert len(requests) == (8 if separated else 3)
+        assert len(requests) == (9 if separated else 3)
         assert len(service.list_tool_operations(run_id)) == (3 if separated else 0)
     asyncio.run(scenario())
 

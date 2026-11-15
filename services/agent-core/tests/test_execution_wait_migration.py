@@ -8,10 +8,36 @@ def test_fresh_repository_exposes_adaptive_execution_tables(tmp_path):
     repository = CoreRepository(tmp_path / 'core.db')
     with repository._connect() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert SCHEMA_VERSION == 34
+        assert SCHEMA_VERSION == 35
         assert {'execution_wait_tasks', 'execution_wait_stages', 'execution_wait_checkpoints'} <= tables
         schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='model_runs'").fetchone()[0]
         assert "'waiting_recovery'" in schema
+
+
+def test_schema34_upgrade_preserves_existing_plan_and_creates_independent_goals(tmp_path):
+    from agent.execution.task_plans import TaskPlans
+    repository = CoreRepository(tmp_path / 'core.db')
+    chat = repository.create_conversation('standard_chat', '旧对话', category='work')
+    repository._insert_message(chat['id'], 'user', '原始请求')
+    monitor = ExecutionMonitor(repository)
+    root = monitor.start_task(intent_task_id='schema34-request')
+    plans = TaskPlans(repository)
+    plans.create(root['id'], {'content': '审阅模板', 'conversation_id': chat['id']})
+    plans.update(root['id'], expected_revision=0, steps=[], success_criteria=['完成审阅'])
+    with repository._connect() as connection:
+        connection.execute('DROP TABLE task_goal_verifications')
+        connection.execute('DROP TABLE task_goal_requirements')
+        connection.execute('UPDATE schema_info SET version=34')
+    upgraded = CoreRepository(repository.database_path)
+    migrated = TaskPlans(upgraded).get(root['id'])
+    assert migrated['success_criteria'] == ['完成审阅']
+    assert migrated['goal_requirements'] is None
+    assert upgraded.get_conversation(chat['id'])['messages'][0]['content'] == '原始请求'
+    assert not TaskPlans(upgraded).completion(root['id'], require_declared=True)['ready']
+    with upgraded._connect() as connection:
+        assert connection.execute('SELECT COUNT(*) FROM task_goal_verifications').fetchone()[0] == 0
+        assert not connection.execute('PRAGMA foreign_key_check').fetchall()
+    assert list(tmp_path.glob('*.pre-schema35-*.bak'))
 
 
 def test_schema31_upgrade_keeps_business_rows_and_creates_backup(tmp_path):
@@ -22,10 +48,10 @@ def test_schema31_upgrade_keeps_business_rows_and_creates_backup(tmp_path):
         before = connection.execute('SELECT COUNT(*) FROM projects').fetchone()[0]
     migrated = CoreRepository(repository.database_path)
     with migrated._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 34
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 35
         assert connection.execute('SELECT COUNT(*) FROM projects').fetchone()[0] == before
         assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
-    assert list(tmp_path.glob('*.pre-schema34-*.bak'))
+    assert list(tmp_path.glob('*.pre-schema35-*.bak'))
 
 
 def test_permanent_conversation_delete_cleans_unadmitted_intent_and_execution(tmp_path):

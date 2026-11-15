@@ -16,8 +16,12 @@ async def main():
     def respond(req):
         payload = json.loads(req.content)
         requests.append(payload)
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload)
         names = {item['function']['name'] for item in payload.get('tools', [])}
-        if kind == 'standard_chat':
+        if checked is not None:
+            delta, reason = {'content': checked}, 'stop'
+        elif kind == 'standard_chat':
             assert 'terminal_run' not in names
             delta, reason = {'content': 'No terminal in standard chat.'}, 'stop'
         elif len(requests) == 1:
@@ -80,7 +84,7 @@ async def main():
     assert len(operations)==(1 if kind=='project_work' else 0)
     if operations:
         assert json.loads(operations[0]['result_summary'])['exit_code']==7
-    assert feedback_count == (2 if kind == 'project_work' else 1)
+    assert feedback_count == (3 if kind == 'project_work' else 1)
     print(json.dumps({'done':True,'kind':kind,'operation_count':len(operations),'host_feedback_count':feedback_count}),flush=True)
 
 if __name__=='__main__':

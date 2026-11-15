@@ -61,14 +61,17 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     return () => { disposed = true; };
   }, [expanded, task?.id, task?.coverage?.completed, task?.coverage?.gaps, task?.coverage?.remaining]);
   if (!enabled || !owner || !task || !acceptExecutionSnapshot(null, task, owner)
-    || task.status === "completed" || task.status === "cancelled") return null;
+    || task.status === "cancelled") return null;
+  const completedTask = task.status === "completed";
+  if (completedTask && !task.verification && !(task.coverage?.total) && !(task.plan && task.plan.steps.length > 1)) return null;
   const details = task.current_stage?.details ?? {};
   const completed = task.current_stage?.completed;
   const total = task.current_stage?.total;
   const paused = task.status === "interrupted" || task.status === "failed";
   const stage = typeof details.stage === "string" ? details.stage
     : typeof details.phase === "string" ? details.phase : task.stage ?? "preparingRequest";
-  const label = task.pending_question ? t("execution.waitingInput") : t(`execution.stages.${stage}`, {
+  const label = completedTask ? t((task.coverage?.gaps ?? 0) > 0 ? "execution.completedWithGaps" : "execution.completed")
+    : task.pending_question ? t("execution.waitingInput") : t(`execution.stages.${stage}`, {
     defaultValue: t(`routing.status.${stage}`, { defaultValue: t("execution.stages.processing") }),
   });
   const clarificationTask: IntentTask | undefined = task.pending_question ? {
@@ -116,13 +119,18 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
       {task.plan ? <>
         <p>{task.plan.goal}</p>
         <ol>{task.plan.steps.map(step => <li key={step.id}>{step.description}</li>)}</ol>
-        {task.plan.source_scopes?.map(source => <p key={source.source_id}>
+        {task.plan.source_scopes?.map(source => <p key={`${source.source_id}:${source.operation}`}>
           {task.plan?.request?.attachments?.find(item => item.id === source.source_id)?.name ?? source.source_id}
           {" · "}{t(`execution.scopes.${source.scope}`)}{source.reason ? ` · ${source.reason}` : ""}
+          {" · "}{t(`execution.operations.${source.operation}`)}
         </p>)}
         {task.plan.deliverables?.map(output => <p key={output.path}>{t("execution.deliverable", { path: output.path })}</p>)}
       </> : null}
       {task.coverage && task.coverage.total > 0 ? <p>{t("execution.coverage", { ...task.coverage })}</p> : null}
+      {task.verification ? <>
+        <p>{task.verification.summary}</p>
+        {task.verification.unmet_requirements.map((item, index) => <p key={index}>{item}</p>)}
+      </> : null}
       {items?.items.filter(item => item.outcome === "gap" || item.outcome === "failed").map(item => <p key={`${item.source_id}:${item.target_id}`}>
         {item.target_id} · {[...(item.result?.gaps ?? []), ...(item.result?.version_issues ?? [])].join(" · ") || item.result?.summary}
         {item.result?.error_code ? ` · ${item.result.error_code}` : ""}
@@ -139,9 +147,9 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     <div className="execution-task-card__actions">
       {paused && task.can_retry !== false ? <Button busy={busy} icon={<RotateCcw />}
         onClick={() => void act(task.recovery_action === "run_retry" && onRunRetry ? "run_retry" : "retry")}>{t("execution.retry")}</Button> : null}
-      {paused && /model_|resource|memory|vram|runtime_|engine_|access_denied/.test(task.error_code ?? "")
+      {paused && /model_|resource|memory|vram|runtime_|engine_|access_denied|context_too_small/.test(task.error_code ?? "")
         ? <Button disabled={busy} icon={<Settings />} onClick={onSettings}>{t("execution.settings")}</Button> : null}
-      {task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
+      {!completedTask && task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
     </div>
     {error ? <p role="alert">{error}</p> : null}
     {clarificationTask ? <IntentTaskDialog scope={clarificationTask.scope} enabled={enabled}

@@ -225,7 +225,7 @@ from agent.execution.task_tools import TASK_DEFINITIONS, TASK_TOOLS, validate_ta
 TOOL_DEFINITIONS.extend(TASK_DEFINITIONS)
 TOOL_NAMES: Final[set[str]] = {item["function"]["name"] for item in TOOL_DEFINITIONS}
 
-TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v6"
+TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v7"
 
 
 class ToolContractRegistry:

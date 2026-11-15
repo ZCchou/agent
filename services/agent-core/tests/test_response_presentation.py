@@ -47,7 +47,7 @@ def test_tool_round_narration_is_not_the_final_answer_and_survives_reload(tmp_pa
         turns = reconstruct_turns(history, [run])
         assert [m["role"] for turn in turns for m in turn.messages] == ["user", "assistant"]
         assert "先读取" not in json.dumps([turn.messages for turn in turns], ensure_ascii=False)
-        assert len(requests) == 3
+        assert len(requests) == 4
     asyncio.run(scenario())
 
 

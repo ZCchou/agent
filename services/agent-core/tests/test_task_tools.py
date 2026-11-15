@@ -25,6 +25,8 @@ def test_discovery_returns_only_authorized_tools_and_supports_later_expansion():
     assert catalog['enabled'] == []
     selected = discover_tools({'names': ['document.export']}, {'fs.read', 'document.export'})
     assert selected['enabled'] == ['document.export']
+    assert [item['name'] for item in selected['tools']] == ['document.export']
+    assert selected['available_names'] == ['document.export', 'fs.read']
     with pytest.raises(CoreDataError):
         discover_tools({'names': ['terminal.run']}, {'fs.read'})
 
@@ -42,3 +44,14 @@ def test_selected_document_review_is_a_composable_tool():
     with pytest.raises(CoreDataError):
         validate_tool_call(ToolCall('review', 'document.review_targets', {
             'template_id': 'registered-source', 'target_ids': []}))
+
+
+def test_goal_proposal_is_a_paired_optional_planning_argument():
+    arguments = {'expected_revision': 0, 'steps': [], 'success_criteria': [],
+        'expected_goal_revision': 0, 'goal_requirements': {
+            'source_scopes': [], 'deliverables': [{'format': 'docx', 'path': None}],
+            'success_criteria': ['完成Word文件']}}
+    assert validate_tool_call(ToolCall('plan', 'task.update_plan', arguments)).name == 'task.update_plan'
+    del arguments['expected_goal_revision']
+    with pytest.raises(CoreDataError):
+        validate_tool_call(ToolCall('plan', 'task.update_plan', arguments))

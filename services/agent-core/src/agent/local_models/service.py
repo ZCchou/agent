@@ -27,6 +27,7 @@ class LocalModelService:
         self._closed = False
         self._preparations = {}
         self._run_pins = {}
+        self._admission = asyncio.Lock()
         self._auto_load_job = None
         self.execution_monitor = None
         self.execution_policy = None
@@ -214,6 +215,38 @@ class LocalModelService:
                 await self._backend().unload()
                 raise CoreDataError('model_recovery_identity_changed', '模型、设备或推理配置已变化，请核对配置后重试。')
             return self.get_profile(provider_id)
+
+    async def await_ready(self, provider_id, *, pin_id=None, expected_identity=None, activity=None):
+        """Queue normal model preparation and atomically pin the admitted run."""
+        model_id = provider_id.removeprefix('managed:')
+        preparation_id = None
+        async with self._admission:
+            try:
+                previous = None
+                while True:
+                    result = self.prepare(model_id, preparation_id)
+                    preparation_id = result['preparation_id']
+                    if result['state'] == 'ready':
+                        actual = self.runtime_identity(provider_id)
+                        if expected_identity and {key: value for key, value in actual.items() if key != 'session_id'} != {
+                                key: value for key, value in expected_identity.items() if key != 'session_id'}:
+                            raise CoreDataError('model_recovery_identity_changed', '恢复任务的模型或推理配置已变化，请核对设置。')
+                        if pin_id is not None:
+                            self.pin_run(pin_id, provider_id)
+                        if activity is not None:
+                            activity.queue(waiting=False, model_id=model_id)
+                        return self.get_profile(provider_id)
+                    if result['state'] == 'failed':
+                        error = (result.get('job') or {}).get('error') or {}
+                        raise CoreDataError(error.get('code', 'model_load_failed'), error.get('message', '本地模型加载失败。'))
+                    identity = (result['state'], (result.get('job') or {}).get('progress'))
+                    if activity is not None and identity != previous:
+                        activity.queue(waiting=True, model_id=model_id, preparation_state=result['state'])
+                    previous = identity
+                    await asyncio.sleep(.25)
+            finally:
+                if preparation_id is not None:
+                    self.release_preparation(preparation_id)
 
     def prepare(self, model_id, preparation_id=None):
         self.catalog.get(model_id)

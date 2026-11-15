@@ -5,6 +5,7 @@ import json
 from collections import Counter
 
 from agent.storage import CoreDataError, _utc_now
+from agent.execution.goal_requirements import GoalRequirements, covers_scope
 
 
 def _json(value):
@@ -40,7 +41,8 @@ def validate_requirements(source_scopes, deliverables):
     for scope in source_scopes:
         if (not isinstance(scope, dict) or set(scope) != {'source_id', 'operation', 'scope', 'target_ids', 'reason'}
                 or not isinstance(scope['source_id'], str) or not 1 <= len(scope['source_id']) <= 1024
-                or scope['source_id'] in seen or scope['operation'] not in {'read', 'review'}
+                or not isinstance(scope['operation'], str) or not isinstance(scope['scope'], str)
+                or (scope['source_id'], scope.get('operation')) in seen or scope['operation'] not in {'read', 'review'}
                 or scope['scope'] not in {'full', 'selected', 'metadata', 'excluded'}
                 or not isinstance(scope['target_ids'], list) or len(scope['target_ids']) > 10000
                 or any(not isinstance(key, str) or not 1 <= len(key) <= 256 for key in scope['target_ids'])
@@ -49,7 +51,7 @@ def validate_requirements(source_scopes, deliverables):
                 or not isinstance(scope['reason'], str) or len(scope['reason']) > 2000
                 or scope['scope'] == 'excluded' and not scope['reason'].strip()):
             raise CoreDataError('task_plan_invalid', '请明确每份资料的处理范围和位置。')
-        seen.add(scope['source_id'])
+        seen.add((scope['source_id'], scope['operation']))
     for output in deliverables:
         if (not isinstance(output, dict) or set(output) != {'path'} or not isinstance(output['path'], str)
                 or not output['path'] or len(output['path']) > 1024 or '\0' in output['path']
@@ -65,6 +67,7 @@ def _path_key(path):
 class TaskPlans:
     def __init__(self, repository):
         self.repository = repository
+        self.goals = GoalRequirements(repository)
 
     @staticmethod
     def _active(connection, task_id, fence=None):
@@ -98,10 +101,18 @@ class TaskPlans:
             return None
         return {'task_id': task_id, 'revision': row['revision'], 'goal': row['goal'],
                 'request': json.loads(row['request_json']), 'source_scopes': [], 'deliverables': [],
-                'requirements_declared': False, **json.loads(row['plan_json'])}
+                'requirements_declared': False, **json.loads(row['plan_json']),
+                'goal_requirements': self.goals.get(task_id)}
+
+    def capture_requirements(self, task_id, requirements, *, expected_revision, fence=None, user_change=False, reconciled=False):
+        with self.repository._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            self._active(connection, task_id, fence)
+            return self.goals.capture(connection, task_id, requirements, expected_revision=expected_revision,
+                                      user_change=user_change, reconciled=reconciled)
 
     def update(self, task_id, *, expected_revision, steps, success_criteria,
-               source_scopes=None, deliverables=None, fence=None):
+               source_scopes=None, deliverables=None, goal_requirements=None, expected_goal_revision=None, fence=None):
         steps = _steps(steps)
         if (type(expected_revision) is not int or not isinstance(success_criteria, list)
                 or len(success_criteria) > 100 or any(not isinstance(item, str)
@@ -119,8 +130,13 @@ class TaskPlans:
             scopes = source_scopes if source_scopes is not None else previous.get('source_scopes', [])
             outputs = deliverables if deliverables is not None else previous.get('deliverables', [])
             validate_requirements(scopes, outputs)
-            if previous.get('requirements_declared') and (
-                    any(scope not in scopes for scope in previous.get('source_scopes', []))
+            if (goal_requirements is None) != (expected_goal_revision is None):
+                raise CoreDataError('task_goal_invalid', '任务要求与要求修订号需要同时提交。')
+            if goal_requirements is not None:
+                self.goals.capture(connection, task_id, goal_requirements, expected_revision=expected_goal_revision)
+            if previous.get('requirements_declared') and self.goals.get(task_id, connection=connection) is None and (
+                    any(not any(covers_scope(candidate, scope) for candidate in scopes)
+                        for scope in previous.get('source_scopes', []))
                     or any(output not in outputs for output in previous.get('deliverables', []))):
                 raise CoreDataError('task_plan_invalid', '原任务要求的资料范围与交付物需要保留。')
             allowed = {item['id'] for item in json.loads(current['request_json']).get('attachments', [])}
@@ -223,14 +239,16 @@ class TaskPlans:
 
     def completion(self, task_id, *, require_declared=False):
         plan = self.get(task_id)
+        goals = plan.get('goal_requirements') if plan else None
+        unmet = []
         with self.repository._connect() as connection:
             rows = connection.execute('SELECT source_id,target_id,outcome FROM task_work_items WHERE task_id=?', (task_id,)).fetchall()
             available = {(row['source_id'], row['target_id']): row['outcome'] for row in rows}
             sources = {(row['source_id'], row['operation']): row['artifact_id'] for row in connection.execute(
                 'SELECT * FROM task_sources WHERE task_id=?', (task_id,))}
             required, missing = set(), 0
-            scopes = plan.get('source_scopes', []) if plan else []
-            declared = plan and plan['requirements_declared']
+            scopes = goals['source_scopes'] if goals else plan.get('source_scopes', []) if plan else []
+            declared = bool(goals or plan and plan['requirements_declared'])
             if declared:
                 for scope in scopes:
                     if scope['scope'] in {'metadata', 'excluded'}:
@@ -238,6 +256,7 @@ class TaskPlans:
                     artifact = sources.get((scope['source_id'], scope['operation']))
                     if artifact is None:
                         missing += 1
+                        unmet.append({'code': 'source_missing', 'source_id': scope['source_id'], 'operation': scope['operation']})
                         continue
                     ids = scope['target_ids'] if scope['scope'] == 'selected' else [key[1] for key in available if key[0] == artifact]
                     required.update((artifact, key) for key in ids)
@@ -245,11 +264,28 @@ class TaskPlans:
             else:
                 required.update(available)
                 missing += int(require_declared)
+            if require_declared and goals is None:
+                missing += 1
+                unmet.append({'code': 'goal_requirements_missing'})
             counts = Counter(available.get(key, 'pending') for key in required)
             root = connection.execute('SELECT run_id FROM execution_wait_tasks WHERE id=?', (task_id,)).fetchone()
-            outputs = plan.get('deliverables', []) if plan else []
+            outputs = goals['deliverables'] if goals else plan.get('deliverables', []) if plan else []
             published = set()
+            format_proofs = {}
+            aliases = {}
             if outputs and root and root['run_id']:
+                aliases.update((_path_key(row[0]), _path_key(row[1])) for row in connection.execute('''
+                    SELECT json_extract(o.arguments_json,'$.path'),d.output_path FROM tool_operations o
+                    JOIN document_artifacts d ON d.id=json_extract(o.arguments_json,'$.artifact_id') AND d.run_id=o.run_id
+                    WHERE o.run_id=? AND o.tool_name='document.export' AND o.status='completed' AND d.status='published'
+                    ORDER BY o.sequence,o.rowid''', (root['run_id'],)))
+                format_proofs.update((_path_key(row[0]), row[1]) for row in connection.execute(
+                    "SELECT output_path,kind FROM document_artifacts WHERE run_id=? AND status='published'", (root['run_id'],)))
+                format_proofs.update((_path_key(row[0]), row[1]) for row in connection.execute('''
+                    SELECT json_extract(o.arguments_json,'$.path'),d.kind FROM tool_operations o
+                    JOIN document_artifacts d ON d.id=json_extract(o.arguments_json,'$.artifact_id') AND d.run_id=o.run_id
+                    WHERE o.run_id=? AND o.tool_name='document.export' AND o.status='completed' AND d.status='published'
+                    ''', (root['run_id'],)))
                 published.update(_path_key(row[0]) for row in connection.execute(
                     "SELECT output_path FROM document_artifacts WHERE run_id=? AND status='published'", (root['run_id'],)))
                 published.update(_path_key(row[0]) for row in connection.execute('''
@@ -258,22 +294,42 @@ class TaskPlans:
                     WHERE o.run_id=? AND o.tool_name='document.export' AND o.status='completed' AND d.status='published'
                     ''', (root['run_id'],)))
                 terminal_completed = False
-                for operation in connection.execute("SELECT tool_name,arguments_json FROM tool_operations WHERE run_id=? AND status='completed' ORDER BY sequence,rowid", (root['run_id'],)):
+                for operation in connection.execute('''SELECT o.tool_name,o.arguments_json,
+                    d.kind AS artifact_kind,d.output_path,d.status AS artifact_status FROM tool_operations o
+                    LEFT JOIN document_artifacts d ON d.id=json_extract(o.arguments_json,'$.artifact_id') AND d.run_id=o.run_id
+                    WHERE o.run_id=? AND o.status='completed' ORDER BY o.sequence,o.rowid''', (root['run_id'],)):
                     arguments = json.loads(operation['arguments_json'])
-                    if operation['tool_name'] == 'terminal.run':
+                    if operation['tool_name'] == 'document.export' and operation['artifact_status'] == 'published':
+                        for path in (arguments['path'], operation['output_path']):
+                            published.add(_path_key(path))
+                            format_proofs[_path_key(path)] = operation['artifact_kind']
+                    elif operation['tool_name'] == 'terminal.run':
                         terminal_completed = True
                     elif operation['tool_name'] == 'fs.read' and terminal_completed:
                         published.add(_path_key(arguments['path']))
                     elif operation['tool_name'] == 'fs.propose_changes':
                         for item in arguments['mutations']:
+                            path = _path_key(item['path'])
+                            identity = aliases.get(path, path)
+                            affected = {key for key in published if aliases.get(key, key) == identity} | {path}
+                            for key in affected:
+                                format_proofs.pop(key, None)
                             if item['kind'] == 'delete':
-                                published.discard(_path_key(item['path']))
+                                published.difference_update(affected)
                             elif item['kind'] in {'create_text', 'overwrite_text', 'patch_text', 'copy', 'move'}:
                                 published.add(_path_key(item['path']))
                                 if item['kind'] == 'move':
                                     published.discard(_path_key(item['source_path']))
-            verified_outputs = sum(_path_key(output['path']) in published for output in outputs)
+            if goals:
+                matched, output_gaps = self.goals.match_outputs(outputs, published, format_proofs, aliases=aliases)
+                unmet.extend(output_gaps)
+                verified_outputs = len(matched)
+            else:
+                verified_outputs = sum(_path_key(output['path']) in published for output in outputs)
         counts['done'] += verified_outputs
         remaining = counts.get('pending', 0) + counts.get('failed', 0) + missing + len(outputs) - verified_outputs
-        return {'ready': remaining == 0, 'total': len(required) + missing + len(outputs),
-                'completed': counts.get('done', 0), 'gaps': counts.get('gap', 0), 'remaining': remaining}
+        result = {'ready': remaining == 0, 'total': len(required) + missing + len(outputs),
+                  'completed': counts.get('done', 0), 'gaps': counts.get('gap', 0), 'remaining': remaining}
+        if goals or require_declared:
+            result['unmet_requirements'] = unmet
+        return result
