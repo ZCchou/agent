@@ -127,6 +127,37 @@ def test_model_classifies_authoring_guidance_without_treating_it_as_equipment_fa
     assert '编写说明' in result['markdown']
 
 
+def test_every_review_batch_receives_document_wide_standard_references(setup):
+    workflow, run, _, _, sources = setup
+    document = Document()
+    document.add_heading('编制依据', 1)
+    document.add_paragraph('本模板拟按照 RTCA DO-160G 编制。')
+    document.add_heading('振动试验', 1)
+    for index in range(12):
+        document.add_paragraph(f'检查位置 {index}')
+    artifact = register(workflow, run, document)
+    batches = []
+    original_evidence = sources.evidence
+
+    def verify_context(batch):
+        assert batch['template_context'] == {'name': 'review.docx', 'referenced_standards': ['DO-160G']}
+
+    def evidence(batch):
+        verify_context(batch)
+        return original_evidence(batch)
+
+    def generate(batch, context):
+        verify_context(batch)
+        batches.append(batch)
+        return sources.response(batch)
+
+    sources.evidence = evidence
+    result = execute(setup, artifact, generate)
+    assert len(batches) == 3
+    assert all('DO-160G' not in field['text'] for batch in batches[1:] for field in batch['fields'])
+    assert result['report']['coverage']['total'] == 15
+
+
 def test_review_schema_selects_only_current_targets_and_quote_identifiers():
     from agent.document_contracts import document_batch_schema
     schema = document_batch_schema({'stage': 'review',
@@ -264,6 +295,8 @@ def test_inventory_covers_nonempty_nested_targets_and_duplicate_chapters_without
 
 
 def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(setup):
+    from agent.context_engine.policy import estimate_tokens
+    from agent.document_review import review_request
     workflow, run, _, _, sources = setup
     document = Document()
     document.add_heading('要求', 1)
@@ -274,12 +307,13 @@ def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(s
 
     def generate(batch, evidence):
         sizes.append(len(batch['fields']))
-        costs.append(len(json.dumps({'batch': batch, 'evidence': evidence}, ensure_ascii=False, separators=(',', ':'))))
+        messages, schema = review_request(batch, evidence)
+        costs.append(estimate_tokens({'messages': messages, 'response_schema': schema, 'tools': []}) + 256)
         return sources.response(batch)
 
-    result = execute(setup, artifact, generate, allowance=1600)
+    result = execute(setup, artifact, generate, allowance=2000)
     assert max(sizes) < 10
-    assert max(costs) <= 4032
+    assert max(costs) <= 2000
     assert result['report']['coverage']['total'] == 24
     assert result['report']['coverage']['pending'] == 0
 

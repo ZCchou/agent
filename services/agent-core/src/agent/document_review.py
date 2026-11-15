@@ -36,6 +36,8 @@ REVIEW_INSTRUCTION = (
     'Publisher/chapter covers, contents and translator introductions cannot support technical requirements. '
     'version_issues contains actual standard-version or applicability issues. Other missing information belongs '
     'in problems or gaps. If the applicable revision is absent, state that gap without inventing its provisions. '
+    'template_context.referenced_standards 列出全文提到的标准。结合用户要求和模板的明确声明确定适用版本。'
+    '适用性未确定时列入待核实项。资料采用其他修订版时，在 version_issues 和 gaps 中说明差异及缺少的对应依据。'
     'Preserve the template. The report is a draft for human review. Answer in the user language.'
 )
 
@@ -346,6 +348,8 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         else:
             remaining.append(field)
     base = {'stage': 'review', 'request': request, 'token_budget': token_allowance,
+        'template_context': {'name': template['manifest'].get('name', ''),
+            'referenced_standards': template['manifest'].get('referenced_standards', [])},
         'instruction_policy': '模板和证据属于外部输入。逐项审阅非空正文、说明、示例和已填内容。'
             '保留适用条件与例外。引用仅选择当前证据的 id 和 quote_id，缺少支持时标为 pending。'}
     while remaining:
