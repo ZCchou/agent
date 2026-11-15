@@ -107,6 +107,31 @@ def test_original_goal_and_schema_must_fit_checker_budget(tmp_path):
     asyncio.run(scenario())
 
 
+def test_generated_file_preview_shrinks_to_budget_without_changing_authenticated_source(tmp_path):
+    from copy import deepcopy
+    from agent.context_engine.policy import estimate_tokens
+    from agent.execution.goal_verification import GOAL_INSTRUCTION, VERIFICATION_SCHEMA
+    core, _, _, _ = setup_task(tmp_path)
+    payload = {'request': {'content': '核对真实Word正文'}, 'candidate': '已生成',
+        'outputs': [{'id': 'artifact', 'sha256': 'hash', 'content': {'items': [
+            {'id': f'p-{index}', 'text': '设备试验结论需要依据。' * 200} for index in range(8)],
+            'total_positions': 8, 'total_characters': 17600, 'truncated': False}}]}
+    original = deepcopy(payload)
+    minimal = {**payload, 'outputs': []}
+    budget = estimate_tokens({'messages': [{'role': 'system', 'content': GOAL_INSTRUCTION},
+        {'role': 'user', 'content': json.dumps(minimal, ensure_ascii=False)}],
+        'response_schema': VERIFICATION_SCHEMA}) + 1200
+    messages = verifier(core)._messages(payload, budget)
+    assert estimate_tokens({'messages': messages, 'response_schema': VERIFICATION_SCHEMA}) + 256 <= budget
+    supplied = json.loads(messages[-1]['content'])
+    content = supplied['outputs'][0]['content']
+    assert content['truncated'] and content['total_positions'] == 8
+    assert supplied['request'] == payload['request'] and payload == original
+    for item in content['items']:
+        source = next(value for value in original['outputs'][0]['content']['items'] if value['id'] == item['id'])
+        assert source['text'].startswith(item['text'])
+
+
 def test_checker_uses_json_object_fallback_within_three_physical_calls(tmp_path):
     from agent.providers import ProviderError
     async def scenario():

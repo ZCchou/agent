@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 
 from agent.context_engine.policy import estimate_tokens
 from agent.execution.goal_requirements import encode, validate_goal_requirements
@@ -91,18 +92,30 @@ class GoalVerification:
 
     @staticmethod
     def _messages(context, input_tokens):
-        value = dict(context)
+        value = deepcopy(context)
         value['candidate_truncated'] = False
         while True:
             messages = [{'role': 'system', 'content': GOAL_INSTRUCTION}, {'role': 'user', 'content': encode(value)}]
             if estimate_tokens({'messages': messages, 'response_schema': VERIFICATION_SCHEMA}) + 256 <= input_tokens:
                 return messages
             text = value.get('candidate', '')
-            if not isinstance(text, str) or len(text) < 128:
+            if isinstance(text, str) and len(text) >= 128:
+                keep = max(32, len(text) * 2 // 3)
+                value['candidate'] = text[:keep // 2] + '\n[中间正文省略，完整文件见outputs]\n' + text[-keep // 2:]
+                value['candidate_truncated'] = True
+                continue
+            previews = [output['content'] for output in value.get('outputs', [])
+                if isinstance(output.get('content'), dict) and output['content'].get('items')
+                and (len(output['content']['items']) > 1 or len(output['content']['items'][0]['text']) > 32)]
+            if not previews:
                 raise CoreDataError('task_goal_context_too_small', '当前上下文不足以核对原始要求及成果，请扩大上下文后重试。')
-            keep = max(32, len(text) * 2 // 3)
-            value['candidate'] = text[:keep // 2] + '\n[中间正文省略，完整文件见outputs]\n' + text[-keep // 2:]
-            value['candidate_truncated'] = True
+            preview = max(previews, key=lambda item: len(encode(item['items'])))
+            if len(preview['items']) > 1:
+                preview['items'] = preview['items'][:max(1, len(preview['items']) // 2)]
+            else:
+                item = preview['items'][0]
+                item['text'] = item['text'][:max(32, len(item['text']) * 2 // 3)]
+            preview['truncated'] = True
 
     def _save(self, task_id, digest, result, fence):
         with self.repository._connect() as connection:
