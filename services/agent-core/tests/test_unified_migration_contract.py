@@ -11,9 +11,9 @@ def test_unified_schema_upgrades_v29_and_preserves_history(tmp_path):
         connection.execute('DROP TABLE IF EXISTS profile_migration_jobs')
         connection.execute('UPDATE schema_info SET version=29')
     upgraded = CoreRepository(repo.database_path)
-    assert SCHEMA_VERSION == 33
-    assert PROTOCOL_VERSION == 26
-    assert BUILD_ID == 'schema33-agent-unified-v1'
+    assert SCHEMA_VERSION == 34
+    assert PROTOCOL_VERSION == 27
+    assert BUILD_ID == 'schema34-agent-unified-v1'
     assert upgraded.get_conversation(chat['id'])['messages'][0]['content'] == 'Saved history'
     with upgraded._connect() as connection:
         assert connection.execute('SELECT count(*) FROM profile_migration_sources').fetchone()[0] == 0

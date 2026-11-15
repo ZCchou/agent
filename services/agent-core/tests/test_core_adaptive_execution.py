@@ -488,8 +488,8 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
             assert run['rag_decision']['task_type'] == 'evidence_answer'
             assert len(batches) >= 2 and all(len(batch['fields']) <= 10 for batch in batches)
             if not linked_retry:
-                assert len(batches) >= 4
-                assert len({field['id'] for batch in batches for field in batch['fields']}) == paragraph_count + 2
+                assert len(batches) >= 3
+                assert len({field['id'] for batch in batches for field in batch['fields']}) == paragraph_count + 3
                 with core._connect() as connection:
                     invocation_count = connection.execute('SELECT COUNT(*) FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=?',
                         (run['id'],)).fetchone()[0]

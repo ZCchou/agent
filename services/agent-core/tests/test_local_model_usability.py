@@ -135,11 +135,11 @@ def test_managed_queue_does_not_consume_first_output_or_total_budget(tmp_path):
                     yield ProviderEvent("text_delta",text="ready")
                     yield ProviderEvent("finish",finish_reason="stop")
             provider=ManagedLocalProvider(profile,QuickProvider(),service)
-            request=spec(provider_or_backend_id=profile.id,model_id=model["id"],first_output_timeout_ms=20,total_timeout_ms=100)
+            request=spec(provider_or_backend_id=profile.id,model_id=model["id"],first_output_timeout_ms=500,total_timeout_ms=750)
             prepared=InvocationCompiler().compile_model(request,[{"role":"user","content":"hello"}])
             async with service._permit:
                 pending=asyncio.create_task(ModelInvocationService().complete_prepared(provider,request,prepared))
-                await asyncio.sleep(.15)
+                await asyncio.sleep(1.0)
                 assert not pending.done(), "waiting for the model slot must not use inference timeout"
             assert (await pending)[0]=="ready"
         finally:

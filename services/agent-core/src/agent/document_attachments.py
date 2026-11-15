@@ -167,7 +167,7 @@ class DocumentAttachments:
             raise CoreDataError('attachment_changed', '文档提取产物完整性校验失败。') from error
 
     async def read(self, attachment, *, offset=0, limit=20, physical_page=None, section=None,
-                   max_characters=16000, progress=None):
+                   max_characters=16000, progress=None, include_coverage=False):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100 \
                 or (physical_page is not None and (type(physical_page) is not int or physical_page < 1)) \
                 or (section is not None and (not isinstance(section, str) or not section.strip() or len(section) > 1024)) \
@@ -190,22 +190,23 @@ class DocumentAttachments:
         result = {'attachment_id': attachment.get('id'), 'source_sha256': attachment['sha256'],
                   'trust': 'untrusted', 'text_artifact': dict(artifact), 'blocks': [], 'next_offset': None, 'total': 0, 'warnings': warnings}
         encode = lambda value: json.dumps(value, ensure_ascii=False)
-        # Keep offsets stable for identical filters and budget, including long blocks.
-        blocks = []
+        # Pagination identities stay fixed when the remaining context budget changes.
+        all_blocks = []
         for begin, end, locator in _document_blocks(text):
+            body = text[begin:end]
+            for start in range(0, len(body), 256):
+                all_blocks.append({'id': f'text-{begin + start}', 'text': body[start:start + 256],
+                                   'locator': dict(locator), 'character_offset': start})
+        blocks = []
+        for block in all_blocks:
+            locator = block['locator']
             if physical_page is not None and locator.get('physical_page', locator.get('page')) != physical_page:
                 continue
             heading = locator.get('heading_path', locator.get('section', []))
             heading = ' / '.join(str(item) for item in heading) if isinstance(heading, list) else str(heading)
             if section is not None and section.casefold() not in heading.casefold():
                 continue
-            body = text[begin:end]
-            overhead = len(encode(result)) + len(encode({'text': '', 'locator': locator, 'character_offset': len(body)})) + 100
-            capacity = (max_characters - overhead) // 6
-            if capacity < 1:
-                raise CoreDataError('document_read_budget_exceeded', '文档定位或警告超过读取预算。')
-            for start in range(0, len(body), capacity):
-                blocks.append({'text': body[start:start + capacity], 'locator': dict(locator), 'character_offset': start})
+            blocks.append(block)
         result['total'] = len(blocks)
         for block in blocks[offset:offset + limit]:
             candidate = {**result, 'blocks': result['blocks'] + [block], 'next_offset': offset + len(result['blocks']) + 1}
@@ -216,6 +217,8 @@ class DocumentAttachments:
             result['next_offset'] = None
         if len(encode(result)) > max_characters or (offset < len(blocks) and not result['blocks']):
             raise CoreDataError('document_read_budget_exceeded', '文档读取结果超过输出预算。')
+        if include_coverage:
+            result['_coverage'] = {'items': all_blocks, 'returned_ids': [block['id'] for block in result['blocks']]}
         return result
 
     async def _pdf(self, original, progress):

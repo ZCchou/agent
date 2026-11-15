@@ -25,6 +25,18 @@ class Ocr:
         pass
 
 
+def test_read_offsets_do_not_skip_text_when_remaining_context_changes(tmp_path):
+    async def scenario():
+        attachment = source_attachment(tmp_path)
+        service = DocumentAttachments(CoreRepository(tmp_path / 'agent.db'), parser=Parser(), ocr=Ocr())
+        first = await service.read(attachment, limit=2, max_characters=6000)
+        second = await service.read(attachment, offset=first['next_offset'], limit=2, max_characters=2000)
+        assert first['total'] == second['total']
+        previous = first['blocks'][-1]
+        assert second['blocks'][0]['character_offset'] == previous['character_offset'] + len(previous['text'])
+    asyncio.run(scenario())
+
+
 def test_read_pages_sections_pagination_integrity_and_identity(tmp_path):
     async def scenario():
         attachment = source_attachment(tmp_path)

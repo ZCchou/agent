@@ -118,7 +118,8 @@ class RagGrounding:
         if decision.get('query_context') and not prior_ids:
             query = decision['query_context'] + '\n' + query
         aliases = {}
-        if run.get('_template_fill_task'):
+        deferred = run.get('_template_fill_task') or run.get('_template_review_task') or run.get('_defer_retrieval')
+        if deferred:
             # Each planned chapter retrieves its own relevant clauses.
             result = {'evidence': [], 'generation': project_state['generation']}
         elif prior_ids:
@@ -128,7 +129,7 @@ class RagGrounding:
             result = await self.service.search(project_id, query, run_id=run["id"],
                 **({"retrieval_scope": decision['retrieval_scope']} if decision.get('retrieval_scope') else {}),
                 **({"progress": progress} if progress else {}))
-        if not result["evidence"] and not run.get('_template_fill_task'):
+        if not result["evidence"] and not deferred:
             raise CoreDataError("rag_evidence_missing", "当前资料库未检索到可用于回答的证据。")
         self.runs[run["id"]] = {"project_id": project_id, "generation": result["generation"],
                                  "evidence": {item["id"]: item for item in result["evidence"]}, "admitted": {},

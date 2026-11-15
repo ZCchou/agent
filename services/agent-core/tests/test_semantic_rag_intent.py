@@ -165,6 +165,7 @@ def test_offline_fixed_model_semantic_intent_runs_before_library_check(tmp_path,
             pass
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:12345/v1'
+        config['model_tool_modes']['model'] = 'text_only'
         core, project, chat, service = await fixture(tmp_path, sink, config)
         service.offline = True
         calls = []
@@ -475,7 +476,8 @@ def test_runtime_continue_preserves_document_task_in_both_modes(tmp_path, monkey
             assert decision['task_type'] == 'document_export'
             assert decision['required']
             assert decision['query_context'] == '填写项目模板并保存为Word文档'
-            assert observed[0]['pending_task']['task_type'] == 'document_export'
+            assert observed == []
+            assert decision['agent_loop'] is True
         finally:
             await service.shutdown()
     asyncio.run(scenario())

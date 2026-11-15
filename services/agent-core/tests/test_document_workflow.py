@@ -62,6 +62,15 @@ def test_template_identity_targets_and_artifact_tampering_are_checked(tmp_path):
         service.inspect(run['id'], source['template_id'])
 
 
+def test_generated_report_is_file_backed_beyond_tool_json_content_limit(tmp_path):
+    _, run, service = workflow(tmp_path)
+    content = 'Report\n' * 150000
+    with pytest.raises(CoreDataError):
+        service.create(run['id'], content, 'markdown')
+    report = service.create(run['id'], content, 'markdown', max_characters=20 * 1024 * 1024)
+    assert service.path_for(run['id'], report['id']).read_text(encoding='utf-8') == content
+
+
 @pytest.mark.parametrize('format', ['docx', 'markdown', 'txt'])
 def test_export_formats_are_file_backed_and_reopenable(tmp_path, format):
     core, run, service = workflow(tmp_path)
