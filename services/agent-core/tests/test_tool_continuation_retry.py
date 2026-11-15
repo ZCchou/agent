@@ -31,7 +31,7 @@ def list_reply(identity):
         "function": {"name": "fs_list", "arguments": '{"path":"."}'}}]}
 
 
-def install_http(monkeypatch, replies):
+def install_http(monkeypatch, replies, *, goal_checks=False):
     requests = []
     original = httpx.AsyncClient
     business_calls = 0
@@ -41,7 +41,7 @@ def install_http(monkeypatch, replies):
         payload = json.loads(request.content)
         requests.append((str(request.url), payload))
         from goal_check_support import goal_check_content
-        checked = goal_check_content(payload)
+        checked = goal_check_content(payload) if goal_checks else None
         if checked is not None:
             delta, finish = {'content': checked}, 'stop'
         else:
@@ -186,7 +186,7 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
     requests = install_http(monkeypatch, [(list_reply("inspect-original"), "tool_calls"),
         ({"content": "partial"}, "length"), ({}, "length"),
         (list_reply("inspect-new-explicit-call"), "tool_calls"),
-        ({"content": "Explicit retry completed."}, "stop")])
+        ({"content": "Explicit retry completed."}, "stop")], goal_checks=True)
 
     async def scenario():
         async def sink(event):
@@ -376,7 +376,7 @@ def test_explicit_retry_continues_after_twenty_four_prior_tools(tmp_path, monkey
     replies += [({"content": "Synthetic incomplete response."}, "length"), ({}, "length")]
     replies += [(list_reply(f"retry-{index}"), "tool_calls") for index in range(3)]
     replies += [({"content": "Retry finished after additional inspections."}, "stop")]
-    requests = install_http(monkeypatch, replies)
+    requests = install_http(monkeypatch, replies, goal_checks=True)
 
     async def scenario():
         async def sink(event):
