@@ -1,5 +1,7 @@
 const chat = {
   execution: {
+    completed: "任务已完成", completedWithGaps: "任务已完成，含资料缺项",
+    operations: { read: "读取资料", review: "审阅资料" },
     coverage: "处理对象共 {{total}} 项 · 已处理 {{completed}} 项 · 资料缺项 {{gaps}} 项 · 待处理 {{remaining}} 项",
     moreItems: "查看更多位置",
     waitingInput: "等待补充信息",
@@ -10,7 +12,7 @@ const chat = {
     recoveries: "连续自动恢复 {{count}} 次", retained: "任务和已完成进度已保留，请选择后续操作。",
     takingLonger: "处理耗时较长，正在持续监控执行进展。",
     continue: "继续等待", retry: "重新尝试", retryRun: "保留草稿并重新生成", cancel: "取消任务", settings: "调整模型设置",
-    stages: { tool_verification: "正在检测模型工具能力",
+    stages: { goal_verification: "正在核对任务完成情况", model_queue: "正在等待模型资源", tool_verification: "正在检测模型工具能力",
       processing: "正在处理任务", rag_retrieval: "正在检索项目资料", rag_embed: "正在生成检索向量",
       rag_rerank: "正在重排序", integrity_verification: "正在校验模型文件", worker_starting: "正在启动推理进程",
       model_ready: "模型已就绪", tokenization: "正在分词", preparing_rerank: "正在准备重排序",

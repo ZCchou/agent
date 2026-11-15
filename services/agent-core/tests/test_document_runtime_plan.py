@@ -8,6 +8,7 @@ import pytest
 from agent.runtime import ChatRunService
 from agent.storage import CoreDataError, CoreRepository
 from agent.documents import DocumentWorkflow
+from goal_check_support import goal_check_content
 
 
 def runtime_attachment(root, identity, text, name='reference.docx'):
@@ -35,7 +36,10 @@ def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_pat
     def respond(request):
         payload = json.loads(request.content)
         payloads.append(payload)
-        if mode == 'native_deferred' and len(payloads) == 1:
+        checked = goal_check_content(payload)
+        if checked is not None:
+            delta, finish = {'content': checked}, 'stop'
+        elif mode == 'native_deferred' and len(payloads) == 1:
             delta = {'tool_calls': [{'index': 0, 'id': 'read', 'type': 'function', 'function': {
                 'name': 'document_read_attachment', 'arguments': json.dumps({'attachment_id': 'selected', 'physical_page': 2, 'limit': 1})}}]}
             finish = 'tool_calls'
@@ -84,7 +88,7 @@ def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_pat
                 assert 'LATE-PAGE-FIRST' in json.dumps(payloads[1])
             if mode == 'text_continuation':
                 assert 'LATE-PAGE-FIRST' in first
-                assert len(payloads) == 2
+                assert len(payloads) == 3
                 assert 'LATE-PAGE-SECOND' in json.dumps(payloads[1])
                 reads = run['rag_decision']['document_reads']
                 assert reads[-1]['request']['offset'] == 1
@@ -93,7 +97,7 @@ def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_pat
                 expected = {'response': 'Equipment summary' if mode == 'json_string' else {'model': 'EQ-REAL'}}
                 answer = next(item['content'] for item in reversed(core.get_conversation(run['conversation_id'])['messages']) if item['role'] == 'assistant')
                 assert answer == json.dumps(expected)
-                assert len(payloads) == 1
+                assert len(payloads) == 2
         finally:
             await service.shutdown()
     asyncio.run(scenario())
@@ -181,6 +185,10 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
     def respond(request):
         payload = json.loads(request.content)
         payloads.append(payload)
+        checked = goal_check_content(payload)
+        if checked is not None:
+            chunk = {'choices': [{'delta': {'content': checked}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
         if retry_mode == 'schema_unsupported' and len(payloads) == 1:
             return httpx.Response(400, json={'error': {'message': 'response_format unsupported'}})
         task = json.loads(payload['messages'][-1]['content'])['task']
@@ -226,7 +234,7 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
                 path = tmp_path / operation['arguments']['path']
                 path.write_bytes(application.documents.path_for(operation['run_id'], artifact['id']).read_bytes())
                 published.append(path)
-                application.resolve_tool(operation['id'], True, json.dumps({'status': 'published', 'path': path.name, 'sha256': artifact['sha256']}))
+                application.resolve_tool(operation['id'], True, json.dumps({'status': 'published', 'path': str(path), 'sha256': artifact['sha256']}))
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:19999/v1'
         config['model_tool_modes']['model'] = 'text_only'
@@ -325,9 +333,9 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
             fallback = retry_mode == 'schema_unsupported'
             assert all(payload.get('response_format', {}).get('type') == (
                 'json_object' if fallback and index == 1 else 'json_schema') for index, payload in enumerate(payloads))
-            assert len(payloads) == (3 if retry else 4) + int(fallback)
+            assert len(payloads) == (4 if retry else 5) + int(fallback)
             plan = application.execution_coordinator.get_for_run(run['id'])
-            assert len(plan['invocations']) == (1 if retry_mode == 'linked' else 3 if retry else 4) + int(fallback)
+            assert len(plan['invocations']) == (2 if retry_mode == 'linked' else 4 if retry else 5) + int(fallback)
             assert sum(item['status'] == 'failed' for item in plan['invocations']) == int(fallback)
             assert all(item['status'] in {'completed', 'failed'} for item in plan['invocations'])
         finally:
@@ -458,6 +466,10 @@ def test_strict_schema_rag_text_only_reads_late_page_before_grounded_answer(tmp_
     def respond(request):
         payload = json.loads(request.content)
         captured.append(payload)
+        checked = goal_check_content(payload)
+        if checked is not None:
+            chunk = {'choices': [{'delta': {'content': checked}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
         assert payload['response_format']['type'] == 'json_schema'
         assert payload['response_format']['json_schema']['strict'] is True
         schema = payload['response_format']['json_schema']['schema']
@@ -508,7 +520,7 @@ def test_strict_schema_rag_text_only_reads_late_page_before_grounded_answer(tmp_
             await service.tasks[response['run']['id']]
             run = core.get_model_run(response['run']['id'])
             assert run['status'] == 'completed', run.get('error_message')
-            assert len(captured) == 2
+            assert len(captured) == 3
             assert run['rag_decision']['document_reads'][-1]['result']['blocks'][0]['text'].strip() == 'LATE-PAGE-SECOND'
             plan = service.execution_coordinator.get_for_run(run['id'])
             step = next(item for item in plan['steps'] if item['step_type'] == 'final_response')

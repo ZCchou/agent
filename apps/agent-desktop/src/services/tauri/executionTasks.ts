@@ -3,17 +3,31 @@ import type { ExecutionWaitPolicy } from "../../types/settings";
 import type { IntentTask } from "./intentTasks";
 
 export type ExecutionOwner = { kind: "intent" | "run" | "task"; id: string };
+export interface TaskSourceScope {
+  source_id: string; operation: "read" | "review";
+  scope: "full" | "selected" | "metadata" | "excluded"; target_ids: string[]; reason: string;
+}
+export interface TaskGoalRequirements {
+  revision: number; request_digest: string; provenance: string;
+  source_scopes: TaskSourceScope[]; deliverables: { path: string | null; format: string | null }[];
+  success_criteria: string[];
+}
+export interface TaskGoalVerification {
+  status: "satisfied" | "needs_work" | "needs_input" | "failed";
+  summary: string; unmet_requirements: string[];
+}
 export interface BusinessTaskPlan {
   task_id: string; revision: number; goal: string;
   steps: { id: string; description: string; depends_on: string[] }[];
   success_criteria: string[];
   request?: { attachments?: { id: string; name?: string }[] };
-  source_scopes?: { source_id: string; operation: "read" | "review";
-    scope: "full" | "selected" | "metadata" | "excluded"; target_ids: string[]; reason: string }[];
+  source_scopes?: TaskSourceScope[];
   deliverables?: { path: string }[];
+  goal_requirements?: TaskGoalRequirements | null;
 }
 export interface TaskCoverage {
   ready: boolean; total: number; completed: number; gaps: number; remaining: number;
+  unmet_requirements?: { code: string; source_id?: string; operation?: string; path?: string | null; format?: string | null }[];
 }
 export interface TaskWorkItem {
   source_id: string; target_id: string; outcome: "pending" | "done" | "gap" | "failed";
@@ -43,6 +57,7 @@ export interface ExecutionTaskSnapshot {
   recovery_run_id?: string;
   plan?: BusinessTaskPlan | null;
   coverage?: TaskCoverage;
+  verification?: TaskGoalVerification | null;
   pending_question?: { id: string; revision: number; clarification: NonNullable<IntentTask["clarification"]> } | null;
   answered_question_ids?: string[];
   current_stage?: {

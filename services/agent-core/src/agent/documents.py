@@ -313,6 +313,44 @@ class DocumentWorkflow:
                 or not isinstance(result.get('path'), str):
             raise CoreDataError('document_publish_unverified', '文件发布结果尚未核验。')
         with self.repository._connect() as connection:
-            connection.execute("UPDATE document_artifacts SET status='published',output_path=? WHERE id=? AND run_id=?",
-                               (result['path'], artifact_id, run_id))
+            manifest = artifact['manifest']
+            absolute = result.get('absolute_path') or result['path']
+            if isinstance(absolute, str) and Path(absolute).is_absolute():
+                manifest['publication_path'] = str(Path(absolute).resolve())
+            connection.execute("UPDATE document_artifacts SET status='published',output_path=?,manifest_json=? WHERE id=? AND run_id=?",
+                               (result['path'], json.dumps(manifest, ensure_ascii=False), artifact_id, run_id))
         return self.get(run_id, artifact_id)
+
+    def verify_publication(self, run_id, artifact_id):
+        artifact = self.get(run_id, artifact_id)
+        path = artifact['manifest'].get('publication_path')
+        if artifact['status'] != 'published' or not path:
+            raise CoreDataError('document_publish_unverified', '交付文件缺少实际位置，请重新发布文件。')
+        destination = Path(path)
+        try:
+            if (destination.is_symlink() or destination.resolve() != destination or not destination.is_file()
+                    or destination.stat().st_size != artifact['size_bytes']
+                    or digest(destination.read_bytes()) != artifact['sha256']):
+                raise CoreDataError('document_publish_unverified', '交付文件已删除或变化，请重新生成并保存。')
+        except OSError as error:
+            raise CoreDataError('document_publish_unverified', '交付文件暂时无法读取，请检查目录权限。') from error
+        return {'path': path, 'sha256': artifact['sha256'], 'kind': artifact['kind']}
+
+    def verification_content(self, run_id, artifact_id, *, max_characters=6000):
+        artifact = self.get(run_id, artifact_id)
+        path = self.path_for(run_id, artifact_id)
+        if artifact['kind'] == 'docx':
+            content = [{'id': identity, 'text': target.text} for identity, target, _ in targets(load_docx(path.read_bytes()))
+                       if target.text.strip()]
+        else:
+            content = [{'id': 'body', 'text': path.read_text(encoding='utf-8')}]
+        total = sum(len(item['text']) for item in content)
+        remaining, preview = max(0, max_characters), []
+        for item in content:
+            if not remaining:
+                break
+            text = item['text'][:remaining]
+            preview.append({'id': item['id'], 'text': text})
+            remaining -= len(text)
+        return {'items': preview, 'truncated': total > max_characters,
+                'total_positions': len(content), 'total_characters': total, 'trust': 'generated_artifact'}

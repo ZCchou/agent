@@ -282,8 +282,11 @@ impl Progress {
         s.files_done += 1;
         s.advance();
         s.elapsed_ms = self.start.elapsed().as_millis();
-        println!("{}", serde_json::to_string(&*s).unwrap());
-        self.ui.update(&s);
+        // Intermediate files are displayed by the periodic progress worker.
+        if s.files_done == 1 || s.files_done == s.files_total {
+            println!("{}", serde_json::to_string(&*s).unwrap());
+            self.ui.update(&s);
+        }
     }
     fn current(&self, name: &str) {
         self.state.lock().unwrap().current_file = name.into();

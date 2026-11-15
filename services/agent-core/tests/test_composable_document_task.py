@@ -18,7 +18,7 @@ from test_tool_continuation_retry import configuration, fixture
 @pytest.mark.parametrize('purpose', ['template', 'reference'])
 def test_local_agent_reviews_revises_and_exports_in_one_task(tmp_path, monkeypatch, purpose):
     original_client = httpx.AsyncClient
-    main_turns, citations = [], []
+    main_turns, citations, goal_checks = [], [], []
 
     def respond(request):
         payload = json.loads(request.content)
@@ -28,7 +28,11 @@ def test_local_agent_reviews_revises_and_exports_in_one_task(tmp_path, monkeypat
             batch_request = json.loads(last_user)
         except (TypeError, ValueError):
             batch_request = {}
-        if isinstance(batch_request, dict) and 'batch' in batch_request:
+        if isinstance(batch_request, dict) and batch_request.get('phase') == 'goal_verification':
+            goal_checks.append(batch_request)
+            delta, finish = {'content': json.dumps({'status': 'satisfied', 'summary': '已核对原始要求、全文审阅覆盖与DOCX文件',
+                'unmet_requirements': [], 'questions': [], 'goal_requirements': None, 'evidence_required': True})}, 'stop'
+        elif isinstance(batch_request, dict) and 'batch' in batch_request:
             sources = batch_request['sources']['evidence']
             source = sources[0]
             citation = {'id': source['id'], 'quote_id': source['quote_options'][0]['quote_id']}
@@ -48,7 +52,11 @@ def test_local_agent_reviews_revises_and_exports_in_one_task(tmp_path, monkeypat
                     {'id': 'review', 'description': '审阅全部正文并修订保存', 'depends_on': []}],
                     'success_criteria': ['每个非空位置有审阅结果，修订文件已保存'],
                     'source_scopes': [{'source_id': 'doc', 'operation': 'review', 'scope': 'full', 'target_ids': [], 'reason': ''}],
-                    'deliverables': [{'path': 'reviewed.docx'}]}
+                    'deliverables': [{'path': 'reviewed.docx'}],
+                    'expected_goal_revision': 0, 'goal_requirements': {
+                        'source_scopes': [{'source_id': 'doc', 'operation': 'review', 'scope': 'full', 'target_ids': [], 'reason': ''}],
+                        'deliverables': [{'path': 'reviewed.docx', 'format': 'docx'}],
+                        'success_criteria': ['每个非空位置有审阅结果，修订文件已保存']}}
             elif index == 2:
                 name, arguments = 'document.inspect_template', {'attachment_id': 'doc'}
             elif index == 3:
@@ -120,6 +128,8 @@ def test_local_agent_reviews_revises_and_exports_in_one_task(tmp_path, monkeypat
             assert [item['tool_name'] for item in service.tool_loop.repository.list_for_run(run['id'])] == [
                 'task.update_plan', 'document.inspect_template', 'document.review_targets', 'document.fill_template', 'document.export']
             assert service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})['coverage']['ready']
+            assert len(goal_checks) == 1
+            assert service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})['verification']['status'] == 'satisfied'
         finally:
             await service.shutdown()
     asyncio.run(scenario())

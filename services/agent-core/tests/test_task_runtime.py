@@ -7,6 +7,60 @@ from agent.runtime import ChatRunService
 from agent.storage import CoreDataError, CoreRepository
 
 
+@pytest.mark.parametrize('failure_phase', ['tool_continuation', 'goal_verification'])
+def test_local_http_recovers_current_call_without_replaying_committed_plan(tmp_path, monkeypatch, failure_phase):
+    import httpx
+    import json
+    from dataclasses import replace
+    from test_tool_continuation_retry import configuration, fixture, start
+    from goal_check_support import goal_check_content
+    requests = []
+    original = httpx.AsyncClient
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        checked = goal_check_content(payload)
+        if checked is not None:
+            if len(requests) == 3:
+                raise httpx.ReadError('Final verification connection interrupted', request=request)
+            delta, finish = {'content': checked}, 'stop'
+        elif len(requests) == 1:
+            arguments = {'expected_revision': 0, 'steps': [], 'success_criteria': ['Explain current state']}
+            if failure_phase == 'goal_verification':
+                arguments.update(expected_goal_revision=0, goal_requirements={
+                    'source_scopes': [], 'deliverables': [], 'success_criteria': ['Explain current state']})
+            delta = {'tool_calls': [{'index': 0, 'id': 'plan-once', 'type': 'function', 'function': {
+                'name': 'task_update_plan', 'arguments': json.dumps(arguments)}}]}
+            finish = 'tool_calls'
+        elif len(requests) == 2 and failure_phase == 'tool_continuation':
+            raise httpx.ReadError('Local connection interrupted before output', request=request)
+        else:
+            assert len(requests) == (3 if failure_phase == 'tool_continuation' else 2), 'Completed planning operation must not be replayed'
+            assert any(item.get('role') == 'tool' and 'revision' in item.get('content', '')
+                for item in payload['messages'])
+            delta, finish = {'content': 'Continued from the saved plan.'}, 'stop'
+        chunk = {'choices': [{'delta': delta, 'finish_reason': finish}]}
+        return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n')
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
+    async def scenario():
+        async def sink(event):
+            pass
+        config = configuration()
+        config['base_url'] = 'http://127.0.0.1:19999/v1'
+        core, _, work, service = await fixture(tmp_path, sink, config)
+        service.profiles['synthetic'] = replace(service.profiles['synthetic'], local_strict=True)
+        try:
+            run_id = await start(service, work)
+            run = core.get_model_run(run_id)
+            assert run['status'] == 'completed', (run['error_code'], run['error_message'])
+            assert len(requests) == (3 if failure_phase == 'tool_continuation' else 4)
+            operations = service.list_tool_operations(run_id)
+            assert [(item['tool_name'], item['status']) for item in operations] == [('task.update_plan', 'completed')]
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
 def test_request_goal_is_saved_before_model_preparation_and_survives_failure(tmp_path):
     async def scenario():
         async def sink(event):
@@ -50,6 +104,87 @@ def test_verified_local_agent_combines_understanding_with_first_action(tmp_path,
             await service.tasks[response['run']['id']]
             assert core.get_model_run(response['run']['id'])['status'] == 'completed'
             assert len(requests) == 1
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('content', ['把文件名里含有条款两个字的文件列出来', '写一段匹配适航二字的正则表达式'])
+def test_rule_hint_does_not_force_retrieval_before_first_local_agent_action(tmp_path, monkeypatch, content):
+    import json
+    from test_tool_continuation_retry import configuration, fixture, install_http
+    requests = install_http(monkeypatch, [({'content': '普通文件或编程任务。'}, 'stop'),
+        ({'content': json.dumps({'status': 'satisfied', 'summary': '普通任务，无专业证据要求', 'evidence_required': False,
+            'unmet_requirements': [], 'questions': [], 'goal_requirements': {
+                'source_scopes': [], 'deliverables': [], 'success_criteria': ['提供任务结果']}})}, 'stop')])
+    async def scenario():
+        async def sink(event):
+            pass
+        config = configuration()
+        config['base_url'] = 'http://127.0.0.1:19999/v1'
+        core, _, work, service = await fixture(tmp_path, sink, config)
+        try:
+            response = await service.start({'conversation_id': work['id'], 'content': content,
+                'idempotency_key': 'rule-hint'})
+            await service.tasks[response['run']['id']]
+            run = core.get_model_run(response['run']['id'])
+            assert run['status'] == 'completed', (run['error_code'], run['error_message'])
+            assert run['rag_decision']['rule_hint']['required'] is True
+            assert not run['rag_decision']['required']
+            assert len(requests) == 2
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
+def test_ordinary_template_fill_is_admitted_before_any_project_evidence_obligation(tmp_path, monkeypatch):
+    import io
+    from docx import Document
+    from test_document_attachments import source_attachment
+    from test_tool_continuation_retry import configuration, fixture
+    async def scenario():
+        async def sink(event):
+            pass
+        config = configuration()
+        config['base_url'] = 'http://127.0.0.1:19999/v1'
+        core, _, work, service = await fixture(tmp_path, sink, config)
+        document = Document()
+        document.add_paragraph('姓名：待填写')
+        payload = io.BytesIO()
+        document.save(payload)
+        attachment = source_attachment(tmp_path, payload.getvalue(), '报名模板.docx')
+        try:
+            response = await service.start({'conversation_id': work['id'], 'content': '填写这个报名模板，允许模拟数据。',
+                'attachments': [attachment], 'idempotency_key': 'ordinary-template'})
+            run = core.get_model_run(response['run']['id'])
+            assert not run['rag_decision']['required']
+            assert run['rag_decision']['rule_hint']['reason'] == 'template_fill'
+        finally:
+            await service.shutdown()
+    asyncio.run(scenario())
+
+
+def test_professional_answer_must_obtain_evidence_after_model_confirms_obligation(tmp_path, monkeypatch):
+    import json
+    from test_tool_continuation_retry import configuration, fixture, install_http
+    requests = install_http(monkeypatch, [({'content': '这是尚未取得条款依据的业务回答。'}, 'stop'),
+        ({'content': json.dumps({'status': 'needs_work', 'summary': '专业判断需要条款依据',
+            'unmet_requirements': ['取得项目条款依据'], 'questions': [], 'goal_requirements': {
+                'source_scopes': [], 'deliverables': [], 'success_criteria': ['以条款支持试验结论']},
+            'evidence_required': True})}, 'stop')])
+    async def scenario():
+        async def sink(event):
+            pass
+        config = configuration()
+        config['base_url'] = 'http://127.0.0.1:19999/v1'
+        core, _, work, service = await fixture(tmp_path, sink, config)
+        try:
+            response = await service.start({'conversation_id': work['id'], 'content': 'DO-160F第8章试验需要验证什么能力？',
+                'idempotency_key': 'semantic-evidence-obligation'})
+            await service.tasks[response['run']['id']]
+            run = core.get_model_run(response['run']['id'])
+            assert run['status'] == 'failed' and run['error_code'] == 'rag_library_required'
+            assert len(requests) == 2
         finally:
             await service.shutdown()
     asyncio.run(scenario())

@@ -113,6 +113,8 @@ class ChatRunService:
         self.execution_monitor.cleanup()
         from agent.execution.task_plans import TaskPlans
         self.task_plans = TaskPlans(repository)
+        from agent.execution.goal_verification import GoalVerification
+        self.goal_verification = GoalVerification(repository)
         from agent.execution.task_input import TaskInput
         self.task_input = TaskInput(repository, lambda task_id: self.execution_monitor._emit(task_id, 'clarification'))
         self.skills = SkillRegistry(repository.database_path.parent / "skills.json")
@@ -223,10 +225,9 @@ class ChatRunService:
             self._resume_task = asyncio.create_task(self.resume_background())
             self._resume_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
-    async def _prepare_resumed_model(self, provider_id):
+    async def _prepare_resumed_model(self, provider_id, *, pin_id=None):
         if provider_id and provider_id.startswith('managed:'):
-            if provider_id not in self.local_models.provider_profiles():
-                await self.local_models.recover(provider_id)
+            await self.local_models.await_ready(provider_id, pin_id=pin_id)
             self._sync_managed_profiles()
 
     async def resume_background(self):
@@ -238,67 +239,89 @@ class ChatRunService:
                 WHERE r.status='interrupted' AND r.error_code='core_interrupted' AND t.resume_pending=1 ORDER BY r.created_at""" )]
             roots = [dict(row) for row in connection.execute(
                 "SELECT id,replay_kind FROM execution_wait_tasks WHERE status='interrupted' AND resume_pending=1 AND replay_kind IN ('local_model_load','rag_search','tool_probe')")]
-        for root in roots:
-            if root['replay_kind'] != 'tool_probe':
-                continue
-            state = self.execution_monitor.get_task(root['id'])
-            try:
-                request = self.execution_monitor.get_replay(root['id'])['request']
-                await self.handle_execution('retry', {'task_id': state['id'], 'revision': state['revision'],
-                    'idempotency_key': 'startup-' + str(state['revision'])})
-                task = self.tool_probe_tasks.get(request['provider_id'])
-                if task is not None:
-                    await task
-            except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
-                    raise
-            except Exception as error:
-                self.execution_monitor.finish_task(root['id'], 'failed', error_code=getattr(error, 'code', 'tool_probe_failed'))
-        for state in intents:
-            if state['status'] != 'interrupted' or (state.get('error') or {}).get('code') != 'core_interrupted':
-                continue
-            try:
-                request = dict(state['request'])
-                request.pop('model_preparation_id', None)
-                selection = request.get('selection') or {}
-                provider_id = request.get('provider_profile_id') or selection.get('provider_profile_id')
-                await self._prepare_resumed_model(provider_id)
-                self.intent_sessions._patch(state['id'], state['revision'], request=request)
-                await self.intent_sessions.handle('retry', {'task_id': state['id'], 'revision': state['revision']})
-                await self.intent_sessions.wait(state['id'])
-            except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
-                    raise
-            except Exception as error:
-                self.intent_sessions._patch(state['id'], state['revision'], status='failed',
-                    error={'code': getattr(error, 'code', 'execution_resume_failed'), 'message': str(error)})
-        for run in runs:
-            try:
-                if self.repository.get_model_run(run['id'])['status'] != 'interrupted':
-                    continue
-                await self._prepare_resumed_model(run['provider_profile_id'])
-                await self.retry(run['id'])
-                task = self.run_tasks.get(run['id'])
-                if task is not None:
-                    await task
-            except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
-                    raise
-            except Exception as error:
-                current = self.repository.get_model_run(run['id'])
-                if current['status'] == 'interrupted':
-                    self.repository.transition_model_run(run['id'], {'interrupted'}, 'failed',
-                        getattr(error, 'code', 'execution_resume_failed'), str(error))
+        probes = {}
+        workers = []
         for root in roots:
             if root['replay_kind'] == 'tool_probe':
-                continue
-            state = self.execution_monitor.get_task(root['id'])
-            if state['status'] == 'interrupted':
-                try:
-                    await self.handle_execution('retry', {'task_id': state['id'], 'revision': state['revision'],
-                        'idempotency_key': 'startup-' + str(state['revision'])})
-                except CoreDataError as error:
-                    self.execution_monitor.finish_task(root['id'], 'failed', error_code=error.code)
+                request = self.execution_monitor.get_replay(root['id'])['request']
+                task = asyncio.create_task(self._resume_probe(root))
+                probes.setdefault(request['provider_id'], []).append(task)
+                workers.append(task)
+        workers.extend(self._resume_intent(state, probes) for state in intents
+                       if state['status'] == 'interrupted'
+                       and (state.get('error') or {}).get('code') == 'core_interrupted')
+        workers.extend(self._resume_run(run, probes) for run in runs)
+        workers.extend(self._resume_leaf(root) for root in roots if root['replay_kind'] != 'tool_probe')
+        if workers:
+            await asyncio.gather(*workers)
+
+    async def _resume_probe(self, root):
+        state = self.execution_monitor.get_task(root['id'])
+        try:
+            request = self.execution_monitor.get_replay(root['id'])['request']
+            await self.handle_execution('retry', {'task_id': state['id'], 'revision': state['revision'],
+                'idempotency_key': 'startup-' + str(state['revision'])})
+            task = self.tool_probe_tasks.get(request['provider_id'])
+            if task is not None:
+                await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception as error:
+            self.execution_monitor.finish_task(root['id'], 'failed', error_code=getattr(error, 'code', 'tool_probe_failed'))
+
+    async def _resume_intent(self, state, probes):
+        pin_id = 'execution:' + state['execution_task_id']
+        handed_off = False
+        try:
+            request = dict(state['request'])
+            request.pop('model_preparation_id', None)
+            selection = request.get('selection') or {}
+            provider_id = request.get('provider_profile_id') or selection.get('provider_profile_id')
+            if provider_id in probes:
+                await asyncio.gather(*probes[provider_id])
+            await self._prepare_resumed_model(provider_id, pin_id=pin_id)
+            self.intent_sessions._patch(state['id'], state['revision'], request=request)
+            await self.intent_sessions.handle('retry', {'task_id': state['id'], 'revision': state['revision']})
+            task = self.intent_sessions.tasks.get(state['id'])
+            if task is not None:
+                task.add_done_callback(lambda _: self.local_models.release_run(pin_id))
+                handed_off = True
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception as error:
+            self.intent_sessions._patch(state['id'], state['revision'], status='failed',
+                error={'code': getattr(error, 'code', 'execution_resume_failed'), 'message': str(error)})
+        finally:
+            if not handed_off:
+                self.local_models.release_run(pin_id)
+
+    async def _resume_run(self, run, probes):
+        try:
+            if self.repository.get_model_run(run['id'])['status'] != 'interrupted':
+                return
+            if run['provider_profile_id'] in probes:
+                await asyncio.gather(*probes[run['provider_profile_id']])
+            await self.retry(run['id'])
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception as error:
+            current = self.repository.get_model_run(run['id'])
+            if current['status'] == 'interrupted':
+                self.repository.transition_model_run(run['id'], {'interrupted'}, 'failed',
+                    getattr(error, 'code', 'execution_resume_failed'), str(error))
+
+    async def _resume_leaf(self, root):
+        state = self.execution_monitor.get_task(root['id'])
+        if state['status'] == 'interrupted':
+            try:
+                await self.handle_execution('retry', {'task_id': state['id'], 'revision': state['revision'],
+                    'idempotency_key': 'startup-' + str(state['revision'])})
+            except CoreDataError as error:
+                self.execution_monitor.finish_task(root['id'], 'failed', error_code=error.code)
 
     def _execution_activity(self, snapshot):
         """Persist business pause status before forwarding the task's fenced event."""
@@ -350,6 +373,7 @@ class ChatRunService:
         result = {**root, 'execution_task_id': root['id']}
         result['plan'] = self.task_plans.get(root['id'])
         result['coverage'] = self.task_plans.completion(root['id'])
+        result['verification'] = self.goal_verification.latest(root['id'])
         result['pending_question'] = self.task_input.pending(root['id'])
         result['answered_question_ids'] = self.task_input.answered_ids(root['id'])
         if root.get('intent_task_id') and not root['intent_task_id'].startswith('request:'):
@@ -488,10 +512,11 @@ class ChatRunService:
         fresh = self._provider(self.local_models.get_profile(provider.profile.id))
         provider.profile, provider.inner = fresh.profile, fresh.inner
 
-    async def _recovering_managed_events(self, run, attempt_id, provider, step, spec, prepared, messages,
-                                         *, update_spec, safe_to_retry):
+    async def _recovering_local_events(self, run, attempt_id, provider, step, spec, prepared, messages,
+                                         *, update_spec, safe_to_retry, stage='model_output'):
         """Reconstruct one drained, output-free invocation on the same model."""
-        captured = dict(spec.managed_runtime) or self.local_models.runtime_identity(provider.profile.id)
+        managed = isinstance(provider, ManagedLocalProvider) and provider.profile.id.startswith('managed:')
+        captured = (dict(spec.managed_runtime) or self.local_models.runtime_identity(provider.profile.id)) if managed else {}
         physical_calls = 0
 
         async def invoke():
@@ -500,9 +525,10 @@ class ChatRunService:
                 self.repository.get_run_conversation(run['id'])
                 if run['id'] in self.rag_grounding.runs:
                     self.rag_grounding.validate(run['id'])
-                await self._restore_managed_provider(provider, captured)
+                if managed:
+                    await self._restore_managed_provider(provider, captured)
                 spec = replace(spec, spec_id=str(uuid.uuid4()), round_no=spec.round_no + 1,
-                    managed_runtime=self._managed_runtime_identity(provider.profile.id),
+                    managed_runtime=self._managed_runtime_identity(provider.profile.id) if managed else spec.managed_runtime,
                     status='prepared', spec_hash='')
                 self.execution_repository.save_invocation_spec(spec)
                 prepared = self._compile_model_request(run['id'], spec, messages)
@@ -510,16 +536,17 @@ class ChatRunService:
             physical_calls += 1
             dispatched = False
             produced_output = False
-            if not self.local_models._runtime.alive:
-                raise CoreDataError('runtime_crashed', '本地推理进程已退出。')
-            actual = self.local_models.runtime_identity(provider.profile.id)
-            if {key: value for key, value in actual.items() if key != 'session_id'} != {
-                    key: value for key, value in captured.items() if key != 'session_id'}:
-                raise CoreDataError('model_recovery_identity_changed', '恢复期间模型或配置身份已变化。')
-            fresh = self._provider(self.local_models.get_profile(provider.profile.id))
-            provider.profile, provider.inner = fresh.profile, fresh.inner
+            if managed:
+                if not self.local_models._runtime.alive:
+                    raise CoreDataError('runtime_crashed', '本地推理进程已退出。')
+                actual = self.local_models.runtime_identity(provider.profile.id)
+                if {key: value for key, value in actual.items() if key != 'session_id'} != {
+                        key: value for key, value in captured.items() if key != 'session_id'}:
+                    raise CoreDataError('model_recovery_identity_changed', '恢复期间模型或配置身份已变化。')
+                fresh = self._provider(self.local_models.get_profile(provider.profile.id))
+                provider.profile, provider.inner = fresh.profile, fresh.inner
             activity = current_activity.get()
-            if activity is not None:
+            if activity is not None and managed:
                 activity.resource(active=None, model_id=spec.model_id, device=captured['backend'],
                                   context_length=captured['context_length'])
             try:
@@ -540,12 +567,12 @@ class ChatRunService:
                                 yield event
             except BaseException as error:
                 failure = error
-                if (not produced_output and not self.local_models._runtime.alive
+                if (managed and not produced_output and not self.local_models._runtime.alive
                         and getattr(error, 'code', None) in {'execution_plan_stale', 'provider_unavailable', 'model_not_loaded'}):
                     failure = CoreDataError('runtime_crashed', '本地推理进程在首次输出前退出。')
                 if dispatched:
                     code = getattr(failure, 'code', 'core_interrupted')
-                    if isinstance(error, asyncio.CancelledError) and not self.local_models._runtime.alive:
+                    if managed and isinstance(error, asyncio.CancelledError) and not self.local_models._runtime.alive:
                         code = 'runtime_crashed'
                     self.execution_repository.finish_invocation(spec.spec_id,
                         'cancelled' if code == 'core_interrupted' else 'failed', code)
@@ -557,7 +584,7 @@ class ChatRunService:
                     raise failure from error
                 raise
 
-        stream = monitored_events(invoke, diagnose=lambda activity: self._model_diagnostic(provider),
+        stream = monitored_events(invoke, stage=stage, diagnose=lambda activity: self._model_diagnostic(provider),
             safe_to_retry=safe_to_retry, recoverable=self._managed_transport_failure)
         async with closing_provider_stream(stream):
             async for event in stream:
@@ -1260,14 +1287,16 @@ class ChatRunService:
         rag_decision['attachment_request_overrides'] = params.get('attachment_purposes') or {}
         attachments = [{**attachment, 'purpose': rag_decision['attachment_roles'][attachment['id']]} for attachment in attachments]
         if 'template' in rag_decision['attachment_roles'].values() and re.search(r'填写|回填|填好|完成模板|回答模板', content):
-            rag_decision.update(required=True, reason='template_fill', task_type='document_export')
+            rag_decision['task_type'] = 'document_export'
+            if rag_decision['reason'] not in {'user_required', 'skill_required'}:
+                rag_decision.update(required=True, reason='template_fill')
         if pending_evidence and rag_decision['reason'] == 'evidence_continuation':
             prior = self.repository.get_run_conversation(previous_run['id'])
             rag_decision['query_context'] = next(item['content'][:2000] for item in prior['messages'] if item['id'] == previous_run['user_message_id'])
             rag_decision['continued_run_id'] = previous_run['id']
         if continued:
             rag_decision.update(query_context=continued['request'], task_type=continued['task_type'], continued_run_id=previous_run['id'])
-        if rag_decision['reason'] in {'user_required', 'skill_required', 'template_fill'} and not rag_enabled:
+        if rag_decision['reason'] in {'user_required', 'skill_required'} and not rag_enabled:
             raise CoreDataError('rag_library_required', '当前任务需要项目资料。请先启用资料库，或关闭强制 RAG 后重新提出普通问题。')
         selection_value = params.get("selection") if isinstance(params.get("selection"), dict) else {}
         legacy_fixed_request = bool(
@@ -1555,11 +1584,11 @@ class ChatRunService:
         document_attached = any(artifact.get('kind') == 'document.source'
             for attachment in attachments for artifact in attachment.get('artifacts', []))
         local_agent = requested_kind == 'project_work' and profile.is_local and rag_decision['reason'] != 'greeting'
-        if local_agent and profile_id.startswith('managed:'):
-            await self._ensure_tool_capability(profile_id, model_id)
-            profile = self._profile(profile_id)
         agent_loop = local_agent and (profile.model_tool_modes or {}).get(model_id) in {'native', 'structured'}
         if agent_loop:
+            rag_decision['rule_hint'] = {'required': rag_decision['required'], 'reason': rag_decision['reason']}
+            if rag_decision['reason'] not in {'user_required', 'skill_required', 'evidence_continuation'}:
+                rag_decision.update(required=False, reason='model_pending')
             requirements = replace(requirements, tools='available', files='available')
             candidates = self._execution_candidates(conversation, automatic_only=selection_mode == 'automatic')
             preliminary_plan = self.execution_coordinator.plan(PlanningRequest(
@@ -2453,13 +2482,11 @@ class ChatRunService:
         pending_action_created: dict[str, Any] | None = None
         try:
             selected = self.repository.get_model_run(run_id)['provider_profile_id']
-            resident = self.local_models._runtime
-            if selected.startswith('managed:') and (resident is None or not resident.matches(selected)):
+            if selected.startswith('managed:'):
                 expected = self.local_models._runtime_identities.get(selected)
-                await run_stage('main_model_loading', lambda activity: self.local_models.recover(selected, expected),
-                    safe_to_retry=True, recoverable=self._managed_transport_failure,
-                    diagnose=lambda activity: Diagnostic(process_exited=self.local_models._runtime is not None
-                        and self.local_models._runtime.process is not None and self.local_models._runtime.process.poll() is not None))
+                await run_stage('model_queue', lambda activity: self.local_models.await_ready(
+                    selected, pin_id=run_id, expected_identity=expected, activity=activity))
+                self._sync_managed_profiles()
             self.local_models.pin_run(run_id, self.repository.get_model_run(run_id)["provider_profile_id"])
             execution_plan = self.execution_coordinator.get_for_run(run_id)
             if execution_plan is not None:
@@ -2483,7 +2510,7 @@ class ChatRunService:
                 self.task_plans.create(business_root['id'], original_message)
             pending_question = self.task_input.inherit(business_root['id'], run)
             if pending_question:
-                await self.task_input.wait(business_root['id'], pending_question['id'])
+                await self._wait_task_input(run_id, business_root['id'], pending_question['id'])
             self._validate_planned_web_permission(current_conversation, run)
             current_user = next(
                 (message for message in current_conversation["messages"]
@@ -2671,7 +2698,8 @@ class ChatRunService:
                 allowed_tools = [name for name in allowed_tools if name not in {"web.search", "web.open"}]
             if self._rag_requires_local(conversation) or run_id in self.rag_grounding.runs:
                 allowed_tools = [name for name in allowed_tools if name not in {"web.search", "web.open"}]
-                if run_id in self.rag_grounding.runs and route_allows_tools and tool_mode != "text_only":
+                if route_allows_tools and tool_mode != "text_only" and (run_id in self.rag_grounding.runs
+                        or conversation.get('project_id') and self.rag.project_state(conversation['project_id']).get('enabled')):
                     allowed_tools.extend(("rag.search", "rag.read"))
             brief_greeting = (run.get('rag_decision') or {}).get('reason') == 'greeting'
             if brief_greeting:
@@ -2689,6 +2717,7 @@ class ChatRunService:
             transient_retry_count = 0
             presearch_message: dict[str, Any] | None = None
             tool_budget_attempt_ids: list[str] = []
+            generation_messages = []
             while True:
                 attempt = self.repository.begin_run_attempt(
                     run_id, execution_step["id"] if execution_step is not None else None,
@@ -2697,15 +2726,8 @@ class ChatRunService:
                 tool_budget_attempt_ids.append(attempt_id)
                 content = ""
                 if template_review_task and not composable_document:
-                    selected = set(decision.get('read_attachment_ids', []))
-                    for item in (execution_plan or {}).get('resolved_intent', {}).get('attachment_selection', []):
-                        if item.get('source_attachment_id') in selected:
-                            selected.add(item['current_attachment_id'])
-                    templates = [item for item in current_user.get('attachments', [])
-                        if item['name'].lower().endswith('.docx') and (not selected or item['id'] in selected)]
-                    if len(templates) != 1:
-                        raise CoreDataError('document_template_required', '请为全篇审阅选择一份 DOCX 模板。')
-                    content = await self._review_template_planned(run, attempt_id, templates[0], current_user['content'])
+                    template = self._selected_review_attachment(run, execution_plan, current_user)
+                    content = await self._review_template_planned(run, attempt_id, template, current_user['content'])
                     break
                 if template_fill_task and not composable_document:
                     content = '模板填写草稿已生成，待补充内容与复核事项见文档。'
@@ -2813,8 +2835,11 @@ class ChatRunService:
                         input_artifact_ids=tuple(final_artifact_ids),
                         budget_attempt_ids=tuple(tool_budget_attempt_ids),
                         buffer_output=(
-                            run_id in self.rag_grounding.runs or execution_step is not None
-                            and execution_step.get("step_type") == "grounding_fallback"
+                            run_id in self.rag_grounding.runs or bool(run.get('rag_decision', {}).get('rule_hint', {}).get('required'))
+                            or any(artifact.get('kind') == 'document.source' for attachment in current_user.get('attachments', [])
+                                   for artifact in attachment.get('artifacts', []))
+                            or decision.get('task_type') == 'document_export'
+                            or execution_step is not None and execution_step.get("step_type") == "grounding_fallback"
                         ),
                     )
                     if not content.strip():
@@ -2939,13 +2964,15 @@ class ChatRunService:
                         execution_plan, execution_step, attempt["attempt_number"],
                         force_final=tools_enabled,
                     )
+            content = await self._application_document_export(run, attempt_id, content)
+            content = await self._finish_task_goal(run, attempt_id, content, provider, execution_plan,
+                execution_step, attempt, generation_messages, tuple(allowed_tools), tool_mode, application_document)
+            if run_id in self.rag_grounding.runs:
                 evidence_state = self.rag_grounding.runs[run_id]
-                content = await self._application_document_export(run, attempt_id, content)
                 result = self.repository.complete_model_run(run_id, attempt_id, content,
                     rag_guard=(evidence_state["project_id"], evidence_state["generation"]))
                 await self._emit(run_id, "run.chunk", {"delta": content})
             else:
-                content = await self._application_document_export(run, attempt_id, content)
                 result = self.repository.complete_model_run(run_id, attempt_id, content)
             resolved_intent = (execution_plan or {}).get("resolved_intent", {})
             confirmed_pending_action = resolved_intent.get("pending_action_id")
@@ -4259,18 +4286,11 @@ class ChatRunService:
         apply_rag_contract: bool = True,
         response_schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
-        managed_recovery = (isinstance(provider, ManagedLocalProvider)
-            and provider.profile.id.startswith('managed:') and self.local_models._runtime is not None)
-        if monitored_local(provider) and current_activity.get() is None and not managed_recovery:
-            return await run_stage('model_output', lambda activity: self._invoke_planned_step(
-                run, plan, step, attempt, provider, messages, max_output_tokens=max_output_tokens,
-                response_format=response_format, round_no=round_no, native_search_mode=native_search_mode,
-                artifact_ids=artifact_ids, apply_rag_contract=apply_rag_contract, response_schema=response_schema),
-                diagnose=lambda activity: self._model_diagnostic(provider))
+        local_recovery = monitored_local(provider)
         managed_request = isinstance(provider, ManagedLocalProvider)
         if managed_request:
             await self._emit(run["id"], "run.state_changed", {"status": run["status"], "phase": "waitingModel"})
-        async with ModelInvocationService.provider_session(None if managed_recovery else provider) as session_provider:
+        async with ModelInvocationService.provider_session(None if local_recovery else provider) as session_provider:
             if session_provider is not None:
                 provider = session_provider
             if managed_request:
@@ -4292,7 +4312,7 @@ class ChatRunService:
             if round_no == 1:
                 self.repository.bind_attempt_invocation_spec(attempt["id"], spec.spec_id)
             managed_dispatched = False
-            if not managed_recovery:
+            if not local_recovery:
                 self.execution_repository.mark_invocation_dispatched(spec.spec_id, prepared.request_fingerprint)
                 await self._emit(run['id'], 'run.invocation_dispatched', {
                     **self._invocation_outcome_data(spec), 'round_no': spec.round_no})
@@ -4300,16 +4320,15 @@ class ChatRunService:
                 # Event delivery yields to settings/cancel handlers. Check again
                 # immediately before entering the captured provider adapter.
                 self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
-                if managed_recovery:
+                if local_recovery:
                     def update_spec(replacement, request, dispatched):
                         nonlocal spec, prepared, managed_dispatched
                         spec, prepared, managed_dispatched = replacement, request, dispatched
 
                     result = await self.model_invocation.complete_prepared(provider, spec, prepared,
-                        stream_factory=lambda: self._recovering_managed_events(run, attempt['id'], provider,
+                        stream_factory=lambda: self._recovering_local_events(run, attempt['id'], provider,
                             step, spec, prepared, messages, update_spec=update_spec,
-                            safe_to_retry=not self.tool_loop.repository.list_for_run(run['id'])
-                                and not self.repository.list_web_operations(run['id'])))
+                            safe_to_retry=True))
                 else:
                     async with self.local_models.observe_activity(provider.profile.id):
                         result = await self.model_invocation.complete_prepared(provider, spec, prepared)
@@ -4331,7 +4350,7 @@ class ChatRunService:
                         "connection_reset", "request_timeout", "stream_stalled",
                     } else "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
                 )
-                if not managed_recovery or managed_dispatched:
+                if not local_recovery or managed_dispatched:
                     self.execution_repository.finish_invocation(
                         spec.spec_id, terminal, getattr(error, "code", "core_interrupted"),
                     )
@@ -5055,6 +5074,9 @@ class ChatRunService:
                 '(source_id, operation read/review, scope full/selected/metadata/excluded, target_ids, reason) '
                 'and deliverables (project-relative path), even when deliverables is []. '
                 'Read full means every original text position; metadata means file metadata only. '
+                'In the first business plan include goal_requirements and expected_goal_revision (initially 0). '
+                'goal_requirements contains source_scopes, success_criteria, and deliverables with path and format '
+                '(use null for an undecided path). Preserve the original user requirements while revising execution steps. '
                 'Ask essential missing information with task.request_input, then continue the same task. '
                 'Task plan revision: ' + str(business_plan['revision'])})
             answers = self.task_input.answers(root['id'])
@@ -5078,6 +5100,11 @@ class ChatRunService:
                     'Use null for unused page/section filters. Every final claim still requires supplied current evidence. '
                     'Final-only and repair calls use the claims-only contract when instructed.'})
         while True:
+            if run_id in self.rag_grounding.runs:
+                from agent.rag.grounding import ANSWER_INSTRUCTION
+                if not any(item.get('role') == 'system' and ANSWER_INSTRUCTION in str(item.get('content', ''))
+                           for item in messages):
+                    messages.append({'role': 'system', 'content': ANSWER_INSTRUCTION})
             turn_content = ""
             turn_reasoning = ""
             finish_reason: str | None = None
@@ -5157,6 +5184,7 @@ class ChatRunService:
                     if tools_enabled and type(window) is int:
                         _, _, _, input_limit = resolve_budget(context_window=window, max_output_tokens=max_output_tokens)
                         optional = [name for name in ('skills.save', 'skills.read_resource', 'skills.load', 'terminal.run',
+                            'task.update_plan', 'task.request_input',
                             'fs.search', 'document.fill_template', 'document.export', 'document.review_targets',
                             'rag.read', 'fs.read', 'fs.list', 'fs.propose_changes', 'document.inspect_template',
                             'document.read_attachment', 'rag.search') if name in allowed_tools and name not in discovered_tools]
@@ -5181,18 +5209,16 @@ class ChatRunService:
                     if not monitored_local(provider):
                         invocation_timeout.reschedule(asyncio.get_running_loop().time() + spec.total_timeout_ms / 1000)
                     stream_started = time.monotonic()
-                    managed_recovery = (isinstance(provider, ManagedLocalProvider)
-                        and provider.profile.id.startswith('managed:') and self.local_models._runtime is not None)
-                    if managed_recovery:
+                    local_recovery = monitored_local(provider)
+                    if local_recovery:
                         def update_spec(replacement, request, dispatched):
                             nonlocal spec, prepared, invocation_round, invocation_dispatched
                             spec, prepared = replacement, request
                             invocation_round, invocation_dispatched = replacement.round_no, dispatched
 
-                        stream = self._recovering_managed_events(run, attempt_id, provider,
+                        stream = self._recovering_local_events(run, attempt_id, provider,
                             execution_step, spec, prepared, request_messages, update_spec=update_spec,
-                            safe_to_retry=not visible_content and not self.tool_loop.repository.list_for_run(run_id)
-                                and not self.repository.list_web_operations(run_id)).__aiter__()
+                            safe_to_retry=True).__aiter__()
                     else:
                         ready_provider = await run_stage('model_queue', lambda activity:
                             stream_cleanup.enter_async_context(ModelInvocationService.provider_session(provider)))
@@ -5372,7 +5398,8 @@ class ChatRunService:
                     error = ProviderError("request_timeout", "The model invocation exceeded its total deadline.")
                 if isinstance(error, ProviderError) and error.code == "response_format_unsupported" \
                         and run_id in self.rag_grounding.runs and spec.response_format != "text":
-                    self.execution_repository.finish_invocation(spec.spec_id, "failed", error.code)
+                    if invocation_dispatched:
+                        self.execution_repository.finish_invocation(spec.spec_id, "failed", error.code)
                     if not hasattr(self, "_rag_output_formats"):
                         self._rag_output_formats = {}
                     self._rag_output_formats[self._rag_format_key(execution_step)] = (
@@ -5496,8 +5523,7 @@ class ChatRunService:
             if not calls:
                 file_operations = any(operation['tool_name'] in {'fs.propose_changes', 'terminal.run', 'document.export'}
                     for operation in self.tool_loop.repository.list_for_run(run_id))
-                coverage = self.task_plans.completion(root['id'], require_declared=bool(
-                    run.get('rag_decision', {}).get('agent_loop') and (document_read_ids or file_operations)))
+                coverage = self.task_plans.completion(root['id'])
                 if run.get('rag_decision', {}).get('agent_loop') and not coverage['ready']:
                     if completion_corrections >= 3:
                         raise CoreDataError('task_incomplete', '任务仍有未处理位置，已完成结果已保存。', coverage)
@@ -5742,11 +5768,13 @@ class ChatRunService:
         if (run.get('rag_decision') or {}).get('task_type') != 'document_export':
             return content
         operations = self.tool_loop.repository.list_for_run(run_id)
-        if any(item['tool_name'] == 'document.export' and item['status'] == 'completed' for item in operations):
+        if not run.get('_goal_revise_export') and any(item['tool_name'] == 'document.export' and item['status'] == 'completed' for item in operations):
             return content
         conversation = self.repository.get_run_conversation(run_id)
         current = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
         request = current['content']
+        if run.get('_goal_feedback'):
+            request += '\n\n本轮完成核对发现的待处理事项\n' + run['_goal_feedback']
         if (run.get('rag_decision') or {}).get('continued_run_id'):
             request = run['rag_decision'].get('query_context') or request
         format = 'markdown' if re.search(r'markdown|\.md\b', request, re.I) else 'txt' if re.search(r'\btxt\b|\.txt\b', request, re.I) else 'docx'
@@ -5786,6 +5814,163 @@ class ChatRunService:
         self.rag_grounding.validate(run_id)
         self.documents.record_publication(run_id, artifact['id'], publication)
         return content + '\n\n[打开文件](<' + output_path + '>)\n\n[打开所在目录](project-dir:.)'
+
+    async def _finish_task_goal(self, run, attempt_id, content, provider, plan, step, attempt,
+                                messages, allowed_tools, tool_mode, application_document):
+        run_id = run['id']
+        root = self.execution_monitor.start_task(run_id=run_id)
+        business = self.task_plans.get(root['id'])
+        conversation = self.repository.get_run_conversation(run_id)
+        current = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
+        operations = self.tool_loop.repository.list_for_run(run_id)
+        business_operations = [item for item in operations if not item['tool_name'].startswith(('task.', 'tools.', 'skills.'))]
+        document_task = any(artifact.get('kind') == 'document.source'
+            for attachment in current.get('attachments', []) for artifact in attachment.get('artifacts', []))
+        file_task = any(item['tool_name'] in {'fs.propose_changes', 'terminal.run', 'document.export'} for item in operations)
+        application_export = application_document or (tool_mode == 'text_only'
+            and run.get('rag_decision', {}).get('task_type') == 'document_export')
+        rule_evidence_hint = bool(run.get('rag_decision', {}).get('rule_hint', {}).get('required'))
+        if not (document_task or file_task or len(business_operations) > 1 or len(business['steps']) > 1
+                or application_document or rule_evidence_hint or business['goal_requirements']):
+            return content
+        if plan is None or step is None:
+            raise CoreDataError('execution_plan_stale', '任务完成核对缺少有效模型调用计划。')
+        profile = self._profile_for_step(self._profile(run['provider_profile_id']), step)
+        window = (profile.model_capabilities or {}).get(run['model_id'], {}).get('context_length') or 8192
+        output_tokens = min(2048, max(512, window // 4))
+        _, _, _, input_limit = resolve_budget(context_window=window, max_output_tokens=output_tokens)
+        stalled, previous_progress = 0, None
+        failed_managed_identity = None
+        while True:
+            root = self.execution_monitor.get_task(root['id'])
+            business = self.task_plans.get(root['id'])
+            with self.repository._connect() as connection:
+                publications = connection.execute('''SELECT d.id,d.kind,d.sha256,d.output_path,d.manifest_json,
+                    COALESCE((SELECT MAX(o.sequence) FROM tool_operations o WHERE o.run_id=d.run_id
+                        AND o.tool_name='document.export' AND o.status='completed'
+                        AND json_extract(o.arguments_json,'$.artifact_id')=d.id),0) AS publication_sequence
+                    FROM document_artifacts d WHERE d.run_id=? AND d.status='published'
+                    ORDER BY publication_sequence,d.rowid''', (run_id,)).fetchall()
+                latest = {}
+                for row in publications:
+                    identity = json.loads(row['manifest_json']).get('publication_path') or row['output_path']
+                    latest[identity.replace('\\', '/').casefold()] = dict(row)
+                artifacts = list(latest.values())
+                sources = []
+                for row in connection.execute('SELECT source_id,operation,source_hash,artifact_id FROM task_sources WHERE task_id=? ORDER BY source_id,operation', (root['id'],)):
+                    item = {key: row[key] for key in ('source_id', 'operation', 'source_hash')}
+                    completed = [value[0] for value in connection.execute('''SELECT target_id FROM task_work_items
+                        WHERE task_id=? AND source_id=? AND outcome IN ('done','gap') ORDER BY target_id''', (root['id'], row['artifact_id']))]
+                    item.update(completed_target_ids=completed[:32], completed_count=len(completed))
+                    sources.append(item)
+                work_identity = [tuple(row) for row in connection.execute(
+                    'SELECT source_id,source_hash,target_id,outcome,result_json FROM task_work_items WHERE task_id=? ORDER BY source_id,target_id', (root['id'],))]
+            outputs = []
+            for artifact in artifacts:
+                self.documents.path_for(run_id, artifact['id'])
+                self.documents.verify_publication(run_id, artifact['id'])
+                manifest = json.loads(artifact['manifest_json'])
+                outputs.append({key: artifact[key] for key in ('id', 'kind', 'sha256', 'output_path')} | {
+                    'coverage': manifest.get('coverage'), 'missing': manifest.get('missing', []),
+                    'version_issues': manifest.get('version_issues', []), 'review_status': manifest.get('review_status'),
+                    'content': self.documents.verification_content(run_id, artifact['id'],
+                        max_characters=min(6000, max(256, input_limit // max(1, len(artifacts)))) )})
+            progress = stable_hash({'work': work_identity, 'outputs': sorted({(item['output_path'], item['sha256']) for item in outputs})})
+            if progress != previous_progress:
+                stalled = 0
+            previous_progress = progress
+
+            async def invoke(check_messages, schema):
+                nonlocal failed_managed_identity
+                checker_provider = self._provider(self._profile_for_step(self._profile(run['provider_profile_id']), step))
+                if failed_managed_identity is not None:
+                    await self._restore_managed_provider(checker_provider, failed_managed_identity)
+                    failed_managed_identity = None
+                with self.repository._connect() as connection:
+                    round_no = connection.execute('SELECT COALESCE(MAX(round_no),0)+1 FROM invocation_specs WHERE step_id=? AND attempt_no=?',
+                        (step['id'], attempt['attempt_number'])).fetchone()[0]
+                identity = self._managed_runtime_identity(checker_provider.profile.id)
+                try:
+                    text, usage, _ = await self._invoke_planned_step(run, plan, step, attempt,
+                        checker_provider, check_messages,
+                        max_output_tokens=output_tokens, response_format='json_object', round_no=round_no,
+                        apply_rag_contract=False, response_schema=schema)
+                except (CoreDataError, ProviderError) as error:
+                    if identity and self._managed_transport_failure(error):
+                        failed_managed_identity = identity
+                    raise
+                if usage:
+                    self.repository.update_attempt_usage(attempt_id, usage)
+                    self.execution_repository.update_step_usage(step['id'], usage)
+                return text
+
+            async def verify(activity):
+                if activity:
+                    activity.progress(stage='goal_verification')
+                identity = (activity.revision, activity.attempt) if activity else (
+                    self.execution_monitor.get_task(root['id'])['revision'],
+                    self.execution_monitor.get_task(root['id'])['attempt'])
+                return await self.goal_verification.verify(root['id'], {
+                    'phase': 'goal_verification', 'candidate': content, 'outputs': outputs, 'observed_sources': sources,
+                    'execution_plan': {'source_scopes': business['source_scopes'], 'deliverables': business['deliverables'],
+                                       'success_criteria': business['success_criteria']},
+                    'evidence_generation': (self.rag_grounding.runs.get(run_id) or {}).get('generation')},
+                    invoke, fence=identity, input_tokens=input_limit)
+
+            checked = await run_stage('goal_verification', verify, safe_to_retry=True,
+                recoverable=self._managed_transport_failure,
+                diagnose=lambda activity: self._model_diagnostic(provider))
+            for artifact in artifacts:
+                self.documents.verify_publication(run_id, artifact['id'])
+            if checked.get('evidence_required') and run_id not in self.rag_grounding.runs:
+                run['rag_decision'] = {**run.get('rag_decision', {}), 'required': True, 'reason': 'model_verified'}
+                self.repository.record_rag_decision(run_id, run['rag_decision'])
+                await run_stage('retrieval', lambda activity: self.rag_grounding.prepare(run, conversation))
+                checked = {**checked, 'status': 'needs_work', 'unmet_requirements': ['使用rag.search和rag.read取得并核对项目证据后继续专业回答。']}
+            if checked['status'] == 'satisfied':
+                return content
+            if checked['status'] == 'failed':
+                raise CoreDataError('task_goal_verification_invalid', checked['summary'])
+            if checked['status'] == 'needs_input':
+                await self._request_task_input(run_id, {'summary': checked['summary'], 'questions': checked['questions']})
+            else:
+                stalled += 1
+                if stalled >= 3:
+                    raise CoreDataError('task_incomplete', '任务完成核对仍有未处理事项，已完成成果已保存。', checked)
+            feedback = json.dumps(checked, ensure_ascii=False)
+            run['_goal_feedback'] = feedback
+            if application_document and run.get('rag_decision', {}).get('template_review'):
+                content = await self._review_template_planned(run, attempt_id,
+                    self._selected_review_attachment(run, plan, current),
+                    current['content'] + '\n\n待处理事项\n' + feedback)
+            else:
+                messages.extend([{'role': 'assistant', 'content': content}, {'role': 'system',
+                    'content': 'Original task verification requires further work. Continue from confirmed results. ' + feedback}])
+                with self.repository._connect() as connection:
+                    round_no = connection.execute('SELECT COALESCE(MAX(round_no),0) FROM invocation_specs WHERE step_id=? AND attempt_no=?',
+                        (step['id'], attempt['attempt_number'])).fetchone()[0]
+                content = await self._generate_with_tools(run, attempt_id, self._provider(profile), messages,
+                    bool(allowed_tools), tool_mode, execution_plan=plan, execution_step=step,
+                    attempt_number=attempt['attempt_number'], initial_invocation_round=round_no,
+                    max_output_tokens=output_tokens, allowed_tools=allowed_tools, buffer_output=True)
+                if run_id in self.rag_grounding.runs and not run.get('_review_reports'):
+                    content = await self._finalize_rag_answer(run, attempt_id, self._provider(profile), messages,
+                        content, plan, step, attempt['attempt_number'], force_final=bool(allowed_tools))
+            run['_goal_revise_export'] = application_export
+            content = await self._application_document_export(run, attempt_id, content)
+            run.pop('_goal_revise_export', None)
+
+    @staticmethod
+    def _selected_review_attachment(run, plan, message):
+        selected = set(run.get('rag_decision', {}).get('read_attachment_ids', []))
+        for item in (plan or {}).get('resolved_intent', {}).get('attachment_selection', []):
+            if item.get('source_attachment_id') in selected:
+                selected.add(item['current_attachment_id'])
+        templates = [item for item in message.get('attachments', [])
+            if item['name'].lower().endswith('.docx') and (not selected or item['id'] in selected)]
+        if len(templates) != 1:
+            raise CoreDataError('document_template_required', '请为全篇审阅选择一份 DOCX 模板。')
+        return templates[0]
 
     async def _review_template_planned(self, run, attempt_id, attachment, request, *,
                                        template_id=None, target_ids=None, return_result=False):
@@ -6249,6 +6434,8 @@ class ChatRunService:
     async def _rag_tool(self, run, call, max_characters):
         if run['id'] not in self.rag_grounding.runs:
             conversation = self.repository.get_run_conversation(run['id'])
+            run['rag_decision'] = {**run.get('rag_decision', {}), 'required': True, 'reason': 'model_selected'}
+            self.repository.record_rag_decision(run['id'], run['rag_decision'])
             deferred = {**run, '_defer_retrieval': True,
                         'rag_decision': {**run.get('rag_decision', {}), 'required': True}}
             await self.rag_grounding.prepare(deferred, conversation)
@@ -6262,8 +6449,22 @@ class ChatRunService:
 
     async def _request_task_input(self, run_id, arguments):
         root = self.execution_monitor.start_task(run_id=run_id)
-        answers = await self.task_input.ask(root['id'], **arguments)
+        answers = await self._wait_task_input(run_id, root['id'], arguments=arguments)
         return json.dumps({'answers': answers, 'next_action': 'Continue the original task with these user answers.'}, ensure_ascii=False)
+
+    async def _wait_task_input(self, run_id, task_id, question_id=None, *, arguments=None):
+        run = self.repository.get_model_run(run_id)
+        provider_id = run['provider_profile_id']
+        expected = self.local_models.runtime_identity(provider_id) if provider_id.startswith('managed:') else None
+        self.local_models.release_run(run_id)
+        self.local_models.release_run('execution:' + task_id)
+        answers = await (self.task_input.ask(task_id, **arguments) if arguments is not None
+                         else self.task_input.wait(task_id, question_id))
+        if provider_id.startswith('managed:'):
+            await run_stage('model_queue', lambda activity: self.local_models.await_ready(
+                provider_id, pin_id=run_id, expected_identity=expected, activity=activity))
+            self._sync_managed_profiles()
+        return answers
 
     def _planning_tool(self, run_id, call, authorized, *, fence=None):
         from agent.execution.task_tools import discover_tools

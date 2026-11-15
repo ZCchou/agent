@@ -5,6 +5,11 @@ from typing import Any
 
 
 REASONS = {
+    'task_goal_invalid': '任务目标要求无效，请核对处理范围与交付要求',
+    'task_goal_revision_changed': '任务要求已更新，请恢复当前修订',
+    'task_goal_change_requires_input': '任务范围变更需要补充确认，已有结果已保留',
+    'task_goal_context_too_small': '当前模型上下文不足以核对原始要求与成果，请扩大上下文后重试',
+    'task_goal_verification_invalid': '任务完成核对未通过格式校验，已有结果已保存',
     'task_question_ended': '该澄清问题已结束，请查看当前任务',
     'task_question_changed': '澄清问题已更新，请回答当前问题',
     'task_incomplete': '任务仍有未处理位置，已完成结果已保存',

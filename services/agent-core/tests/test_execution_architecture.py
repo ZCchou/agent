@@ -60,11 +60,11 @@ def test_runtime_does_not_select_vendor_adapter_routes() -> None:
 def test_execution_contract_matches_core_domain() -> None:
     contract_path = Path(__file__).parents[3] / "contracts" / "unified-invocation-v3.4.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    assert contract["ipc_version"] == 27
-    assert contract["core_schema_version"] == 34
+    assert contract["ipc_version"] == 28
+    assert contract["core_schema_version"] == 35
     assert contract["settings_schema_version"] == 20
-    assert contract["core_version"] == "0.17.0-preview.2"
-    assert contract["build_id"] == "schema34-agent-unified-v1"
+    assert contract["core_version"] == "0.17.0-preview.3"
+    assert contract["build_id"] == "schema35-agent-unified-v1"
     assert set(contract["capability_keys"]) == {
         "text_generation", "vision_input", "reasoning", "function_calling",
         "web_search", "structured_web_evidence", "file_read", "file_write",

@@ -6,6 +6,7 @@ import uuid
 
 from agent.execution.intent_session import IntentClarification
 from agent.execution.task_plans import TaskPlans
+from agent.execution.goal_requirements import GoalRequirements
 from agent.storage import CoreDataError, _utc_now
 
 
@@ -27,11 +28,7 @@ class TaskInput:
         return self._decode(row) if row else None
 
     def answers(self, task_id):
-        with self.repository._connect() as connection:
-            rows = connection.execute("SELECT payload_json,answers_json FROM task_questions WHERE task_id=? AND status='answered' ORDER BY rowid",
-                                      (task_id,)).fetchall()
-        return [{'question': question['question'], 'answer': json.loads(row['answers_json'])[question['id']]}
-                for row in rows for question in json.loads(row['payload_json'])['questions']]
+        return GoalRequirements(self.repository).answers(task_id)
 
     def answered_ids(self, task_id):
         with self.repository._connect() as connection:

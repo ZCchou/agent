@@ -1,6 +1,7 @@
 """Model-visible planning and live local capability discovery."""
 from agent.document_contracts import definition
 from agent.execution.task_plans import _steps, validate_requirements
+from agent.execution.goal_requirements import validate_goal_requirements
 from agent.storage import CoreDataError
 
 
@@ -36,10 +37,25 @@ TASK_DEFINITIONS = [
             'required': ['id', 'question', 'options']}}}, ['summary', 'questions']),
 ]
 
+_plan_properties = TASK_DEFINITIONS[1]['function']['parameters']['properties']
+_plan_properties['expected_goal_revision'] = {'type': 'integer', 'minimum': 0}
+_plan_properties['goal_requirements'] = {
+    'type': 'object', 'additionalProperties': False,
+    'properties': {
+        'source_scopes': _plan_properties['source_scopes'],
+        'deliverables': {'type': 'array', 'maxItems': 100, 'items': {
+            'type': 'object', 'additionalProperties': False,
+            'properties': {'path': {'type': ['string', 'null']}, 'format': {'type': ['string', 'null']}},
+            'required': ['path', 'format']}},
+        'success_criteria': _plan_properties['success_criteria'],
+    }, 'required': ['source_scopes', 'deliverables', 'success_criteria'],
+}
+
 
 def validate_task_call(name, arguments):
     keys = ({'names'} if name == TASK_TOOLS[0] else {'summary', 'questions'} if name == TASK_TOOLS[2]
-            else {'expected_revision', 'steps', 'success_criteria', 'source_scopes', 'deliverables'})
+            else {'expected_revision', 'steps', 'success_criteria', 'source_scopes', 'deliverables',
+                  'goal_requirements', 'expected_goal_revision'})
     if set(arguments) - keys:
         raise CoreDataError('invalid_tool_call', '任务工具包含未知参数。')
     if name == TASK_TOOLS[0]:
@@ -60,6 +76,12 @@ def validate_task_call(name, arguments):
                 not isinstance(item, str) or not 1 <= len(item) <= 2000 for item in criteria):
             raise CoreDataError('invalid_tool_call', '任务完成条件无效。')
         validate_requirements(arguments.get('source_scopes', []), arguments.get('deliverables', []))
+        if ('goal_requirements' in arguments) != ('expected_goal_revision' in arguments):
+            raise CoreDataError('invalid_tool_call', '任务要求与要求修订号需要同时提交。')
+        if 'goal_requirements' in arguments:
+            if type(arguments['expected_goal_revision']) is not int or arguments['expected_goal_revision'] < 0:
+                raise CoreDataError('invalid_tool_call', '任务要求修订号无效。')
+            validate_goal_requirements(arguments['goal_requirements'])
 
 
 def discover_tools(arguments, authorized):
@@ -68,6 +90,9 @@ def discover_tools(arguments, authorized):
     names = list(dict.fromkeys(arguments.get('names', [])))
     if set(names) - set(authorized):
         raise CoreDataError('tool_not_allowed', '所选工具当前不可用，请查看本轮能力目录。')
-    definitions = ToolContractRegistry.definitions(authorized)
-    return {'tools': [{'name': item['function']['name'], 'description': item['function']['description']}
-                      for item in definitions], 'enabled': names}
+    definitions = ToolContractRegistry.definitions(names or authorized)
+    result = {'tools': [{'name': item['function']['name'], 'description': item['function']['description']}
+                        for item in definitions], 'enabled': names}
+    if names:
+        result['available_names'] = sorted(authorized)
+    return result

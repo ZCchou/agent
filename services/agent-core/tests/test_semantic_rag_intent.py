@@ -306,6 +306,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
     from test_tool_continuation_retry import configuration, fixture
     from test_document_runtime_plan import runtime_attachment
     captured = []
+    goal_requests = []
     original = httpx.AsyncClient
     def respond(request):
         payload = json.loads(request.content)
@@ -323,7 +324,11 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
                 result['read_attachment_ids'] = [value['attachments'][0]['id']]
             content = json.dumps(result, ensure_ascii=False)
         else:
-            content = '已读取实际设备型号 ACTUAL-Z。'
+            from goal_check_support import goal_check_content
+            checked = goal_check_content(payload)
+            if checked is not None:
+                goal_requests.append(json.loads(payload['messages'][-1]['content']))
+            content = checked or '已读取实际设备型号 ACTUAL-Z。'
         return httpx.Response(200, text='data: ' + json.dumps({'choices': [{'delta': {'content': content}, 'finish_reason': 'stop'}]}) + '\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def scenario():
@@ -353,6 +358,8 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
             await service.tasks[run_id]
             assert core.get_model_run(run_id)['status'] == 'completed'
             assert len(captured) == 2
+            assert any(item['answer'] == '第三页，只提取实际设备型号，不允许模拟。'
+                       for item in goal_requests[0]['answers'])
             for value in captured:
                 assert value['attachments'] == [{key: attachment[key] for key in ('id', 'name', 'media_type', 'byte_size')} | {'purpose': 'reference'}]
         finally:
@@ -360,7 +367,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
     asyncio.run(scenario())
 
 
-def test_first_project_message_uses_bound_libraries(tmp_path, monkeypatch):
+def test_first_native_project_action_can_choose_evidence_from_bound_libraries(tmp_path, monkeypatch):
     from test_tool_continuation_retry import configuration, fixture
 
     async def scenario():
@@ -379,7 +386,9 @@ def test_first_project_message_uses_bound_libraries(tmp_path, monkeypatch):
             started = await service.start({'kind': 'project_work', 'project_id': project['id'],
                 'provider_profile_id': 'synthetic', 'model_id': 'model',
                 'content': '振动试验目的', 'idempotency_key': 'first-message'})
-            assert started['run']['rag_decision']['required']
+            assert not started['run']['rag_decision']['required']
+            assert started['run']['rag_decision']['reason'] == 'model_pending'
+            assert started['run']['rag_decision']['agent_loop']
         finally:
             await service.shutdown()
     asyncio.run(scenario())

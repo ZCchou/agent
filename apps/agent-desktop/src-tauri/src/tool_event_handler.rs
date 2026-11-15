@@ -604,7 +604,7 @@ async fn handle(
     };
     match disposition {
         ChangeDisposition::Executed(result) => {
-            let output = document_publication_output(result.change_set.as_ref())
+            let output = document_publication_output(result.change_set.as_ref(), &root)
                 .unwrap_or_else(|| result.output.clone());
             if let Some(change_set) = result.change_set {
                 let _ = app.emit("agent-change-set", &change_set);
@@ -673,6 +673,7 @@ async fn handle(
 
 fn document_publication_output(
     view: Option<&crate::agent_execution::ChangeSetView>,
+    root: &std::path::Path,
 ) -> Option<String> {
     let view = view.filter(|view| view.status == "completed")?;
     let mutation = view
@@ -681,6 +682,7 @@ fn document_publication_output(
         .find(|mutation| mutation.artifact_key.is_some())?;
     Some(
         json!({"status":"published","artifact_id":mutation.artifact_key,"path":mutation.path,
+        "absolute_path":root.join(&mutation.path),
         "sha256":mutation.expected_after_hash})
         .to_string(),
     )
@@ -1103,14 +1105,15 @@ pub async fn resolve_pending(
         return Err("scope_changed: The work now belongs to another project".to_string());
     }
     // Hold current authorization through the synchronous Host validation and execution.
-    let execution_result = {
+    let (execution_result, publication_root) = {
         let tools = app.state::<Mutex<WorkToolManager>>();
         let tools = tools
             .lock()
             .map_err(|_| "tool_host_unavailable: Work permissions are unavailable".to_string())?;
         let root = tools.authorized_root(&project_id)?;
         let permission = tools.work_permission(&conversation_id, &project_id)?;
-        app.state::<Mutex<AgentExecutionManager>>()
+        let result = app
+            .state::<Mutex<AgentExecutionManager>>()
             .lock()
             .map_err(|_| "tool_host_unavailable: File executor is unavailable".to_string())?
             .resolve_change_set(
@@ -1119,7 +1122,8 @@ pub async fn resolve_pending(
                 approval,
                 &root,
                 permission.root_generation,
-            )
+            );
+        (result, root)
     };
     let result = match execution_result {
         Ok(result) => result,
@@ -1148,8 +1152,8 @@ pub async fn resolve_pending(
         let _ = app.emit("agent-change-set", change_set);
     }
     if approve {
-        let output =
-            document_publication_output(result.change_set.as_ref()).unwrap_or(result.output);
+        let output = document_publication_output(result.change_set.as_ref(), &publication_root)
+            .unwrap_or(result.output);
         resolve_core_tool(app, &operation_id, true, output, None).await
     } else {
         reject_core_tool(app, &operation_id, result.output).await

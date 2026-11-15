@@ -164,6 +164,43 @@ test('background execution keeps progress visible without manual waiting control
   await expect(card).toHaveCount(0);
 });
 
+test('completed document task retains verified scope and reported gaps', async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  await page.evaluate(() => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === 'execution_request') {
+        if (args.action === 'items') return { items: [{ source_id: 'doc', target_id: 'p-2', outcome: 'gap',
+          result: { gaps: ['Equipment parameters are missing'] } }], total: 1, next_offset: null };
+        return { task: structuredClone(window.finalTask ?? null) };
+      }
+      const result = await original(command, args);
+      if (command === 'start_model_run' && result.task) {
+        result.task.execution_task_id = 'final-task';
+        window.intentTasks.at(-1).execution_task_id = 'final-task';
+        window.finalTask = { id: 'final-task', intent_task_id: result.task.id, revision: 0, attempt: 2,
+          sequence: 1, status: 'running', stage: 'goal_verification', auto_recoveries: 0,
+          created_at: 1, updated_at: 2, elapsed_seconds: 100, can_cancel: true,
+          current_stage: { details: { stage: 'goal_verification' } },
+          plan: { task_id: 'final-task', revision: 1, goal: 'Review the whole source', steps: [], success_criteria: [] },
+          coverage: { ready: true, total: 2, completed: 1, gaps: 1, remaining: 0 } };
+      }
+      return result;
+    };
+  });
+  await send(page, editor);
+  const card = page.getByRole('region', { name: 'Task execution status' });
+  await expect(card).toContainText('Checking task completion');
+  await page.evaluate(() => Object.assign(window.finalTask, { status: 'completed', revision: 1, sequence: 2, can_cancel: false,
+    verification: { status: 'satisfied', summary: 'Original request and saved report verified', unmet_requirements: [] } }));
+  await expect(card).toContainText('Completed with information gaps');
+  await card.locator('summary').click();
+  await expect(card).toContainText('Review the whole source');
+  await expect(card).toContainText('Original request and saved report verified');
+  await expect(card).toContainText('Equipment parameters are missing');
+  await expect(card.getByRole('button', { name: 'Cancel task', exact: true })).toHaveCount(0);
+});
+
 test('cold local model transitions to intent recognition, clarification and actual run phases', async ({ page }) => {
   const editor = await openRecoveryChat(page, null, true);
   await send(page, editor);

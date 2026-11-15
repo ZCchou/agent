@@ -1,5 +1,7 @@
 const chat = {
   execution: {
+    completed: "Task completed", completedWithGaps: "Completed with information gaps",
+    operations: { read: "Read source", review: "Review source" },
     coverage: "{{total}} items · {{completed}} processed · {{gaps}} with gaps · {{remaining}} remaining",
     moreItems: "More source positions",
     waitingInput: "Waiting for your answer",
@@ -10,7 +12,7 @@ const chat = {
     recoveries: "{{count}} consecutive automatic recoveries", retained: "The task and completed progress are saved.",
     takingLonger: "Processing is taking longer. Execution progress is being monitored.",
     continue: "Continue waiting", retry: "Retry", retryRun: "Keep draft and regenerate", cancel: "Cancel task", settings: "Adjust model settings",
-    stages: { tool_verification: "Checking model tool support",
+    stages: { goal_verification: "Checking task completion", model_queue: "Waiting for model resources", tool_verification: "Checking model tool support",
       processing: "Processing task", rag_retrieval: "Searching project libraries", rag_embed: "Embedding search query",
       rag_rerank: "Reranking candidates", integrity_verification: "Verifying model files", worker_starting: "Starting inference worker",
       model_ready: "Model is ready", tokenization: "Tokenizing", preparing_rerank: "Preparing reranking",

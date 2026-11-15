@@ -113,7 +113,7 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
     requirement = intent.get('rag_requirement', 'uncertain')
     result['source'] = 'advisor'
     result['semantic_requirement'] = requirement
-    protected = (decision['reason'] in {'user_required', 'skill_required', 'template_fill'}
+    protected = (decision['reason'] in {'user_required', 'skill_required'}
                  or decision.get('reuse_evidence') or decision.get('continued_run_id'))
     if not protected:
         if requirement == 'uncertain':
