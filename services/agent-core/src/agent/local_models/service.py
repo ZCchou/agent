@@ -495,6 +495,10 @@ class LocalModelService:
         runtime = self._runtime
         sampler = None
         if activity is not None and runtime is not None and runtime.matches(provider_id):
+            activity.observe('main_model')
+            phase = activity.stage if activity.stage in {'intent_identification', 'tool_verification'} else 'model_output'
+            activity.resource(stage=phase, model_id=runtime.model_id, model_name=runtime.profile.name,
+                              model_role='main_model', device=runtime.backend)
             sampler = asyncio.create_task(watch_process(runtime.process, activity, heartbeat=runtime.heartbeat, job=runtime.job))
         try:
             yield

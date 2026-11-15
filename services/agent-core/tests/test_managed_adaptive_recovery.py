@@ -72,6 +72,37 @@ def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), parti
     return fake_runtime(tmp_path / 'runtime'), counter
 
 
+def test_main_invocation_replaces_auxiliary_loading_progress(tmp_path, monkeypatch):
+    async def exercise():
+        async def emit(event):
+            pass
+
+        runtime, _ = recovering_runtime(tmp_path, monkeypatch, failures=0)
+        service = ChatRunService(CoreRepository(tmp_path / 'core.db'), emit)
+        service.local_models.runtime_root = runtime
+        model = await imported(service.local_models, tmp_path / 'model.gguf')
+        await finish(service.local_models, await service.local_models.handle('runtime.load', {'model_id': model['id']}))
+        root = service.execution_monitor.start_task(run_id='progress-handoff')
+
+        async def invoke(activity):
+            activity.observe('rag_worker')
+            activity.resource(stage='model_loading', device='cuda', model_name='Auxiliary', model_role='embedding')
+            async with service.local_models.observe_activity(model['provider_profile_id']):
+                details = service.execution_monitor.get_task(root['id'])['current_stage']['details']
+                assert details['stage'] == 'model_output'
+                assert details['model_name'] == model['name']
+                assert details['model_role'] == 'main_model'
+                assert details['device'] == 'cpu'
+                assert details['observation_source'] == 'main_model'
+
+        try:
+            await service.execution_monitor.execute_stage(root['id'], 'document_review', invoke)
+        finally:
+            await service.shutdown()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize('failures', [1, 3])
 def test_managed_engine_death_before_first_output_reloads_and_redispatches_normal_run(tmp_path, monkeypatch, failures):
     async def exercise():
