@@ -92,8 +92,14 @@ test('background execution keeps progress visible without manual waiting control
     window.executionControls = [];
     window.__TAURI_INTERNALS__.invoke = async (command, args) => {
       if (command === 'execution_request') {
+        if (args.action === 'items') return { items: [{ source_id: 'source', target_id: 'p-7', outcome: 'gap',
+          result: { summary: 'Review retained', gaps: ['Controlled revision is missing'] } }], total: 1, next_offset: null };
         if (args.action !== 'status') {
           window.executionControls.push(structuredClone(args));
+          if (args.action === 'respond') {
+            window.executionRoot.answered_question_ids = [args.params.question_id];
+            window.executionRoot.pending_question = null;
+          }
           window.executionRoot.revision += 1;
           window.executionRoot.sequence += 1;
           window.executionRoot.status = args.action === 'cancel' ? 'cancelled' : 'running';
@@ -110,6 +116,13 @@ test('background execution keeps progress visible without manual waiting control
           revision: 1, attempt: 1, sequence: 1, status: 'running', stage: 'rag_retrieval', auto_recoveries: 0,
           created_at: 100, updated_at: 500, elapsed_seconds: 400, seconds_since_progress: 2,
           current_stage: { completed: 18, total: 40, details: { stage: 'reranking', device: 'cpu', model_name: 'Fixture reranker' } } };
+        window.executionRoot.plan = { task_id: 'execution-root', revision: 2, goal: 'Review all existing template content',
+          request: { attachments: [{ id: 'source', name: 'environment-template.docx' }] },
+          source_scopes: [{ source_id: 'source', operation: 'review', scope: 'full', target_ids: [], reason: '' }],
+          deliverables: [{ path: 'review.md' }],
+          steps: [{ id: 'read', description: 'Read original source positions', depends_on: [] },
+            { id: 'review', description: 'Review the registered positions', depends_on: ['read'] }], success_criteria: ['Coverage verified'] };
+        window.executionRoot.coverage = { ready: false, total: 1689, completed: 200, gaps: 89, remaining: 1400 };
         window.intentTasks.at(-1).remaining_seconds = 0;
       }
       return result;
@@ -121,12 +134,32 @@ test('background execution keeps progress visible without manual waiting control
   await expect(card).toContainText('Running for 400 seconds');
   await expect(card).toContainText('Fixture reranker');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await card.locator('summary').click();
+  await expect(card).toContainText('Review all existing template content');
+  await expect(card).toContainText('environment-template.docx · Entire source');
+  await expect(card).toContainText('Planned file review.md');
+  await expect(card).toContainText('1689 items');
+  await expect(card).toContainText('Controlled revision is missing');
   await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 2,
     error_code: 'execution_activity_uncertain' }));
   await expect(card).toContainText('Reranking candidates');
   await expect(card.getByRole('button', { name: 'Continue waiting', exact: true })).toHaveCount(0);
   await expect(card.getByRole('button', { name: 'Recover current stage', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => window.executionControls)).toEqual([]);
+  await page.evaluate(() => Object.assign(window.executionRoot, { sequence: 3,
+    pending_question: { id: 'run-question', revision: 0, clarification: { summary: 'Confirm the equipment',
+      questions: [{ id: 'equipment', question: 'Which equipment should be reviewed?', options: ['Equipment A', 'Equipment B'] }] } } }));
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(card).toContainText('Waiting for your answer');
+  await dialog.getByRole('radio', { name: 'Equipment A', exact: true }).check();
+  await dialog.getByRole('textbox').fill('Custom equipment C');
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await card.getByRole('button', { name: 'Continue providing information' }).click();
+  await expect(dialog.getByRole('textbox')).toHaveValue('Custom equipment C');
+  await dialog.getByRole('button', { name: 'Confirm and continue', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await page.evaluate(() => window.executionControls[0].params.answers)).toEqual({ equipment: 'Custom equipment C' });
   await card.getByRole('button', { name: 'Cancel task', exact: true }).click();
   await expect(card).toHaveCount(0);
 });

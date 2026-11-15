@@ -956,6 +956,7 @@ impl AgentExecutionManager {
         Ok(json!({
             "path": relative,
             "offset": offset,
+            "byte_size": text.len(),
             "content": &text[offset..end],
             "next_offset": if end < text.len() { Some(end) } else { None },
             "sha256": format!("{:x}", Sha256::digest(text.as_bytes())),

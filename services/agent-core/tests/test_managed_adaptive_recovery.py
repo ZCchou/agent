@@ -8,7 +8,7 @@ from test_local_models_catalog import finish
 from test_local_models_runtime import fake_runtime, imported
 
 
-def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), partial_crash=False):
+def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), partial_crash=False, invalid_review=False):
     import test_local_models_runtime as fixtures
     script = fixtures._SERVER
     start = script.index('    def do_POST(self):')
@@ -68,6 +68,8 @@ def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), parti
         post = post.replace("'finish_reason': 'stop'", "'finish_reason': None")
         post = post.replace("self.send_header('Content-Length', str(len(data)))", "self.send_header('Transfer-Encoding', 'chunked')")
         post = post.replace('self.wfile.write(data)', "self.wfile.write((format(len(data), 'x') + '\\r\\n').encode() + data + b'\\r\\n')")
+    if invalid_review:
+        post = post.replace("for field in value['batch']['fields']]", "for field in []]")
     monkeypatch.setattr(fixtures, '_SERVER', script[:start] + post + script[end:])
     return fake_runtime(tmp_path / 'runtime'), counter
 
@@ -265,7 +267,8 @@ def test_managed_engine_death_during_intent_restarts_same_root_before_run(tmp_pa
     asyncio.run(exercise())
 
 
-def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_root(tmp_path, monkeypatch):
+@pytest.mark.parametrize('invalid_review', [False, True])
+def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_root(tmp_path, monkeypatch, invalid_review):
     import io
     from docx import Document
     from agent.rag.grounding import RagGrounding
@@ -279,7 +282,7 @@ def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_ro
         async def emit(value):
             events.append(value)
 
-        runtime, counter = recovering_runtime(tmp_path, monkeypatch, failures=0, crash_requests=[2])
+        runtime, counter = recovering_runtime(tmp_path, monkeypatch, failures=0, crash_requests=[2], invalid_review=invalid_review)
         core = CoreRepository(tmp_path / 'core.db')
         project = core.create_project('Review', 'work')
         conversation = core.create_conversation('project_work', 'Review', project_id=project['id'])
@@ -322,11 +325,20 @@ def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_ro
                 'attachments': [attachment], 'idempotency_key': 'recover-review'})
             await asyncio.wait_for(service.run_tasks[response['run']['id']], 30)
             run = core.get_model_run(response['run']['id'])
+            if invalid_review:
+                assert run['status'] == 'failed'
+                assert run['error_code'] == 'task_incomplete'
+                snapshot = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
+                assert snapshot['coverage']['remaining'] == 37
+                with core._connect() as connection:
+                    assert connection.execute("SELECT count(*) FROM document_artifacts WHERE run_id=? AND kind='markdown'",
+                        (run['id'],)).fetchone()[0] == 1
+                return
             assert run['status'] == 'completed', (run['error_code'], run['error_message'])
             batches = json.loads(counter.with_name('batches.json').read_text())
             assert len(batches) >= 5 and batches.count(batches[0]) == 1
             assert batches[1] == batches[2]
-            assert len(set(target for batch in batches for target in batch)) == 36
+            assert len(set(target for batch in batches for target in batch)) == 37
             activity = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
             assert activity['id'] == response['execution_task_id'] and activity['status'] == 'completed'
             with core._connect() as connection:

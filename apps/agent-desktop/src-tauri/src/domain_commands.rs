@@ -738,7 +738,7 @@ pub async fn execution_request(
 ) -> Result<Value, String> {
     if !matches!(
         action.as_str(),
-        "status" | "continue" | "retry" | "cancel" | "diagnostics"
+        "status" | "continue" | "retry" | "cancel" | "diagnostics" | "plan" | "items" | "respond"
     ) {
         return Err("execution_action_invalid".into());
     }
@@ -1497,9 +1497,9 @@ mod routing_serialization_tests {
             crate::core_bridge::PROTOCOL_VERSION
         );
         assert_eq!(contract["settings_schema_version"], 20);
-        assert_eq!(contract["core_schema_version"], 33);
+        assert_eq!(contract["core_schema_version"], 34);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema33-agent-unified-v1");
+        assert_eq!(contract["build_id"], "schema34-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

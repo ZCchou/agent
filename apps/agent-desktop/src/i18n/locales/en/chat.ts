@@ -1,5 +1,10 @@
 const chat = {
   execution: {
+    coverage: "{{total}} items · {{completed}} processed · {{gaps}} with gaps · {{remaining}} remaining",
+    moreItems: "More source positions",
+    waitingInput: "Waiting for your answer",
+    scopes: { full: "Entire source", selected: "Selected positions", metadata: "File metadata", excluded: "Excluded from this task" },
+    deliverable: "Planned file {{path}}",
     title: "Task execution status", needsAttention: "Task needs attention", count: "Completed {{completed}}/{{total}}",
     elapsed: "Running for {{seconds}} seconds", lastProgress: "Last progress {{seconds}} seconds ago", details: "View details",
     recoveries: "{{count}} consecutive automatic recoveries", retained: "The task and completed progress are saved.",
@@ -15,7 +20,7 @@ const chat = {
       loading: "Loading model", embedding: "Embedding search query", reranking: "Reranking candidates",
       tokenizing: "Tokenizing", verifying: "Verifying model files", waiting_resource: "Waiting for device resources",
       parsing: "Reading attachment", ocr: "Recognizing image text", generating: "Generating response",
-      template_review: "Reviewing template", document_review: "Reviewing document", validation: "Validating results",
+      template_review: "Reviewing template", document_review: "Reviewing document", document_consistency: "Checking document consistency", validation: "Validating results",
     },
     errors: {
       execution_activity_uncertain: "Execution progress needs confirmation. The running task is retained.",

@@ -4,8 +4,10 @@ import { Activity, RotateCcw, Settings, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import type { ModelRunEvent } from "../../types/domain";
 import { Button } from "../../components/ui/Button";
-import { acceptExecutionSnapshot, controlExecutionTask, getExecutionTask,
-  type ExecutionOwner, type ExecutionTaskSnapshot } from "../../services/tauri/executionTasks";
+import { IntentTaskDialog } from "./IntentTaskDialog";
+import type { IntentTask } from "../../services/tauri/intentTasks";
+import { acceptExecutionSnapshot, controlExecutionTask, getExecutionTask, getTaskItems, respondTaskQuestion,
+  type ExecutionOwner, type ExecutionTaskSnapshot, type TaskItemsPage } from "../../services/tauri/executionTasks";
 
 export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onRunRetry }: {
   owner: ExecutionOwner | null; enabled: boolean; onSettings(): void;
@@ -16,11 +18,13 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pollEpoch, setPollEpoch] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const [items, setItems] = useState<TaskItemsPage | null>(null);
   const ownerKey = owner ? `${owner.kind}:${owner.id}` : "";
   const currentOwnerKey = useRef(ownerKey);
   currentOwnerKey.current = ownerKey;
   useEffect(() => {
-    setTask(null); setError(""); setBusy(false);
+    setTask(null); setError(""); setBusy(false); setExpanded(false); setItems(null);
     if (!enabled || !owner || !("__TAURI_INTERNALS__" in window)) return;
     let disposed = false;
     let latest: ExecutionTaskSnapshot | null = null;
@@ -49,6 +53,13 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     void poll();
     return () => { disposed = true; if (timer) clearTimeout(timer); unlisten?.(); };
   }, [owner?.kind, owner?.id, enabled, pollEpoch]);
+  useEffect(() => {
+    if (!expanded || !task?.id) return;
+    let disposed = false;
+    void getTaskItems(task.id).then(page => { if (!disposed) setItems(page); })
+      .catch(() => { if (!disposed) setItems(null); });
+    return () => { disposed = true; };
+  }, [expanded, task?.id, task?.coverage?.completed, task?.coverage?.gaps, task?.coverage?.remaining]);
   if (!enabled || !owner || !task || !acceptExecutionSnapshot(null, task, owner)
     || task.status === "completed" || task.status === "cancelled") return null;
   const details = task.current_stage?.details ?? {};
@@ -57,9 +68,16 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
   const paused = task.status === "interrupted" || task.status === "failed";
   const stage = typeof details.stage === "string" ? details.stage
     : typeof details.phase === "string" ? details.phase : task.stage ?? "preparingRequest";
-  const label = t(`execution.stages.${stage}`, {
+  const label = task.pending_question ? t("execution.waitingInput") : t(`execution.stages.${stage}`, {
     defaultValue: t(`routing.status.${stage}`, { defaultValue: t("execution.stages.processing") }),
   });
+  const clarificationTask: IntentTask | undefined = task.pending_question ? {
+    id: task.pending_question.id, scope: `execution:${task.id}`, revision: task.pending_question.revision,
+    status: "waiting_user", request: {}, attempts: task.attempt, elapsed_seconds: task.elapsed_seconds ?? 0,
+    remaining_seconds: null, timeout_seconds: 0, budget_seconds: null, budget_remaining_seconds: null,
+    can_extend: false, can_retry: false, clarification: task.pending_question.clarification, error: null, result: null,
+    execution_task_id: task.id,
+  } : undefined;
   async function act(action: "continue" | "retry" | "cancel" | "run_retry") {
     if (!task || busy) return;
     const taskId = task.id;
@@ -90,11 +108,31 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
       {typeof task.elapsed_seconds === "number" ? <span>{t("execution.elapsed", { seconds: Math.floor(task.elapsed_seconds) })}</span> : null}
       {typeof task.seconds_since_progress === "number" ? <span>{t("execution.lastProgress", { seconds: Math.floor(task.seconds_since_progress) })}</span> : null}
     </div>
-    {task.status === "running" && (task.elapsed_seconds ?? 0) >= (task.policy?.long_running_notice_seconds ?? 90)
+    {task.status === "running" && !task.pending_question && (task.elapsed_seconds ?? 0) >= (task.policy?.long_running_notice_seconds ?? 90)
       ? <p>{t("execution.takingLonger")}</p> : null}
     {paused ? <p>{t("execution.retained")}</p> : null}
     {paused && typeof details.reason === "string" ? <p>{details.reason}</p> : null}
-    <details><summary>{t("execution.details")}</summary>
+    <details open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary>{t("execution.details")}</summary>
+      {task.plan ? <>
+        <p>{task.plan.goal}</p>
+        <ol>{task.plan.steps.map(step => <li key={step.id}>{step.description}</li>)}</ol>
+        {task.plan.source_scopes?.map(source => <p key={source.source_id}>
+          {task.plan?.request?.attachments?.find(item => item.id === source.source_id)?.name ?? source.source_id}
+          {" · "}{t(`execution.scopes.${source.scope}`)}{source.reason ? ` · ${source.reason}` : ""}
+        </p>)}
+        {task.plan.deliverables?.map(output => <p key={output.path}>{t("execution.deliverable", { path: output.path })}</p>)}
+      </> : null}
+      {task.coverage && task.coverage.total > 0 ? <p>{t("execution.coverage", { ...task.coverage })}</p> : null}
+      {items?.items.filter(item => item.outcome === "gap" || item.outcome === "failed").map(item => <p key={`${item.source_id}:${item.target_id}`}>
+        {item.target_id} · {[...(item.result?.gaps ?? []), ...(item.result?.version_issues ?? [])].join(" · ") || item.result?.summary}
+        {item.result?.error_code ? ` · ${item.result.error_code}` : ""}
+      </p>)}
+      {items?.next_offset != null ? <Button onClick={() => {
+        const key = currentOwnerKey.current;
+        void getTaskItems(task.id, items.next_offset!).then(page => {
+          if (currentOwnerKey.current === key) setItems(previous => ({ ...page, items: [...(previous?.items ?? []), ...page.items] }));
+        }).catch(value => { if (currentOwnerKey.current === key) setError(String(value)); });
+      }}>{t("execution.moreItems")}</Button> : null}
       <p>{t("execution.recoveries", { count: task.auto_recoveries })}</p>
       {task.error_code ? <p>{t(`execution.errors.${task.error_code}`, { defaultValue: task.error_code })}</p> : null}
     </details>
@@ -106,5 +144,14 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
       {task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
     </div>
     {error ? <p role="alert">{error}</p> : null}
+    {clarificationTask ? <IntentTaskDialog scope={clarificationTask.scope} enabled={enabled}
+      externalTask={clarificationTask} onModelSettings={onSettings} onAccepted={async () => false}
+      onRespond={async answers => {
+        const actionOwner = ownerKey;
+        const next = await respondTaskQuestion(task, answers);
+        if (currentOwnerKey.current === actionOwner) {
+          setTask(current => current && owner && acceptExecutionSnapshot(current, next, owner) ? next : current);
+        }
+      }} /> : null}
   </section>;
 }

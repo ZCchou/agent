@@ -5,6 +5,16 @@ from typing import Any
 
 
 REASONS = {
+    'task_question_ended': '该澄清问题已结束，请查看当前任务',
+    'task_question_changed': '澄清问题已更新，请回答当前问题',
+    'task_incomplete': '任务仍有未处理位置，已完成结果已保存',
+    'task_plan_invalid': '任务计划无效，请查看步骤和依赖',
+    'task_plan_revision_changed': '任务计划已更新，请使用最新修订',
+    'task_plan_inactive': '当前任务已结束',
+    'task_plan_stale': '任务执行身份已变化，旧结果已丢弃',
+    'task_source_changed': '任务资料或位置身份已变化，需要重新读取',
+    'task_result_invalid': '任务结果尚未通过校验',
+    'document_target_invalid': '审阅位置不属于当前文档或存在重复',
     'model_recovery_identity_changed': '恢复期间模型、设备或配置已变化，请核对后重新发送',
     'rag_rerank_timeout': '资料重排序等待已达到配置时限，请查看检索诊断',
     'rag_worker_crash': '检索进程已退出，请查看辅助模型与设备诊断',

@@ -1,5 +1,10 @@
 const chat = {
   execution: {
+    coverage: "处理对象共 {{total}} 项 · 已处理 {{completed}} 项 · 资料缺项 {{gaps}} 项 · 待处理 {{remaining}} 项",
+    moreItems: "查看更多位置",
+    waitingInput: "等待补充信息",
+    scopes: { full: "全文", selected: "指定位置", metadata: "文件信息", excluded: "未纳入本次处理" },
+    deliverable: "计划文件 {{path}}",
     title: "任务运行状态", needsAttention: "任务需要处理", count: "已完成 {{completed}}/{{total}}",
     elapsed: "已运行 {{seconds}} 秒", lastProgress: "最近进展于 {{seconds}} 秒前", details: "查看详情",
     recoveries: "连续自动恢复 {{count}} 次", retained: "任务和已完成进度已保留，请选择后续操作。",
@@ -15,7 +20,7 @@ const chat = {
       loading: "正在加载模型", embedding: "正在生成检索向量", reranking: "正在重排序",
       tokenizing: "正在分词", verifying: "正在校验模型文件", waiting_resource: "正在等待设备资源",
       parsing: "正在解析附件", ocr: "正在识别图片文字", generating: "正在生成回复",
-      template_review: "正在审阅模板", document_review: "正在审阅文档", validation: "正在校验结果",
+      template_review: "正在审阅模板", document_review: "正在审阅文档", document_consistency: "正在核对全文一致性", validation: "正在校验结果",
     },
     errors: {
       execution_activity_uncertain: "暂时无法确认执行进展，已保留当前任务。",

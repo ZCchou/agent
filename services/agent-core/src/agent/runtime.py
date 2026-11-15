@@ -111,6 +111,10 @@ class ChatRunService:
         self.execution_monitor = ExecutionMonitor(repository, on_event=self._execution_activity)
         self.execution_monitor.interrupt_active()
         self.execution_monitor.cleanup()
+        from agent.execution.task_plans import TaskPlans
+        self.task_plans = TaskPlans(repository)
+        from agent.execution.task_input import TaskInput
+        self.task_input = TaskInput(repository, lambda task_id: self.execution_monitor._emit(task_id, 'clarification'))
         self.skills = SkillRegistry(repository.database_path.parent / "skills.json")
         self.rag = RagService(repository)
         self.rag.execution_monitor = self.execution_monitor
@@ -344,6 +348,10 @@ class ChatRunService:
 
     def _execution_snapshot(self, root):
         result = {**root, 'execution_task_id': root['id']}
+        result['plan'] = self.task_plans.get(root['id'])
+        result['coverage'] = self.task_plans.completion(root['id'])
+        result['pending_question'] = self.task_input.pending(root['id'])
+        result['answered_question_ids'] = self.task_input.answered_ids(root['id'])
         if root.get('intent_task_id') and not root['intent_task_id'].startswith('request:'):
             with self.repository._connect() as connection:
                 intent = connection.execute('SELECT state_json FROM intent_tasks WHERE id=?',
@@ -399,7 +407,7 @@ class ChatRunService:
                 rows = connection.execute('''SELECT attempt,revision,kind,recorded_at,payload_json
                     FROM execution_wait_activity WHERE task_id=? ORDER BY id DESC LIMIT 1000''', (identity,)).fetchall()
             from agent.protocol import CORE_VERSION, BUILD_ID
-            return {'version': CORE_VERSION, 'build_id': BUILD_ID, 'task': task,
+            return {'version': CORE_VERSION, 'build_id': BUILD_ID, 'task': self._execution_snapshot(task),
                 'activity': [{**{key: row[key] for key in ('attempt', 'revision', 'kind', 'recorded_at')},
                     'payload': json.loads(row['payload_json'])} for row in reversed(rows)],
                 'models': [{key: model.get(key) for key in ('id', 'name', 'device', 'context_length', 'gpu_layers', 'status')}
@@ -407,6 +415,13 @@ class ChatRunService:
         root = self.execution_status(params)
         if action == 'status':
             return {'task': root}
+        if action == 'plan':
+            return {'plan': root['plan'], 'coverage': root['coverage']}
+        if action == 'items':
+            return self.task_plans.items(root['id'], offset=params.get('offset', 0), limit=params.get('limit', 100))
+        if action == 'respond':
+            self.task_input.respond(root['id'], params.get('question_id'), params.get('question_revision'), params.get('answers'))
+            return {'task': self.execution_status({'task_id': root['id']})}
         if action == 'retry' and root['status'] in {'failed', 'interrupted'}:
             if str(root.get('run_id') or '').startswith('local_model:'):
                 self.local_models.validate_execution_resume(root['id'])
@@ -1120,6 +1135,7 @@ class ChatRunService:
         if current_task_id.get() is not None:
             identity = current_task_id.get()
             try:
+                self.task_plans.create(identity, params)
                 return await self._start_monitored(params)
             finally:
                 self.local_models.release_run('execution:' + identity)
@@ -1133,6 +1149,7 @@ class ChatRunService:
                 project_id=params.get('project_id'), policy=self.routing_preferences.get('execution_wait'))
         with associate(self.execution_monitor, root['id']):
             try:
+                self.task_plans.create(root['id'], params)
                 return await self._start_monitored(params)
             except BaseException as error:
                 self.execution_monitor.finish_task(root['id'],
@@ -1537,12 +1554,30 @@ class ChatRunService:
         semantic_rag = (self.offline or rag_local_required or profile_id.startswith('managed:')) and rag_decision['reason'] != 'greeting'
         document_attached = any(artifact.get('kind') == 'document.source'
             for attachment in attachments for artifact in attachment.get('artifacts', []))
+        local_agent = requested_kind == 'project_work' and profile.is_local and rag_decision['reason'] != 'greeting'
+        if local_agent and profile_id.startswith('managed:'):
+            await self._ensure_tool_capability(profile_id, model_id)
+            profile = self._profile(profile_id)
+        agent_loop = local_agent and (profile.model_tool_modes or {}).get(model_id) in {'native', 'structured'}
+        if agent_loop:
+            requirements = replace(requirements, tools='available', files='available')
+            candidates = self._execution_candidates(conversation, automatic_only=selection_mode == 'automatic')
+            preliminary_plan = self.execution_coordinator.plan(PlanningRequest(
+                selection_mode=selection_mode, routing_preset=routing_preset,
+                requirements=requirements, candidates=tuple(candidates), budget=self._execution_budget(),
+                fixed_key=fixed_key, coordinator_key=coordinator_key, global_default_key=global_default_key,
+                intent_analysis_needed=False, degraded_capabilities=degraded_capabilities))
+            rag_decision['agent_loop'] = True
+            resolved_intent_metadata['agent_loop'] = True
+            if profile_id.startswith('managed:'):
+                resolved_intent_metadata['tool_verification'] = self.tool_verification.get(
+                    self.local_models.tool_verification_identity(profile_id))
         advisor_needed = document_attached or semantic_rag or selection_mode == "automatic" and any((
             requested_kind == "project_work" and requirements.files == "available",
             requirements.web == "optional",
             requirements.reasoning == "standard" and needs_reasoning_intent_analysis(content),
         ))
-        if advisor_needed:
+        if advisor_needed and not agent_loop:
             intent_started = time.monotonic()
             log_event(self.logger or logging.getLogger(__name__), logging.INFO,
                 'intent_analysis_started', 'Local task identification started',
@@ -2442,6 +2477,13 @@ class ChatRunService:
             event_provider_id = run["provider_profile_id"]
             event_model_id = run["model_id"]
             current_conversation = self.repository.get_run_conversation(run["id"])
+            business_root = self.execution_monitor.start_task(run_id=run_id)
+            original_message = next(item for item in current_conversation['messages'] if item['id'] == run['user_message_id'])
+            if self.task_plans.get(business_root['id']) is None:
+                self.task_plans.create(business_root['id'], original_message)
+            pending_question = self.task_input.inherit(business_root['id'], run)
+            if pending_question:
+                await self.task_input.wait(business_root['id'], pending_question['id'])
             self._validate_planned_web_permission(current_conversation, run)
             current_user = next(
                 (message for message in current_conversation["messages"]
@@ -2463,6 +2505,9 @@ class ChatRunService:
                 and 'template' in decision.get('attachment_roles', {}).values() and not decision.get('template_review'))
             template_review_task = bool(decision.get('template_review'))
             run['_template_fill_task'] = template_fill_task
+            run['_template_review_task'] = template_review_task
+            run['_agent_task'] = bool(decision.get('agent_loop'))
+            run['_defer_retrieval'] = run['_agent_task'] and bool(current_user.get('attachments'))
             async def rag_progress(phase):
                 observation = phase if isinstance(phase, dict) else {'stage': phase}
                 phase_name = observation.get('stage', 'retrieving')
@@ -2576,10 +2621,14 @@ class ChatRunService:
             if self._rag_requires_local(self.repository.get_run_conversation(run_id)) or run_id in self.rag_grounding.runs:
                 profile = require_local_profile(profile)
             provider = self._provider(profile)
-            assembled = None if template_fill_task or template_review_task else await self._prepare_context(
+            composable_document = bool((template_fill_task or template_review_task) and execution_step
+                and 'function_tools' in execution_step.get('capability_signature', [])
+                and (profile.model_tool_modes or {}).get(run['model_id']) in {'native', 'structured'})
+            application_document = (template_fill_task or template_review_task) and not composable_document
+            assembled = None if application_document else await self._prepare_context(
                 run, profile, provider, round_no=0, invocation_target=execution_step,
             )
-            if assembled is None and not template_fill_task and not template_review_task:
+            if assembled is None and not application_document:
                 if execution_step is not None:
                     self.execution_repository.transition_step(
                         execution_step["id"], {"running"}, "interrupted", "waiting_context",
@@ -2607,6 +2656,8 @@ class ChatRunService:
                 template_available = 'template' in (run.get('rag_decision') or {}).get('attachment_roles', {}).values()
                 if document_request or template_available or re.search(r'模板|\.docx\b', (current_user or {}).get('content', ''), re.I):
                     allowed_tools.extend(DOCUMENT_TOOLS if document_request else DOCUMENT_TOOLS[:1])
+                if template_review_task:
+                    allowed_tools.extend(('document.inspect_template', 'document.review_targets', 'document.fill_template', 'document.export'))
             if run.get("web_search_route") == "host_tool" and tool_mode != "text_only" \
                     and route_allows_tools:
                 allowed_tools.extend(("web.search", "web.open"))
@@ -2625,6 +2676,9 @@ class ChatRunService:
             brief_greeting = (run.get('rag_decision') or {}).get('reason') == 'greeting'
             if brief_greeting:
                 allowed_tools = []
+            elif route_allows_tools and tool_mode != 'text_only':
+                from agent.execution.task_tools import TASK_TOOLS
+                allowed_tools.extend(TASK_TOOLS)
             tools_enabled = bool(allowed_tools)
             log_event(self.logger or logging.getLogger(__name__), logging.INFO,
                 'run_tools_resolved', 'Local tools resolved for run', run_id=run_id,
@@ -2642,7 +2696,7 @@ class ChatRunService:
                 attempt_id = attempt["id"]
                 tool_budget_attempt_ids.append(attempt_id)
                 content = ""
-                if template_review_task:
+                if template_review_task and not composable_document:
                     selected = set(decision.get('read_attachment_ids', []))
                     for item in (execution_plan or {}).get('resolved_intent', {}).get('attachment_selection', []):
                         if item.get('source_attachment_id') in selected:
@@ -2653,7 +2707,7 @@ class ChatRunService:
                         raise CoreDataError('document_template_required', '请为全篇审阅选择一份 DOCX 模板。')
                     content = await self._review_template_planned(run, attempt_id, templates[0], current_user['content'])
                     break
-                if template_fill_task:
+                if template_fill_task and not composable_document:
                     content = '模板填写草稿已生成，待补充内容与复核事项见文档。'
                     break
                 try:
@@ -2872,7 +2926,14 @@ class ChatRunService:
                 content += notice
                 await self._emit(run_id, "run.chunk", {"delta": notice})
             if run_id in self.rag_grounding.runs:
-                if not template_fill_task and not template_review_task:
+                if run.get('_review_reports'):
+                    content = '\n\n'.join(run['_review_reports'])
+                    with self.repository._connect() as connection:
+                        paths = connection.execute("SELECT output_path FROM document_artifacts WHERE run_id=? AND status='published'", (run_id,)).fetchall()
+                    content += ''.join('\n\n[打开文件](<' + row['output_path'] + '>)' for row in paths)
+                elif run.get('_evidence_gap'):
+                    content = '资料缺口。' + run['_evidence_gap'] + '\n\n相关专业内容待补充有效依据后核对。'
+                elif not application_document:
                     content = await self._finalize_rag_answer(
                         run, attempt_id, provider, generation_messages, content,
                         execution_plan, execution_step, attempt["attempt_number"],
@@ -3248,8 +3309,16 @@ class ChatRunService:
             await self._emit(run_id, 'run.document_processing', {'attachment_id': attachment['id'], **status})
         result = await self.document_attachments.read(attachment,
             **{key: value for key, value in arguments.items() if key != 'attachment_id'},
-            max_characters=max_characters, progress=progress)
+            max_characters=max_characters, progress=progress, include_coverage=True)
+        coverage = result.pop('_coverage')
         artifact = result.pop('text_artifact')
+        root = self.execution_monitor.start_task(run_id=run_id)
+        source_id = 'read:' + attachment['id']
+        self.task_plans.register_source(root['id'], attachment['id'], source_id, artifact['sha256'],
+            coverage['items'], operation='read', fence=(root['revision'], root['attempt']))
+        self.task_plans.record_results(root['id'], source_id, artifact['sha256'], [
+            {'target_id': key, 'status': 'reviewed'} for key in coverage['returned_ids']],
+            fence=(root['revision'], root['attempt']))
         result.update(text_artifact_id=artifact['artifact_id'], text_artifact_sha256=artifact['sha256'])
         with self.repository._connect() as connection:
             state = connection.execute('SELECT status FROM model_runs WHERE id=?', (run_id,)).fetchone()
@@ -3417,7 +3486,7 @@ class ChatRunService:
             self._validate_context_dispatch_authority(run, profile, invocation_target)
             raise
         self._validate_context_dispatch_authority(run, profile, invocation_target)
-        if run["id"] in self.rag_grounding.runs:
+        if run["id"] in self.rag_grounding.runs and self.rag_grounding.evidence(run['id']):
             self.rag_grounding.admit(run["id"], [item.source.source_id for item in packed.items
                 if item.source.source_type == "rag_chunk" and item.included],
                 budget=min(6000, int((packed.body_input_limit or packed.input_hard_limit or packed.input_target) * 0.45)))
@@ -4968,6 +5037,29 @@ class ChatRunService:
         native_operations: dict[str, str] = {}
         native_continuation_rounds = 0
         document_read_rounds = 0
+        completion_corrections = 0
+        discovered_tools = set()
+        discoverable_tools = self._discoverable_tools(run_id, allowed_tools) if tools_enabled else set()
+        root = self.execution_monitor.start_task(run_id=run_id)
+        business_plan = self.task_plans.get(root['id'])
+        if tools_enabled and business_plan is not None:
+            messages.append({'role': 'system', 'content':
+                'Continue the user task using actual tool results. Use tools.discover to obtain additional local capabilities. '
+                'For multi-step work update the business plan, then revise it after reading results. '
+                'User scope and explicit choices remain authoritative. Complete every registered target or report its specific gap. '
+                'Review results can be followed by revision and export when requested. '
+                'For airworthiness judgments obtain project evidence with rag.search and rag.read. '
+                'For DOCX review discover document.inspect_template and document.review_targets; '
+                'use their target inventory and coverage checkpoints. When asked about tools, consult tools.discover. '
+                'Before concluding attachment or file work, call task.update_plan with source_scopes for each input '
+                '(source_id, operation read/review, scope full/selected/metadata/excluded, target_ids, reason) '
+                'and deliverables (project-relative path), even when deliverables is []. '
+                'Read full means every original text position; metadata means file metadata only. '
+                'Ask essential missing information with task.request_input, then continue the same task. '
+                'Task plan revision: ' + str(business_plan['revision'])})
+            answers = self.task_input.answers(root['id'])
+            if answers:
+                messages.append({'role': 'user', 'content': '本任务已经确认的补充信息\n' + json.dumps(answers, ensure_ascii=False)})
         current = next(item for item in self.repository.get_run_conversation(run_id)['messages'] if item['id'] == run['user_message_id'])
         document_read_ids = tuple(attachment['id'] for attachment in current.get('attachments', [])
                                  if any(artifact.get('kind') == 'document.source' for artifact in attachment.get('artifacts', [])))
@@ -5040,10 +5132,9 @@ class ChatRunService:
                     )
                     if "native_web_search" in spec.capability_signature:
                         active_native_adapter = spec.adapter_id
-                    self.execution_repository.save_invocation_spec(spec)
-                    replace_snapshot(messages, render_snapshot(
+                    snapshot_options = dict(
                         budgets=self.tool_loop.budget_snapshot(run_id, attempt_id, budget_attempt_ids),
-                        host=host_observation, allowed_tools=spec.allowed_tool_names,
+                        host=host_observation,
                         signature=spec.capability_signature, max_output_tokens=spec.max_output_tokens,
                         web_used=bool(self.repository.list_web_operations(run_id)),
                         evidence_status=self.repository.get_model_run(run_id).get("web_grounding_status", "not_required"),
@@ -5060,7 +5151,25 @@ class ChatRunService:
                             "structured_correction_available": not structured_correction_used,
                             "native_search_continuations_remaining": max(0, self.native_search_executor.max_continuation_rounds-1-native_continuation_rounds),
                         },
-                    ))
+                    )
+                    replace_snapshot(messages, render_snapshot(**snapshot_options, allowed_tools=spec.allowed_tool_names))
+                    window = snapshot_options['model_details']['context_window']
+                    if tools_enabled and type(window) is int:
+                        _, _, _, input_limit = resolve_budget(context_window=window, max_output_tokens=max_output_tokens)
+                        optional = [name for name in ('skills.save', 'skills.read_resource', 'skills.load', 'terminal.run',
+                            'fs.search', 'document.fill_template', 'document.export', 'document.review_targets',
+                            'rag.read', 'fs.read', 'fs.list', 'fs.propose_changes', 'document.inspect_template',
+                            'document.read_attachment', 'rag.search') if name in allowed_tools and name not in discovered_tools]
+                        # Count the actual runtime observation before selecting schemas.
+                        while optional and estimate_tokens({'messages': messages,
+                                'tools': ToolContractRegistry.definitions(allowed_tools)}) + 128 > input_limit:
+                            removed = optional.pop(0)
+                            allowed_tools = tuple(name for name in allowed_tools if name != removed)
+                        if set(spec.allowed_tool_names) != set(allowed_tools):
+                            spec = replace(spec, allowed_tool_names=tuple(sorted(allowed_tools)),
+                                tool_schema_hash=ToolContractRegistry.schema_hash(allowed_tools))
+                            replace_snapshot(messages, render_snapshot(**snapshot_options, allowed_tools=spec.allowed_tool_names))
+                    self.execution_repository.save_invocation_spec(spec)
                     prepared = self._compile_model_request(run_id, spec, request_messages)
                     if getattr(prepared, 'input_budget', None) is None and (provider_round > 0 or response_only or skill_context_changed):
                         self.context.context_repository.save_tool_round_snapshot(
@@ -5381,12 +5490,24 @@ class ChatRunService:
             if structured:
                 visible_content = ""
                 if final_text is not None:
-                    if not buffer_output:
-                        await self._emit(run_id, "run.chunk", {"delta": final_text})
-                    return final_text
+                    turn_content = final_text
                 if structured_call is not None:
                     calls.append(structured_call)
             if not calls:
+                file_operations = any(operation['tool_name'] in {'fs.propose_changes', 'terminal.run', 'document.export'}
+                    for operation in self.tool_loop.repository.list_for_run(run_id))
+                coverage = self.task_plans.completion(root['id'], require_declared=bool(
+                    run.get('rag_decision', {}).get('agent_loop') and (document_read_ids or file_operations)))
+                if run.get('rag_decision', {}).get('agent_loop') and not coverage['ready']:
+                    if completion_corrections >= 3:
+                        raise CoreDataError('task_incomplete', '任务仍有未处理位置，已完成结果已保存。', coverage)
+                    completion_corrections += 1
+                    messages.extend([{'role': 'assistant', 'content': turn_content}, {'role': 'system',
+                        'content': 'Task completion check found ' + str(coverage['remaining']) +
+                        ' required source positions or deliverables without an outcome. '
+                        'Declare task.update_plan source_scopes and deliverables, then process every required position and publish requested files. '
+                        'Preserve completed checkpoints and report specific missing information for unsupported conclusions.'}])
+                    continue
                 if document_plan_enabled:
                     try:
                         read_plan = json.loads(turn_content)
@@ -5432,6 +5553,8 @@ class ChatRunService:
                         })
                 # Draft checkpoints retain the full transcript for recovery;
                 # only this final response round belongs in the answer body.
+                if structured and not buffer_output:
+                    await self._emit(run_id, 'run.chunk', {'delta': turn_content})
                 return turn_content
 
             if not structured and not buffer_output:
@@ -5520,6 +5643,8 @@ class ChatRunService:
                         budget_attempt_ids=budget_attempt_ids,
                     )
                 else:
+                    current_root = self.execution_monitor.get_task(root['id'])
+                    planning_fence = (current_root['revision'], current_root['attempt'])
                     if call.name == 'document.export':
                         artifact = self._validate_document_source(run_id, call.arguments['artifact_id']) if call.arguments.get('artifact_id') \
                             else self.documents.create(run_id, self._document_export_content(run_id, call.arguments['content']), call.arguments['format'])
@@ -5533,15 +5658,30 @@ class ChatRunService:
                         run_id=run_id, attempt_id=attempt_id,
                         sequence=tool_sequence, call=call,
                         budget_attempt_ids=budget_attempt_ids,
-                        local_executor=(lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in SKILL_TOOLS else (lambda call=call: self._document_tool(run_id, call, max_characters=max(256, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in DOCUMENT_TOOLS[:2] and 'path' not in call.arguments else None,
-                        async_executor=(lambda call=call: self.rag_grounding.execute(run_id, call.name, call.arguments,
+                        local_executor=(lambda call=call: self._planning_tool(run_id, call, discoverable_tools, fence=planning_fence)) if call.name in {'tools.discover', 'task.update_plan'} else (lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in SKILL_TOOLS else (lambda call=call: self._document_tool(run_id, call, max_characters=max(256, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in DOCUMENT_TOOLS[:2] and 'path' not in call.arguments else None,
+                        async_executor=(lambda call=call: self._rag_tool(run, call,
                             max_characters=max(256, self._skill_context_allowance(run_id, messages=messages,
                                 max_output_tokens=max_output_tokens)))) if call.name in {"rag.search", "rag.read"}
+                            else (lambda call=call: self._review_targets_tool(run, attempt_id, call.arguments)) if call.name == 'document.review_targets'
+                            else (lambda call=call: self._request_task_input(run_id, call.arguments)) if call.name == 'task.request_input'
                             else (lambda call=call: self._read_document_attachment(run_id, call.arguments,
                                 max_characters=max(256, self._skill_context_allowance(run_id, messages=messages,
                                     max_output_tokens=max_output_tokens)))) if call.name == 'document.read_attachment' else None,
                     )
                 tool_output = resolution.output
+                if call.name == 'tools.discover' and resolution.success:
+                    enabled = json.loads(tool_output)['enabled']
+                    discovered_tools = set(enabled)
+                    allowed_tools = tuple(sorted(set(allowed_tools) | set(enabled)))
+                if call.name == 'fs.read' and resolution.success:
+                    try:
+                        read = json.loads(tool_output)
+                    except ValueError:
+                        read = None
+                    if isinstance(read, dict) and 'byte_size' in read:
+                        self.task_plans.record_file_read(root['id'], call.arguments['path'], read['sha256'],
+                            read['byte_size'], read['offset'], read['offset'] + len(read['content'].encode('utf-8')),
+                            fence=planning_fence)
                 if call.name == 'document.export' and resolution.success:
                     self.rag_grounding.validate(run_id)
                     self.documents.record_publication(run_id, call.arguments['artifact_id'], json.loads(tool_output))
@@ -5588,6 +5728,12 @@ class ChatRunService:
             if has_host_calls:
                 self.repository.transition_model_run(run_id, {"waiting_tool"}, "generating")
                 await self._emit(run_id, "run.state_changed", {"status": "generating"})
+            if any(call.name == 'document.review_targets' for call in calls):
+                with self.repository._connect() as connection:
+                    latest_round = connection.execute('''SELECT COALESCE(MAX(round_no),0)
+                        FROM invocation_specs WHERE step_id=? AND attempt_no=?''',
+                        (execution_step['id'], attempt_number)).fetchone()[0]
+                invocation_round = max(invocation_round, latest_round)
             provider_round += 1
 
     async def _application_document_export(self, run, attempt_id, content):
@@ -5641,7 +5787,8 @@ class ChatRunService:
         self.documents.record_publication(run_id, artifact['id'], publication)
         return content + '\n\n[打开文件](<' + output_path + '>)\n\n[打开所在目录](project-dir:.)'
 
-    async def _review_template_planned(self, run, attempt_id, attachment, request):
+    async def _review_template_planned(self, run, attempt_id, attachment, request, *,
+                                       template_id=None, target_ids=None, return_result=False):
         from agent.document_review import REVIEW_INSTRUCTION, review_request, review_template
         from agent.document_contracts import document_batch_schema
         from agent.rag.grounding import evidence_for_model, evidence_with_quotes, quote_options
@@ -5649,8 +5796,11 @@ class ChatRunService:
         state = self.rag_grounding.runs.get(run['id'])
         if state is None:
             raise CoreDataError('rag_evidence_missing', '全篇审阅需要当前项目的可核对资料依据。')
-        _, original = self.document_attachments._original(attachment)
-        template = self.documents.register_template(run['id'], original.read_bytes(), attachment['name'])
+        if template_id is None:
+            _, original = self.document_attachments._original(attachment)
+            template = self.documents.register_template(run['id'], original.read_bytes(), attachment['name'])
+        else:
+            template = self.documents.get(run['id'], template_id)
         profile = self._profile(run['provider_profile_id'])
         window = (profile.model_capabilities or {}).get(run['model_id'], {}).get('context_length') or 8192
         output_tokens = min(4096, max(512, window // 3))
@@ -5669,7 +5819,9 @@ class ChatRunService:
             self.rag_grounding.validate(run['id'])
             # Authorized field text supplies the per-batch query. Content is
             # external input and never grants tool or filesystem authority.
-            query = '\n'.join([request, *(field['text'] for field in batch['fields'])])[:SEARCH_QUERY_MAX_CHARS]
+            prefix = '\n'.join([request[:320], ' / '.join(batch['chapter_path'])[:256]])
+            share = max(1, (SEARCH_QUERY_MAX_CHARS - len(prefix) - len(batch['fields']) - 1) // max(1, len(batch['fields'])))
+            query = '\n'.join([prefix, *(field['text'][:share] for field in batch['fields'])])
             try:
                 found = await self.rag.search(state['project_id'], query, run_id=run['id'], retrieval_scope='focused')
             except CoreDataError as error:
@@ -5729,6 +5881,19 @@ class ChatRunService:
         identity['sources'] = {'library_ids': source_scope['library_ids'], 'index_ids': source_scope['index_ids'],
                               'version_ids': sorted({version for row in versions for version in json.loads(row['version_ids'])})}
         root = self.execution_monitor.get_task(current_task_id.get())
+        if not return_result:
+            from agent.document_inventory import inventory
+            fields = [item for item in inventory(self.documents.path_for(run['id'], template['id']).read_bytes())['fields']
+                      if item['text'].strip() or item['field_type'] == 'unreadable']
+            source_id = attachment['id'] if attachment else template['id']
+            self.task_plans.register_source(root['id'], source_id, template['id'], template['sha256'], fields,
+                fence=(root['revision'], root['attempt']))
+            business_plan = self.task_plans.get(root['id'])
+            self.task_plans.update(root['id'], expected_revision=business_plan['revision'],
+                steps=business_plan['steps'], success_criteria=['每个选定非空位置具有审阅结果或明确资料缺项'],
+                source_scopes=[{'source_id': source_id, 'operation': 'review',
+                    'scope': 'selected' if target_ids else 'full', 'target_ids': target_ids or [], 'reason': ''}],
+                deliverables=[], fence=(root['revision'], root['attempt']))
         if root.get('intent_task_id') and not root['intent_task_id'].startswith('request:'):
             identity['task_revision'] = self.intent_sessions.get(root['intent_task_id'])['revision']
         if profile.id.startswith('managed:'):
@@ -5758,7 +5923,8 @@ class ChatRunService:
             try:
                 return await review_template(self.documents, run['id'], template['id'], request,
                     generate, evidence, lambda text, citations: self.rag_grounding.document_claim(run['id'], text, citations),
-                    activity=activity, identity=identity, token_allowance=allowance, parent_task_id=parent_task_id)
+                    activity=activity, identity=identity, token_allowance=allowance, parent_task_id=parent_task_id,
+                    target_ids=target_ids)
             except BaseException as error:
                 if managed_expected is not None and self._managed_transport_failure(error):
                     reload_model = True
@@ -5775,7 +5941,34 @@ class ChatRunService:
             diagnose=diagnose_review,
             recoverable=lambda error: getattr(error, 'code', None) == 'rag_worker_crash'
                 or managed_expected is not None and self._managed_transport_failure(error))
-        return result['markdown']
+        if not return_result and any(target.get('error_code') for target in result['report']['targets']):
+            artifact = self.documents.create(run['id'], result['markdown'], 'markdown', max_characters=20 * 1024 * 1024)
+            self.documents.record_review(run['id'], artifact['id'], result['report'])
+            raise CoreDataError('task_incomplete', '部分审阅位置因技术错误尚未完成，已保存报告与检查点。',
+                {'artifact_id': artifact['id'], 'coverage': result['report']['coverage']})
+        return result if return_result else result['markdown']
+
+    async def _review_targets_tool(self, run, attempt_id, arguments):
+        conversation = self.repository.get_run_conversation(run['id'])
+        message = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
+        if run['id'] not in self.rag_grounding.runs:
+            deferred = {**run, '_template_review_task': True,
+                        'rag_decision': {**run.get('rag_decision', {}), 'required': True}}
+            await self.rag_grounding.prepare(deferred, conversation)
+        result = await self._review_template_planned(run, attempt_id, None, message['content'],
+            template_id=arguments['template_id'], target_ids=arguments.get('target_ids'), return_result=True)
+        artifact = self.documents.create(run['id'], result['markdown'], arguments.get('format', 'markdown'),
+                                         max_characters=20 * 1024 * 1024)
+        self.documents.record_review(run['id'], artifact['id'], result['report'])
+        run.setdefault('_review_reports', []).append(result['markdown'])
+        return json.dumps({'artifact_id': artifact['id'], 'sha256': artifact['sha256'],
+            'format': artifact['kind'], 'coverage': result['report']['coverage'],
+            'review_status': result['report']['review_status'],
+            'problems': result['report']['problems'][:10],
+            'results': [{key: target[key] for key in ('target_id', 'status', 'summary', 'citations')}
+                        for target in result['report']['targets'][:5]],
+            'gaps': result['report']['gaps'][:10],
+            'next_action': 'Continue requested revisions and publish this artifact when the user requested a file.'}, ensure_ascii=False)
 
     async def _fill_template_planned(self, run, attempt_id, template_id, request):
         decision = run.get('rag_decision') or {}
@@ -6042,6 +6235,50 @@ class ChatRunService:
             with self.repository._connect() as connection:
                 connection.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=?', (json.dumps(manifest, ensure_ascii=False), artifact_id))
 
+    def _discoverable_tools(self, run_id, initial):
+        from agent.execution.task_tools import TASK_TOOLS
+        conversation = self.repository.get_run_conversation(run_id)
+        available = set(initial) | set(TASK_TOOLS) | set(SKILL_TOOLS)
+        if conversation['kind'] == 'project_work':
+            available.update(('fs.list', 'fs.read', 'fs.search', 'fs.propose_changes', 'terminal.run'))
+            available.update(DOCUMENT_TOOLS)
+            if self.rag.project_state(conversation['project_id']).get('enabled'):
+                available.update(('rag.search', 'rag.read'))
+        return available - {'web.search', 'web.open'}
+
+    async def _rag_tool(self, run, call, max_characters):
+        if run['id'] not in self.rag_grounding.runs:
+            conversation = self.repository.get_run_conversation(run['id'])
+            deferred = {**run, '_defer_retrieval': True,
+                        'rag_decision': {**run.get('rag_decision', {}), 'required': True}}
+            await self.rag_grounding.prepare(deferred, conversation)
+        try:
+            return await self.rag_grounding.execute(run['id'], call.name, call.arguments, max_characters)
+        except CoreDataError as error:
+            if error.code not in {'rag_no_evidence', 'rag_evidence_missing'}:
+                raise
+            run['_evidence_gap'] = error.message
+            return json.dumps({'evidence': [], 'gap': error.message}, ensure_ascii=False)
+
+    async def _request_task_input(self, run_id, arguments):
+        root = self.execution_monitor.start_task(run_id=run_id)
+        answers = await self.task_input.ask(root['id'], **arguments)
+        return json.dumps({'answers': answers, 'next_action': 'Continue the original task with these user answers.'}, ensure_ascii=False)
+
+    def _planning_tool(self, run_id, call, authorized, *, fence=None):
+        from agent.execution.task_tools import discover_tools
+        if call.name == 'tools.discover':
+            return json.dumps(discover_tools(call.arguments, self._discoverable_tools(run_id, ()) & set(authorized)), ensure_ascii=False)
+        root = self.execution_monitor.start_task(run_id=run_id)
+        if self.task_plans.get(root['id']) is None:
+            conversation = self.repository.get_run_conversation(run_id)
+            message = next(item for item in conversation['messages'] if item['id'] == self.repository.get_model_run(run_id)['user_message_id'])
+            self.task_plans.create(root['id'], message)
+        plan = self.task_plans.update(root['id'], **call.arguments, fence=fence)
+        return json.dumps({'revision': plan['revision'], 'steps': plan['steps'],
+                           'success_criteria': plan['success_criteria'], 'source_scopes': plan['source_scopes'],
+                           'deliverables': plan['deliverables'], 'coverage': self.task_plans.completion(root['id'])}, ensure_ascii=False)
+
     def _document_tool(self, run_id, call, max_characters=16000):
         arguments = call.arguments
         self.rag_grounding.validate(run_id)
@@ -6049,16 +6286,21 @@ class ChatRunService:
             template_id = arguments.get('template_id')
             if not template_id:
                 conversation = self.repository.get_run_conversation(run_id)
-                attachment = next((attachment for message in conversation['messages'] for attachment in message.get('attachments', [])
+                run = self.repository.get_model_run(run_id)
+                message = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
+                attachment = next((attachment for attachment in message.get('attachments', [])
                     if attachment['id'] == arguments['attachment_id']), None)
                 if attachment is None:
                     raise CoreDataError('document_template_forbidden', '请先将模板附件授权给本轮消息。')
-                run = self.repository.get_model_run(run_id)
-                if (run.get('rag_decision') or {}).get('attachment_roles', {}).get(attachment['id']) != 'template':
-                    raise CoreDataError('document_template_not_selected', '该附件当前作为参考资料，请在发送前将用途改为待填写模板。')
                 _, original = self.document_attachments._original(attachment)
                 template_id = self.documents.register_template(run_id, original.read_bytes(), attachment['name'])['template_id']
             result = self.documents.inspect(run_id, template_id, arguments.get('offset', 0), arguments.get('limit', 100), max_characters)
+            from agent.document_inventory import inventory
+            artifact = self.documents.get(run_id, template_id)
+            fields = [item for item in inventory(self.documents.path_for(run_id, template_id).read_bytes())['fields']
+                      if item['text'].strip() or item['field_type'] == 'unreadable']
+            root = self.execution_monitor.start_task(run_id=run_id)
+            self.task_plans.register_source(root['id'], arguments.get('attachment_id', template_id), template_id, artifact['sha256'], fields)
         else:
             self._validate_document_source(run_id, arguments['template_id'])
             result = self.documents.fill(run_id, arguments['template_id'], arguments['fields'],
@@ -6109,6 +6351,11 @@ class ChatRunService:
         self.rag_grounding.validate(run_id)
         template = self.documents.register_template(run_id, payload, operation['arguments']['path'])
         arguments = operation['arguments']
+        from agent.document_inventory import inventory
+        fields = [item for item in inventory(payload)['fields'] if item['text'].strip() or item['field_type'] == 'unreadable']
+        root = self.execution_monitor.start_task(run_id=run_id)
+        self.task_plans.register_source(root['id'], template['id'], template['id'], template['sha256'], fields,
+            fence=(root['revision'], root['attempt']))
         return self.documents.inspect(run_id, template['id'], arguments.get('offset', 0), arguments.get('limit', 100),
             max(256, min(16000, self._skill_context_allowance(run_id))))
 

@@ -9,6 +9,7 @@ import re
 import uuid
 
 from agent.context_engine.policy import estimate_tokens
+from agent.document_consistency import conflict_groups, review_facts
 from agent.document_plan import FIELD_TYPES, document_structure, field_type, validate_source_locators
 from agent.documents import load_docx, targets
 from agent.execution.execution_wait import current_activity
@@ -39,6 +40,11 @@ REVIEW_INSTRUCTION = (
     'template_context.referenced_standards 列出全文提到的标准。结合用户要求和模板的明确声明确定适用版本。'
     '适用性未确定时列入待核实项。资料采用其他修订版时，在 version_issues 和 gaps 中说明差异及缺少的对应依据。'
     'Preserve the template. The report is a draft for human review. Answer in the user language.'
+    ' If facts is requested, extract only explicit named equipment parameters, test conditions, '
+    'criteria or standard revisions. Copy each value literally from the supplied target text. '
+    'Keep its unit and explicit applicability condition. Return [] when none is explicit. '
+    'For review_phase=consistency compare the supplied original positions across chapters. '
+    'Determine whether differences are actual conflicts given their conditions, and record unresolved conflicts in problems and gaps.'
 )
 
 
@@ -132,7 +138,7 @@ async def _validate(response, fields, template, evidence_resolver):
             raise _invalid()
         problems = _strings(result.get('problems', []))
         review_kind = result.get('content_kind', available[key]['field_type'])
-        if not isinstance(review_kind, str) or review_kind not in FIELD_TYPES | {'filled_content'}:
+        if not isinstance(review_kind, str) or review_kind not in FIELD_TYPES | {'filled_content', 'heading', 'unreadable'}:
             raise _invalid('审阅内容类型无效。')
         versions = _strings(result.get('version_issues', []))
         gaps = _strings(result.get('gaps', []))
@@ -162,7 +168,8 @@ async def _validate(response, fields, template, evidence_resolver):
         validated[key] = {**available[key], 'target_id': key, 'status': status, 'review_kind': review_kind,
             'summary': summary, 'problems': problems, 'citations': citations, 'evidence': metadata,
             'version_issues': list(dict.fromkeys(versions)), 'gaps': list(dict.fromkeys(gaps)),
-            'error_code': result.get('error_code')}
+            'error_code': result.get('error_code'),
+            'facts': review_facts(result.get('facts', []), available[key]['text'])}
     return [validated[field['id']] for field in fields]
 
 
@@ -176,8 +183,11 @@ def review_request(batch, sources, *, structured=True):
     from agent.document_contracts import document_batch_schema
     schema = document_batch_schema({**batch, 'evidence': sources['evidence']}, []) if structured else None
     instruction = REVIEW_INSTRUCTION + (' The schema places the results object inside response.' if schema else '')
+    visible = {**batch, 'fields': [{key: field[key] for key in
+        ('id', 'text', 'field_type', 'position', 'extraction_status') if key in field}
+        for field in batch['fields']]}
     messages = [{'role': 'system', 'content': instruction}, {'role': 'user',
-        'content': json.dumps({'batch': batch, 'sources': sources}, ensure_ascii=False)}]
+        'content': json.dumps({'batch': visible, 'sources': sources}, ensure_ascii=False)}]
     return messages, schema
 
 
@@ -251,6 +261,8 @@ def _parent_checkpoint(workflow, activity, parent, key, identity, fields):
         if previous != comparable or payload.get('format_version') != 1:
             return None
         prior_fields = payload.get('results', [])
+        if any(field.get('error_code') for field in prior_fields):
+            return None
         if len(prior_fields) != len(fields) or any(
                 any(prior_field.get(key) != value for key, value in field.items() if key != 'status')
                 for field, prior_field in zip(fields, prior_fields)):
@@ -290,7 +302,7 @@ def _markdown(report):
 
 async def review_template(workflow, run_id, template_id, request, generate, evidence,
                           evidence_resolver, *, activity=None, identity=None, token_allowance=12000,
-                          parent_task_id=None):
+                          parent_task_id=None, target_ids=None, include_consistency=True):
     """Review every nonempty target of an authorized managed DOCX artifact.
 
     ``generate(batch, evidence)`` performs exactly one actual model invocation.
@@ -310,18 +322,18 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
     template = workflow.get(run_id, template_id)
     if template['kind'] not in {'template', 'docx'}:
         raise CoreDataError('document_template_invalid', '请选择已授权的 DOCX 模板或草稿。')
-    document = load_docx(workflow.path_for(run_id, template_id).read_bytes())
-    structured, _ = document_structure(document, targets)
-    body_positions = {element: index for index, element in enumerate(document.element.body)}
-    target_positions = {f'p-{index}': body_positions[paragraph._p]
-                        for index, paragraph in enumerate(document.paragraphs)}
-    target_positions.update({f't-{index}': body_positions[table._tbl]
-                             for index, table in enumerate(document.tables)})
-    structured.sort(key=lambda field: target_positions[field['id'].split('-r', 1)[0]])
+    from agent.document_inventory import inventory
+    from agent.execution.task_plans import TaskPlans
+    structured = inventory(workflow.path_for(run_id, template_id).read_bytes())['fields']
+    if target_ids is not None:
+        if (not isinstance(target_ids, list) or not target_ids or len(set(target_ids)) != len(target_ids)
+                or set(target_ids) - {item['id'] for item in structured}):
+            raise CoreDataError('document_target_invalid', '审阅目标超出当前文档或重复。')
+        structured = [item for item in structured if item['id'] in target_ids]
     filled_ids = {item['target_id'] for item in template['manifest'].get('fields', [])}
     fields = []
     for field in structured:
-        if not field['text'].strip():
+        if not field['text'].strip() and field['field_type'] != 'unreadable':
             continue
         category = field['field_type']
         if category == 'container':
@@ -335,19 +347,23 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         'template_sha256': template['sha256'], 'project_id': template['project_id'],
         'request_sha256': _hash(request)}
     review_identity.setdefault('task_revision', activity.revision)
+    plans = TaskPlans(workflow.repository)
+    if plans.get(activity.task_id) is None:
+        plans.create(activity.task_id, {'content': request})
+    fence = (activity.revision, activity.attempt)
+    plans.register_items(activity.task_id, template_id, template['sha256'], fields, fence=fence)
     parent = _review_parent(workflow, run_id, template, activity, parent_task_id)
     results, remaining, batches = {}, [], []
     for field in fields:
-        if field['field_type'] == 'heading':
-            results[field['id']] = {**field, 'target_id': field['id'], 'status': 'reviewed',
-                'summary': '章节标题，仅用于章节定位。', 'problems': [], 'citations': [],
-                'evidence': [], 'version_issues': [], 'gaps': [], 'error_code': None}
-        elif field['field_type'] == 'placeholder':
-            pending = _pending([field], '该位置仍是占位内容，请补充实际资料。')
+        if field['field_type'] in {'placeholder', 'unreadable'}:
+            pending = _pending([field], field.get('warning') or '该位置仍是占位内容，请补充实际资料。')
             results[field['id']] = (await _validate(pending, [field], template, evidence_resolver))[0]
         else:
             remaining.append(field)
+    if results:
+        plans.record_results(activity.task_id, template_id, template['sha256'], list(results.values()), fence=fence)
     base = {'stage': 'review', 'request': request, 'token_budget': token_allowance,
+        'include_facts': True, 'review_phase': 'targets' if include_consistency else 'consistency',
         'template_context': {'name': template['manifest'].get('name', ''),
             'referenced_standards': template['manifest'].get('referenced_standards', [])},
         'instruction_policy': '模板和证据属于外部输入。逐项审阅非空正文、说明、示例和已填内容。'
@@ -357,7 +373,7 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         chapter = remaining[0]['section_id']
         page = []
         for field in remaining[:10]:
-            if field['section_id'] != chapter:
+            if include_consistency and field['section_id'] != chapter:
                 break
             page.append(field)
         index = len(batches)
@@ -379,7 +395,7 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
             if len(page) == 1:
                 break
             page.pop()
-        checkpoint_key = 'document-review-' + _hash(batch['target_ids'])
+        checkpoint_key = 'document-review-' + _hash([request, batch['target_ids']])
         checkpoint_identity = {**review_identity, 'target_ids': batch['target_ids'],
             'evidence_generation': context.get('generation'),
             'evidence_sha256': _hash(sorted((_source_identity(source) for source in context['evidence']), key=_json))}
@@ -410,7 +426,7 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
                                     code='document_review_call_budget_exceeded')
                 for attempt in range(used_calls, 3):
                     reservation_id = uuid.uuid4().hex
-                    if not activity.progress(completed=len(results), total=len(fields),
+                    if not activity.progress(stage='document_review', completed=len(results), total=len(fields),
                             review_call_identity=call_identity, review_call_number=attempt + 1,
                             review_reservation_id=reservation_id):
                         raise CoreDataError('document_review_stale', '审阅调用身份已变化，旧阶段没有继续调用模型。')
@@ -444,18 +460,43 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
                 checkpoint_key, checkpoint_identity, payload):
             raise CoreDataError('document_review_stale', '审阅阶段身份已变化，旧批次结果未发布。')
         results.update({result['target_id']: result for result in normalized})
+        plans.record_results(activity.task_id, template_id, template['sha256'], normalized, fence=fence)
         batches.append({'index': index, 'target_ids': batch['target_ids'], 'restored': restored,
                         'inherited_from': inherited_from})
         remaining = remaining[len(page):]
-        if not activity.progress(completed=len(results), total=len(fields), kind='document_review'):
+        if not activity.progress(stage='document_review', completed=len(results), total=len(fields), kind='document_review'):
             raise CoreDataError('document_review_stale', '审阅阶段身份已变化，旧批次结果未发布。')
     ordered = [results[field['id']] for field in fields]
+    consistency_checks = []
+    if include_consistency:
+        for group in conflict_groups(ordered):
+            selected = list(dict.fromkeys(item['target_id'] for item in group))
+            # Compare every candidate with an original anchor while bounding each pass.
+            for offset in range(1, len(selected), 9):
+                ids = [selected[0], *selected[offset:offset + 9]]
+                activity.progress(stage='document_consistency', completed=len(results), total=len(fields))
+                check = await review_template(workflow, run_id, template_id,
+                    request[:30000] + '\n\n全文一致性复核。回读所选原文，核对参数差异及适用条件。',
+                    generate, evidence, evidence_resolver, activity=activity, identity=identity,
+                    token_allowance=token_allowance, target_ids=ids, include_consistency=False)
+                for checked in check['report']['targets']:
+                    original = results[checked['id']]
+                    for key in ('problems', 'gaps', 'version_issues'):
+                        original[key] = list(dict.fromkeys([*original[key], *checked[key]]))
+                    if checked['status'] == 'pending':
+                        original['status'] = 'pending'
+                    original['evidence'].extend(source for source in checked['evidence']
+                        if source not in original['evidence'])
+                    consistency_checks.append({'target_id': checked['id'], 'summary': checked['summary'],
+                        'problems': checked['problems'], 'gaps': checked['gaps']})
+                plans.record_results(activity.task_id, template_id, template['sha256'], [results[key] for key in ids], fence=fence)
     reviewed = sum(result['status'] == 'reviewed' for result in ordered)
     report = {'template_id': template_id, 'template_sha256': template['sha256'],
         'project_id': template['project_id'], 'identity': review_identity,
-        'review_status': 'pending_human_review', 'coverage_scope': 'full_nonempty',
+        'review_status': 'pending_human_review', 'coverage_scope': 'selected_targets' if target_ids else 'full_nonempty',
         'coverage': {'total': len(fields), 'reviewed': reviewed, 'pending': len(fields) - reviewed},
         'targets': ordered, 'batches': batches,
+        'consistency_checks': consistency_checks,
         'problems': [{'target_id': target['id'], 'text': problem} for target in ordered for problem in target['problems']],
         'version_issues': list(dict.fromkeys(issue for target in ordered for issue in target['version_issues'])),
         'gaps': list(dict.fromkeys(gap for target in ordered for gap in target['gaps']))}

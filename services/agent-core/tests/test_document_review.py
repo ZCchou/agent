@@ -81,7 +81,7 @@ def register(workflow, run, document):
 
 
 def execute(setup, artifact, generate=None, *, identity=None, allowance=16000,
-            parent_task_id=None, request='审阅全文非空内容'):
+            parent_task_id=None, request='审阅全文非空内容', target_ids=None):
     workflow, run, monitor, root, sources = setup
     generate = generate or (lambda batch, evidence: sources.response(batch))
     async def operation(activity):
@@ -89,8 +89,68 @@ def execute(setup, artifact, generate=None, *, identity=None, allowance=16000,
             generate, sources.evidence, sources.resolve, activity=activity,
             identity=identity or {'task_revision': 'intent-1', 'project_generation': sources.generation,
                                  'models': {'generator': 'model'}, 'config': {'route': 'local'}},
-            token_allowance=allowance, parent_task_id=parent_task_id)
+            token_allowance=allowance, parent_task_id=parent_task_id, target_ids=target_ids)
     return asyncio.run(monitor.execute_stage(root['id'], 'document_review', operation))
+
+
+def test_selected_target_review_keeps_exact_scope_and_persists_coverage(setup):
+    workflow, run, monitor, root, sources = setup
+    document = Document()
+    document.add_paragraph('第一位置')
+    document.add_paragraph('第二位置')
+    document.add_paragraph('第三位置')
+    artifact = register(workflow, run, document)
+    result = execute(setup, artifact, target_ids=['p-1'])
+    assert [item['id'] for item in result['report']['targets']] == ['p-1']
+    from agent.execution.task_plans import TaskPlans
+    assert TaskPlans(workflow.repository).completion(root['id']) == {
+        'ready': True, 'total': 1, 'completed': 1, 'gaps': 0, 'remaining': 0}
+
+
+def test_review_includes_story_text_and_records_unreadable_objects(setup):
+    workflow, run, _, root, sources = setup
+    from docx.oxml import OxmlElement
+    document = Document()
+    document.add_heading('振动试验', 1)
+    document.add_paragraph('技术正文')
+    document.sections[0].header.paragraphs[0].text = '受控型号'
+    drawing = OxmlElement('w:drawing')
+    drawing.append(OxmlElement('a:blip'))
+    document.paragraphs[1]._p.append(drawing)
+    artifact = register(workflow, run, document)
+    result = execute(setup, artifact)
+    assert any(item['text'] == '受控型号' for item in result['report']['targets'])
+    assert any(item.get('extraction_status') == 'requires_ocr_or_visual_review'
+               and item['status'] == 'pending' for item in result['report']['targets'])
+    assert any('p-0' in batch for batch in sources.calls)
+
+
+def test_cross_chapter_review_reads_conflicting_facts_again_and_preserves_issues(setup):
+    workflow, run, _, root, sources = setup
+    document = Document()
+    document.add_heading('第一章', 1)
+    document.add_paragraph('设备型号 A1')
+    document.add_heading('第二章', 1)
+    document.add_paragraph('设备型号 B2')
+    artifact = register(workflow, run, document)
+    phases = []
+    def generate(batch, context):
+        cross_check = batch.get('review_phase') == 'consistency'
+        phases.append(cross_check)
+        response = sources.response(batch)
+        for item, field in zip(response['results'], batch['fields']):
+            item['facts'] = ([{'name': '设备型号', 'value': field['text'].split()[-1], 'unit': '', 'condition': ''}]
+                             if field['field_type'] != 'heading' else [])
+            if cross_check:
+                assert {item['text'] for item in batch['fields']} == {'设备型号 A1', '设备型号 B2'}
+                item['problems'] = ['设备型号前后不一致。']
+                item['gaps'] = ['请核对实际设备型号。']
+        return response
+    result = execute(setup, artifact, generate)
+    assert phases == [False, False, True]
+    assert len(result['report']['consistency_checks']) == 2
+    assert all('设备型号前后不一致。' in target['problems'] for target in result['report']['targets']
+               if target['field_type'] != 'heading')
 
 
 @pytest.mark.parametrize('locator,label', [
@@ -418,7 +478,7 @@ def test_unsupported_summary_stays_pending_human_review(setup):
 def test_oversized_target_and_nonempty_placeholder_are_explicit_pending_without_model_calls(setup):
     workflow, run, _, _, sources = setup
     document = Document()
-    document.add_paragraph('内容' * 3000)
+    document.add_paragraph('内容' * 10000)
     document.add_paragraph('待填写')
     artifact = register(workflow, run, document)
 
@@ -578,6 +638,28 @@ def test_cancelled_review_reuses_only_validated_batches_on_linked_retry_with_fre
     assert parent_audit(setup) == before
 
 
+def test_linked_retry_recomputes_technical_failure_and_reuses_successful_batch(setup):
+    workflow, run, monitor, root, sources = setup
+    document = Document()
+    for index in range(11):
+        document.add_paragraph(f'条目{index}')
+    artifact = register(workflow, run, document)
+    def invalid_second(batch, context):
+        return sources.response(batch) if batch['index'] == 0 else {'results': []}
+    failed = execute(setup, artifact, invalid_second)
+    assert failed['report']['coverage']['pending'] == 1
+    monitor.finish_task(root['id'], 'failed')
+    workflow.repository.transition_model_run(run['id'], {'queued'}, 'failed')
+    child, child_artifact = linked_review(setup, artifact)
+    calls = []
+    def generate(batch, context):
+        calls.append(batch['target_ids'])
+        return child[4].response(batch)
+    result = execute(child, child_artifact, generate, parent_task_id=root['id'])
+    assert calls == [['p-10']]
+    assert result['report']['coverage'] == {'total': 11, 'reviewed': 11, 'pending': 0}
+
+
 @pytest.mark.parametrize('changed', ['source', 'template', 'model', 'configuration', 'generation', 'request'])
 def test_linked_review_recomputes_when_parent_identity_is_stale(setup, changed):
     artifact = cancelled_review(setup)
@@ -645,7 +727,7 @@ def test_default_8k_review_budget_calls_model_for_all_substantive_batches(setup)
 
     result = execute(setup, artifact, generate, allowance=2730)
     assert len(calls) >= 4
-    assert sum(map(len, calls)) == 35
+    assert sum(map(len, calls)) == 36
     assert max(map(len, calls)) <= 10
     assert result['report']['coverage']['total'] == 36
     assert all(target['error_code'] != 'document_context_too_small' for target in result['report']['targets'])

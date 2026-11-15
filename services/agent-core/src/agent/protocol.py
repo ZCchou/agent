@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 26
-CORE_VERSION = "0.17.0-preview.1"
-BUILD_ID = "schema33-agent-unified-v1"
+PROTOCOL_VERSION = 27
+CORE_VERSION = "0.17.0-preview.2"
+BUILD_ID = "schema34-agent-unified-v1"
 
 
 def _execution_identity(repository, run):

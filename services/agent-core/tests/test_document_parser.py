@@ -437,7 +437,8 @@ def test_cancellation_terminates_child_and_grandchild(tmp_path):
         grandchild_code = 'import time;time.sleep(30)'
         child_code = ('import subprocess,sys,time,json,pathlib,os;'
                       'p=subprocess.Popen([sys.executable,"-c",' + repr(grandchild_code) + ']);'
-                      'pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(),p.pid]));time.sleep(30)')
+                      'ready=pathlib.Path(sys.argv[1]);temporary=ready.with_suffix(".tmp");'
+                      'temporary.write_text(json.dumps([os.getpid(),p.pid]));temporary.replace(ready);time.sleep(30)')
         script = ('import subprocess,sys,time;sys.stdin.buffer.readline();'
                   'subprocess.Popen([sys.executable,"-c",' + repr(child_code) + ',sys.argv[1]]);time.sleep(30)')
         parser = ParserService(tmp_path, command=[sys.executable, '-c', script, str(pid_file)])

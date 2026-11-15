@@ -141,8 +141,8 @@ class DocumentWorkflow:
         template = self.get(run_id, template_id)
         if template['kind'] not in {'template', 'docx'}:
             raise CoreDataError('document_template_invalid', '请选择已读取的模板。')
-        document = load_docx(self.path_for(run_id, template_id).read_bytes())
-        structure, _ = document_structure(document, targets)
+        from agent.document_inventory import inventory
+        structure = inventory(self.path_for(run_id, template_id).read_bytes())['fields']
         fields = [{**field, 'text': field['text'][:4000], 'original_content': field['original_content'][:4000]}
                   for field in structure]
         result = {'template_id': template_id, 'sha256': template['sha256'], 'total': len(fields),
@@ -155,6 +155,15 @@ class DocumentWorkflow:
             if len(json.dumps(result, ensure_ascii=False)) > max_characters:
                 raise CoreDataError('document_context_too_small', '当前上下文不足以读取模板位置，请减少输入或缩小读取范围。')
         return result
+
+    def record_review(self, run_id, artifact_id, report):
+        artifact = self.get(run_id, artifact_id)
+        manifest = {**artifact['manifest'], 'review_report': {
+            'template_id': report['template_id'], 'template_sha256': report['template_sha256'],
+            'coverage': report['coverage'], 'review_status': report['review_status']}}
+        with self.repository._connect() as connection:
+            connection.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=? AND run_id=?',
+                               (json.dumps(manifest, ensure_ascii=False), artifact_id, run_id))
 
     def inspect_structure(self, run_id, template_id, offset=0, limit=100):
         template = self.get(run_id, template_id)
@@ -283,8 +292,8 @@ class DocumentWorkflow:
             'review_issues': reviews,
             'review_status': 'pending'}, template)
 
-    def create(self, run_id, content, format):
-        if format not in {'docx', 'markdown', 'txt'} or not isinstance(content, str) or len(content) > 1_000_000:
+    def create(self, run_id, content, format, *, max_characters=1_000_000):
+        if format not in {'docx', 'markdown', 'txt'} or not isinstance(content, str) or len(content) > max_characters:
             raise CoreDataError('document_export_invalid', '请选择 DOCX、Markdown 或 TXT，并提供有效正文。')
         if format == 'docx':
             document = Document()

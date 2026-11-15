@@ -405,6 +405,16 @@ class FakeModelProvider(ModelProvider):
         if tools and messages and messages[-1].get("role") == "tool":
             tool_name = messages[-1].get("name", "project operation")
             output = str(messages[-1].get("content", ""))
+            if tool_name == 'fs.propose_changes' and allowed_tools and 'task.update_plan' in allowed_tools:
+                calls = next(message['tool_calls'] for message in reversed(messages) if message.get('tool_calls'))
+                change = next(call['function'] for call in calls
+                    if call['function']['name'] in {'fs.propose_changes', 'fs_propose_changes'})
+                arguments = json.loads(change['arguments']) if isinstance(change['arguments'], str) else change['arguments']
+                yield ProviderEvent('tool_call', tool_call=ToolCall(f'fake-plan-{len(messages)}', 'task.update_plan', {
+                    'expected_revision': 0, 'steps': [], 'success_criteria': ['Requested files saved'], 'source_scopes': [],
+                    'deliverables': [{'path': item['path']} for item in arguments['mutations']
+                        if item['kind'] in {'create_text', 'overwrite_text', 'patch_text', 'copy', 'move'}]}))
+                return
             original = next((str(message.get("content", "")) for message in reversed(messages)
                              if message.get("role") == "user"), "")
             if tool_name == "fs.read" and any(marker in original.casefold() for marker in (
@@ -1465,13 +1475,9 @@ def _internal_tool_name(name: Any) -> str:
         raise CoreDataError("invalid_tool_call", "Tool name is invalid.")
     if name == "$web_search":
         return "native.web_search"
-    name = "terminal.run" if name == "terminal_run" else name
-    candidate = name.replace("fs_", "fs.", 1) if name.startswith("fs_") else name
-    candidate = candidate.replace("web_", "web.", 1) if candidate.startswith("web_") else candidate
-    candidate = candidate.replace("skills_", "skills.", 1) if candidate.startswith("skills_") else candidate
-    candidate = candidate.replace("document_", "document.", 1) if candidate.startswith("document_") else candidate
-    candidate = candidate.replace("rag_", "rag.", 1) if candidate.startswith("rag_") else candidate
-    return candidate
+    from agent.tool_contracts import TOOL_NAMES
+    aliases = {_external_tool_name(internal): internal for internal in TOOL_NAMES}
+    return aliases.get(name, name)
 
 
 def _merge_stable_tool_fragment(current: dict[str, str], key: str, value: Any) -> None:

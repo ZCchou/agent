@@ -1,7 +1,7 @@
 """Bounded application-owned document tools."""
 from agent.storage import CoreDataError
 
-DOCUMENT_TOOLS = ('document.inspect_template', 'document.fill_template', 'document.export', 'document.read_attachment')
+DOCUMENT_TOOLS = ('document.inspect_template', 'document.fill_template', 'document.export', 'document.read_attachment', 'document.review_targets')
 
 def document_batch_schema(task, attachment_ids):
     """Constrain model choices to writable positions in this authorized batch."""
@@ -12,7 +12,7 @@ def document_batch_schema(task, attachment_ids):
     parameters = {'type': 'array', 'maxItems': 100, 'items': object_schema({
         'name': {'type': 'string'}, 'value': {'type': 'string'}})}
     writable = [field.get('target_id', field.get('id')) for field in task['fields']
-                if field.get('field_type') not in {'heading', 'container'}]
+                if field.get('field_type') not in ({'container'} if task['stage'] == 'review' else {'heading', 'container'})]
     target_id = {'type': 'string', **({'enum': writable} if writable else {})}
     citation = object_schema({'id': {'type': 'string'}, 'quote_id': {'type': 'string'}})
     if task['stage'] == 'plan':
@@ -35,11 +35,16 @@ def document_batch_schema(task, attachment_ids):
         review_strings = {'type': 'array', 'maxItems': 200,
                           'items': {'type': 'string', 'minLength': 1, 'maxLength': 1000}}
         reviewed = object_schema({'target_id': target_id,
-            'content_kind': {'type': 'string', 'enum': ['instruction', 'example', 'placeholder', 'content', 'filled_content']},
+            'content_kind': {'type': 'string', 'enum': ['instruction', 'example', 'placeholder', 'content', 'filled_content', 'heading']},
             'status': {'type': 'string', 'enum': ['reviewed', 'pending']},
             'summary': {'type': 'string', 'minLength': 1, 'maxLength': 8000}, 'problems': review_strings,
             'evidence': {'type': 'array', 'maxItems': 8 if source_ids and quote_ids else 0, 'items': citation},
             'version_issues': review_strings, 'gaps': review_strings})
+        if task.get('include_facts'):
+            reviewed['properties']['facts'] = {'type': 'array', 'maxItems': 20,
+                'items': object_schema({key: {'type': 'string', 'maxLength': 256}
+                                       for key in ('name', 'value', 'unit', 'condition')})}
+            reviewed['required'].append('facts')
         completed = object_schema({'results': {'type': 'array', 'minItems': len(writable),
                                                'maxItems': len(writable), 'items': reviewed}})
     else:
@@ -82,6 +87,11 @@ DOCUMENT_DEFINITIONS = [
         'attachment_id': {'type': 'string'}, 'offset': {'type': 'integer', 'minimum': 0},
         'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
         'physical_page': {'type': 'integer', 'minimum': 1}, 'section': {'type': 'string', 'maxLength': 1024}}, ['attachment_id']),
+    definition(DOCUMENT_TOOLS[4], 'Review a registered DOCX template using project evidence and persistent coverage. Omit target_ids to review every nonempty position. Returns a managed report artifact. Continue with revision or export when the user requested them.', {
+        'template_id': {'type': 'string'},
+        'target_ids': {'type': 'array', 'minItems': 1, 'maxItems': 100,
+                       'items': {'type': 'string', 'maxLength': 256}},
+        'format': {'type': 'string', 'enum': ['markdown', 'docx', 'txt']}}, ['template_id']),
 ]
 
 
@@ -92,7 +102,15 @@ def validate_document_call(name, arguments):
     for key in {'attachment_id', 'template_id', 'artifact_id', 'path'} & arguments.keys():
         if not isinstance(arguments[key], str) or not 1 <= len(arguments[key]) <= 1024 or '\0' in arguments[key]:
             raise CoreDataError('invalid_tool_call', '文档标识或路径无效。')
-    if name == DOCUMENT_TOOLS[3]:
+    if name == DOCUMENT_TOOLS[4]:
+        ids = arguments.get('target_ids')
+        if ids is not None and (not isinstance(ids, list) or not 1 <= len(ids) <= 100
+                or any(not isinstance(item, str) or not 1 <= len(item) <= 256 for item in ids)
+                or len(set(ids)) != len(ids)):
+            raise CoreDataError('invalid_tool_call', '审阅位置清单无效。')
+        if arguments.get('format', 'markdown') not in {'markdown', 'docx', 'txt'}:
+            raise CoreDataError('invalid_tool_call', '审阅报告格式无效。')
+    elif name == DOCUMENT_TOOLS[3]:
         if type(arguments.get('offset', 0)) is not int or arguments.get('offset', 0) < 0 or type(arguments.get('limit', 20)) is not int or not 1 <= arguments.get('limit', 20) <= 100 or ('physical_page' in arguments and (type(arguments['physical_page']) is not int or arguments['physical_page'] < 1)) or ('section' in arguments and (not isinstance(arguments['section'], str) or not arguments['section'].strip() or len(arguments['section']) > 1024)):
             raise CoreDataError('invalid_tool_call', '文档读取范围无效。')
     elif name == DOCUMENT_TOOLS[0]:

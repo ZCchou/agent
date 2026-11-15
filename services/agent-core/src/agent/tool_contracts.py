@@ -221,9 +221,11 @@ for _name, _description, _properties, _required in (
 
 from agent.document_contracts import DOCUMENT_DEFINITIONS, DOCUMENT_TOOLS, validate_document_call
 TOOL_DEFINITIONS.extend(DOCUMENT_DEFINITIONS)
+from agent.execution.task_tools import TASK_DEFINITIONS, TASK_TOOLS, validate_task_call
+TOOL_DEFINITIONS.extend(TASK_DEFINITIONS)
 TOOL_NAMES: Final[set[str]] = {item["function"]["name"] for item in TOOL_DEFINITIONS}
 
-TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v5"
+TOOL_CONTRACT_VERSION: Final[str] = "tool-contract-v6"
 
 
 class ToolContractRegistry:
@@ -299,7 +301,9 @@ def validate_tool_call(call: ToolCall) -> ToolCall:
         raise CoreDataError("unsupported_tool", "The requested tool is not supported.")
     if not isinstance(call.arguments, dict):
         raise CoreDataError("invalid_tool_call", "Tool arguments must be an object.")
-    if call.name == "rag.search":
+    if call.name in TASK_TOOLS:
+        validate_task_call(call.name, call.arguments)
+    elif call.name == "rag.search":
         _known_keys(call.arguments, {"query", "library_ids", "version_ids", "limit"})
         query = call.arguments.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > 4000:
