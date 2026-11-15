@@ -306,6 +306,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
     from test_tool_continuation_retry import configuration, fixture
     from test_document_runtime_plan import runtime_attachment
     captured = []
+    goal_requests = []
     original = httpx.AsyncClient
     def respond(request):
         payload = json.loads(request.content)
@@ -324,7 +325,10 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
             content = json.dumps(result, ensure_ascii=False)
         else:
             from goal_check_support import goal_check_content
-            content = goal_check_content(payload) or '已读取实际设备型号 ACTUAL-Z。'
+            checked = goal_check_content(payload)
+            if checked is not None:
+                goal_requests.append(json.loads(payload['messages'][-1]['content']))
+            content = checked or '已读取实际设备型号 ACTUAL-Z。'
         return httpx.Response(200, text='data: ' + json.dumps({'choices': [{'delta': {'content': content}, 'finish_reason': 'stop'}]}) + '\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def scenario():
@@ -354,6 +358,8 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
             await service.tasks[run_id]
             assert core.get_model_run(run_id)['status'] == 'completed'
             assert len(captured) == 2
+            assert any(item['answer'] == '第三页，只提取实际设备型号，不允许模拟。'
+                       for item in goal_requests[0]['answers'])
             for value in captured:
                 assert value['attachments'] == [{key: attachment[key] for key in ('id', 'name', 'media_type', 'byte_size')} | {'purpose': 'reference'}]
         finally:

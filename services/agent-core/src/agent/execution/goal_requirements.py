@@ -78,9 +78,24 @@ class GoalRequirements:
                 return self.request_digest(task_id, connection=reader)
         request = connection.execute('SELECT request_json FROM task_plan_revisions WHERE task_id=? ORDER BY revision LIMIT 1',
                                      (task_id,)).fetchone()
-        answers = [json.loads(row[0]) for row in connection.execute(
-            "SELECT answers_json FROM task_questions WHERE task_id=? AND status='answered' ORDER BY rowid", (task_id,))]
+        answers = self.answers(task_id, connection=connection)
         return hashlib.sha256(encode({'request': json.loads(request[0]), 'answers': answers}).encode('utf-8')).hexdigest()
+
+    def answers(self, task_id, *, connection=None):
+        if connection is None:
+            with self.repository._connect() as reader:
+                return self.answers(task_id, connection=reader)
+        intent = connection.execute('''SELECT i.state_json FROM execution_wait_tasks t
+            JOIN intent_tasks i ON i.id=t.intent_task_id WHERE t.id=?''', (task_id,)).fetchone()
+        recorded = json.loads(intent[0]).get('answers', {}) if intent else {}
+        answers = [{'question': key, 'answer': value} for key, value in recorded.items()
+                   if key != 'scope' or value not in [item for name, item in recorded.items() if name != 'scope']]
+        for row in connection.execute('''SELECT payload_json,answers_json FROM task_questions
+                WHERE task_id=? AND status='answered' ORDER BY rowid''', (task_id,)):
+            response = json.loads(row['answers_json'])
+            answers.extend({'question': question['question'], 'answer': response[question['id']]}
+                           for question in json.loads(row['payload_json'])['questions'])
+        return answers
 
     def capture(self, connection, task_id, value, *, expected_revision, user_change=False, reconciled=False):
         validate_goal_requirements(value)
