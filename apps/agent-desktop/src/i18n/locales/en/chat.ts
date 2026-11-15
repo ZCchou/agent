@@ -2,10 +2,10 @@ const chat = {
   execution: {
     title: "Task execution status", needsAttention: "Task needs attention", count: "Completed {{completed}}/{{total}}",
     elapsed: "Running for {{seconds}} seconds", lastProgress: "Last progress {{seconds}} seconds ago", details: "View details",
-    recoveries: "{{count}} consecutive automatic recoveries", retained: "The task and completed progress are saved. Choose how to continue.",
+    recoveries: "{{count}} consecutive automatic recoveries", retained: "The task and completed progress are saved.",
     takingLonger: "Processing is taking longer. Execution progress is being monitored.",
-    continue: "Continue waiting", retry: "Recover current stage", retryRun: "Keep draft and regenerate", cancel: "Cancel task", settings: "Adjust model settings",
-    stages: {
+    continue: "Continue waiting", retry: "Retry", retryRun: "Keep draft and regenerate", cancel: "Cancel task", settings: "Adjust model settings",
+    stages: { tool_verification: "Checking model tool support",
       processing: "Processing task", rag_retrieval: "Searching project libraries", rag_embed: "Embedding search query",
       rag_rerank: "Reranking candidates", integrity_verification: "Verifying model files", worker_starting: "Starting inference worker",
       model_ready: "Model is ready", tokenization: "Tokenizing", preparing_rerank: "Preparing reranking",
@@ -30,7 +30,7 @@ const chat = {
       rag_worker_crash: "The inference worker stopped. Recover the current stage.",
     },
   },
-  intent: { adaptiveTiming: "Running for {{elapsed}} seconds · {{attempts}} intent calls made", title: "A little more information", timeoutTitle: "Intent recognition is taking longer", timeoutDescription: "Review the current attempt before continuing.", resumeInput: "Continue providing information", review: "Review intent task", freeText: "Your answer", close: "Close", cancel: "Cancel request", confirm: "Confirm and continue", extend: "Continue waiting", retry: "Retry", technicalError: "Technical details", modelSettings: "Model settings", timing: "Elapsed {{elapsed}}s · Attempt {{attempts}}/3 · Current deadline {{remaining}}s · Remaining budget {{budget}}s" },
+  intent: { failed: "Task identification failed", interrupted: "Task interrupted", adaptiveTiming: "Running for {{elapsed}} seconds · {{attempts}} intent calls made", title: "A little more information", timeoutTitle: "Intent recognition is taking longer", timeoutDescription: "Review the current attempt before continuing.", resumeInput: "Continue providing information", review: "Review intent task", freeText: "Your answer", close: "Close", cancel: "Cancel request", confirm: "Confirm and continue", extend: "Continue waiting", retry: "Retry", technicalError: "Technical details", modelSettings: "Model settings", timing: "Elapsed {{elapsed}}s · Attempt {{attempts}}/3 · Current deadline {{remaining}}s · Remaining budget {{budget}}s" },
   ragMode: { button: 'Force RAG', required: 'Force RAG · On', hint: 'Require project evidence for this conversation until switched off. Otherwise retrieval is automatic.', chooseProject: 'Choose a project and its libraries', projectRequired: 'rag_library_required Choose a project and enable its libraries, or switch off Force RAG. Your message and attachments are retained.' },
   process: { title: "Work process" },
   messages: { edit: "Edit message", editQuestion: "Edit question", cancelEdit: "Cancel edit", saveEdit: "Save and regenerate",

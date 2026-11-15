@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { StartedModelRun } from "../repositories/ModelRunRepository";
+import type { ExecutionTaskSnapshot } from "./executionTasks";
 
 export interface IntentTask {
   execution_task_id?: string;
+  execution?: ExecutionTaskSnapshot;
   id: string;
   scope: string;
   revision: number;
@@ -10,10 +12,10 @@ export interface IntentTask {
   request: Record<string, unknown>;
   attempts: number;
   elapsed_seconds: number;
-  remaining_seconds: number;
+  remaining_seconds: number | null;
   timeout_seconds: number;
-  budget_seconds: number;
-  budget_remaining_seconds: number;
+  budget_seconds: number | null;
+  budget_remaining_seconds: number | null;
   can_extend: boolean;
   can_retry: boolean;
   clarification: null | { summary: string; questions: Array<{ id: string; question: string; options?: string[] }> };

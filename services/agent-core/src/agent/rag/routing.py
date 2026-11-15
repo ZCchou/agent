@@ -166,7 +166,7 @@ def routing_intent_schema(attachment_ids, *, pending_action=False):
         'reasoning': choice(('standard', 'preferred')),
         'task_kinds': {'type': 'array', 'minItems': 1, 'maxItems': 4, 'items': choice((
             'vision', 'research', 'file_work', 'reasoning', 'general', 'airworthiness',
-            'document_export', 'attachment_summary', 'attachment_extract'))},
+            'document_export', 'attachment_summary', 'attachment_extract', 'capability_query'))},
         'explanation_code': {'type': 'string', 'minLength': 1, 'maxLength': 80, 'pattern': '^[a-z0-9_.-]{1,80}$'},
         'follow_up': choice(('none', 'confirm', 'reject') if pending_action else ('none',)),
         'rag_requirement': choice(('required', 'not_needed', 'uncertain')),

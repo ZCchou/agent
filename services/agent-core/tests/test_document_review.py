@@ -237,16 +237,13 @@ def test_restored_batches_do_not_reset_repeated_failure_recovery_limit(setup):
             safe_to_retry=True, recoverable=lambda error: isinstance(error, CoreDataError)
                 and error.code == 'runtime_crashed'))
         try:
-            while not task.done() and monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-                await asyncio.sleep(0)
-            if task.done():
+            with pytest.raises(CoreDataError) as failure:
                 await task
+            assert failure.value.code == 'runtime_crashed'
             current = monitor.get_task(root['id'])
             assert current['auto_recoveries'] == 2
             assert calls == [0, 1, 1, 1]
-            monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='end-probe')
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            assert current['status'] == 'failed'
         finally:
             if not task.done():
                 task.cancel()
@@ -298,6 +295,7 @@ def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(s
     from agent.context_engine.policy import estimate_tokens
     from agent.document_review import review_request
     workflow, run, _, _, sources = setup
+    sources.source['text'] = SOURCE * 12
     document = Document()
     document.add_heading('要求', 1)
     for index in range(23):
@@ -316,6 +314,7 @@ def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(s
     assert max(costs) <= 2000
     assert result['report']['coverage']['total'] == 24
     assert result['report']['coverage']['pending'] == 0
+    assert len(sources.calls) == len(sizes)
 
 
 def test_two_committed_batches_restore_after_restart_without_regeneration(setup):

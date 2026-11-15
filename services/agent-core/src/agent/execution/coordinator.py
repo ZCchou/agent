@@ -89,7 +89,7 @@ class ExecutionCoordinator:
         task_kinds = value.get("task_kinds")
         explanation = value.get("explanation_code")
         follow_up = value.get("follow_up", "none")
-        allowed_kinds = {"vision", "research", "file_work", "reasoning", "general", "airworthiness", "document_export", "attachment_summary", "attachment_extract"}
+        allowed_kinds = {"vision", "research", "file_work", "reasoning", "general", "airworthiness", "document_export", "attachment_summary", "attachment_extract", "capability_query"}
         rag_requirement = value.get("rag_requirement", "uncertain")
         if not isinstance(rag_requirement, str) or rag_requirement not in {"required", "not_needed", "uncertain"}:
             raise ValueError("routing intent evidence requirement is invalid")
@@ -137,6 +137,8 @@ class ExecutionCoordinator:
                 clarification = IntentClarification(clarification['summary'], clarification['questions']).value
             except Exception as error:
                 raise ValueError('routing intent clarification is invalid') from error
+        if explanation == 'capability_query':
+            task_kinds = [*task_kinds, 'capability_query']
         return {
             "files": files,
             "tools": tools,

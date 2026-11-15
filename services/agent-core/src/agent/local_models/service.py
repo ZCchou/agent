@@ -70,6 +70,12 @@ class LocalModelService:
     def set_tool_mode(self, provider_id, mode, verified=True):
         return self._backend().set_tool_mode(provider_id, mode, verified=verified)
 
+    def tool_verification_identity(self, provider_id):
+        self.get_profile(provider_id)
+        from agent.tool_verification import PROBE_VERSION
+        runtime = self._runtime
+        return runtime._tool_key(self.catalog.get(runtime.model_id)) + ':probe:' + str(PROBE_VERSION)
+
     def runtime_identity(self, provider_id):
         self.get_profile(provider_id)
         runtime = self._runtime

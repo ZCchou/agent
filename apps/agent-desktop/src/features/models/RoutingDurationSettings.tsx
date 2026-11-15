@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RoutingPreferences } from "../../types/settings";
 import { idleMinutes } from "./routingDurations";
-import { ExecutionWaitSettings } from "./ExecutionWaitSettings";
 
 function ResidenceInput({ seconds, label, onChange }: { seconds: number; label: string; onChange(seconds: number): Promise<void> }) {
   const { t } = useTranslation("common");
@@ -37,9 +36,6 @@ export function RoutingDurationSettings({ value, onChange }: {
 }) {
   const { t } = useTranslation("common");
   return <>
-    <ExecutionWaitSettings value={value.execution_wait} onChange={(execution_wait) => onChange({ execution_wait })} />
-    <details><summary>{t("executionWait.legacyTitle")}</summary>
-      <p>{t("executionWait.legacy", { seconds: value.intent_timeout_seconds ?? 90 })}</p></details>
     <ResidenceInput seconds={value.main_model_idle_seconds ?? 1800} label={t("routingDuration.main")}
       onChange={(seconds) => onChange({ main_model_idle_seconds: seconds })} />
     <ResidenceInput seconds={value.auxiliary_model_idle_seconds ?? 1800} label={t("routingDuration.auxiliary")}

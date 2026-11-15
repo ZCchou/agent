@@ -91,6 +91,7 @@ def test_managed_engine_death_before_first_output_reloads_and_redispatches_norma
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
 
         async def classify(**params):
             return {'files': 'none', 'tools': 'none', 'web': 'off', 'web_evidence': 'optional',
@@ -104,13 +105,14 @@ def test_managed_engine_death_before_first_output_reloads_and_redispatches_norma
                 'model_id': model['id']})
             task = service.run_tasks[response['run']['id']]
             if failures == 3:
-                await asyncio.wait_for(paused.wait(), 20)
+                await asyncio.wait_for(task, 20)
                 activity = service.execution_status({'owner_kind': 'run', 'owner_id': response['run']['id']})
                 assert activity['auto_recoveries'] == 2
                 assert len(json.loads(counter.read_text())) == 3
-                assert not task.done()
-                await service.handle_execution('retry', {'task_id': activity['id'], 'revision': activity['revision'],
-                    'idempotency_key': 'manual-after-exhaustion'})
+                assert task.done()
+                assert core.get_model_run(response['run']['id'])['status'] == 'failed'
+                await service.retry(response['run']['id'])
+                task = service.run_tasks[response['run']['id']]
             await asyncio.wait_for(task, 20)
             run = core.get_model_run(response['run']['id'])
             assert run['status'] == 'completed', (run['error_code'], run['error_message'])
@@ -120,7 +122,8 @@ def test_managed_engine_death_before_first_output_reloads_and_redispatches_norma
             with core._connect() as connection:
                 specs = connection.execute('SELECT i.status FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=? ORDER BY i.round_no',
                     (run['id'],)).fetchall()
-            assert [row['status'] for row in specs] == ['failed'] * failures + ['completed']
+            assert sum(row['status'] == 'failed' for row in specs) == failures
+            assert sum(row['status'] == 'completed' for row in specs) == 1
             assert not service.tool_loop.repository.list_for_run(run['id'])
             activity = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
             assert activity['status'] == 'completed'
@@ -156,6 +159,7 @@ def test_managed_recovery_preserves_partial_output_and_rejects_configuration_dri
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
 
         async def classify(**params):
             return {'files': 'none', 'tools': 'none', 'web': 'off', 'web_evidence': 'optional',
@@ -204,6 +208,7 @@ def test_managed_engine_death_during_intent_restarts_same_root_before_run(tmp_pa
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
         attachment = runtime_attachment(tmp_path, 'reference', 'Authorized equipment values')
         try:
             task = (await service.intent_sessions.handle('start', {'request': {
@@ -253,6 +258,7 @@ def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_ro
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
         core.update_conversation_routing(conversation['id'], 'fixed', 'balanced', model['provider_profile_id'], model['id'])
         await service.rag.close()
         service.rag = RagService(core, Engines())

@@ -54,7 +54,7 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
   const details = task.current_stage?.details ?? {};
   const completed = task.current_stage?.completed;
   const total = task.current_stage?.total;
-  const paused = task.status === "waiting_recovery" || task.status === "interrupted" || task.status === "failed";
+  const paused = task.status === "interrupted" || task.status === "failed";
   const stage = typeof details.stage === "string" ? details.stage
     : typeof details.phase === "string" ? details.phase : task.stage ?? "preparingRequest";
   const label = t(`execution.stages.${stage}`, {
@@ -93,16 +93,16 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     {task.status === "running" && (task.elapsed_seconds ?? 0) >= (task.policy?.long_running_notice_seconds ?? 90)
       ? <p>{t("execution.takingLonger")}</p> : null}
     {paused ? <p>{t("execution.retained")}</p> : null}
+    {paused && typeof details.reason === "string" ? <p>{details.reason}</p> : null}
     <details><summary>{t("execution.details")}</summary>
       <p>{t("execution.recoveries", { count: task.auto_recoveries })}</p>
       {task.error_code ? <p>{t(`execution.errors.${task.error_code}`, { defaultValue: task.error_code })}</p> : null}
-      {typeof details.reason === "string" ? <p>{details.reason}</p> : null}
     </details>
     <div className="execution-task-card__actions">
-      {paused && task.can_continue !== false ? <Button busy={busy} icon={<Activity />} onClick={() => void act("continue")}>{t("execution.continue")}</Button> : null}
-      {paused && task.can_retry !== false ? <Button busy={busy} icon={<RotateCcw />} onClick={() => void act("retry")}>{t("execution.retry")}</Button> : null}
-      {paused && task.recovery_action === "run_retry" && onRunRetry ? <Button busy={busy} icon={<RotateCcw />} onClick={() => void act("run_retry")}>{t("execution.retryRun")}</Button> : null}
-      {paused || task.status === "failed" ? <Button disabled={busy} icon={<Settings />} onClick={onSettings}>{t("execution.settings")}</Button> : null}
+      {paused && task.can_retry !== false ? <Button busy={busy} icon={<RotateCcw />}
+        onClick={() => void act(task.recovery_action === "run_retry" && onRunRetry ? "run_retry" : "retry")}>{t("execution.retry")}</Button> : null}
+      {paused && /model_|resource|memory|vram|runtime_|engine_|access_denied/.test(task.error_code ?? "")
+        ? <Button disabled={busy} icon={<Settings />} onClick={onSettings}>{t("execution.settings")}</Button> : null}
       {task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
     </div>
     {error ? <p role="alert">{error}</p> : null}

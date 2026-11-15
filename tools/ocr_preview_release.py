@@ -11,6 +11,7 @@ import subprocess
 import zipfile
 
 from offline_delivery import installer_hook, sha256, validate_relative, write_json, check_file, LOCK
+from program_release import check_version
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = ('llm-runtime', 'rag-runtime', 'ocr-runtime', 'ocr-model-package')
@@ -85,6 +86,7 @@ def native_manifest(directory, payload, archives, application):
 
 
 def write_native_installer(source, output, payload_manifest, parts_manifest, compiler, version, helper=None):
+    version_number = version.split('-', 1)[0] + '.' + version.rsplit('.', 1)[1]
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
     application = verify_application(source, original, unified=True)
     helper = Path(helper) if helper else source / 'agent-installer.exe'
@@ -117,7 +119,7 @@ SetCompressor /SOLID lzma
 ShowInstDetails show
 ShowUninstDetails show
 Icon "{nsis_path(ROOT / 'apps/agent-desktop/src-tauri/icons/icon.ico')}"
-VIProductVersion "0.16.0.{version.rsplit('.', 1)[1]}"
+VIProductVersion "{version_number}"
 VIAddVersionKey /LANG=1033 "ProductName" "agent Airworthiness"
 VIAddVersionKey /LANG=1033 "FileVersion" "{version}"
 VIAddVersionKey /LANG=1033 "FileDescription" "Differential full offline installer"
@@ -246,11 +248,11 @@ SectionEnd
 
 
 def write_installer(source, output, payload_manifest, parts_manifest, compiler, version='0.15.0-ocr-preview.1', *, unified=False, helper=None):
-    pattern = r'0\.16\.0-preview\.[1-9][0-9]*' if unified else r'0\.15\.0-ocr-preview\.[1-9][0-9]*'
-    if not re.fullmatch(pattern, version):
-        raise ValueError('Unsupported preview version')
     if unified:
+        check_version(version, 'preview')
         return write_native_installer(source, output, payload_manifest, parts_manifest, compiler, version, helper)
+    if not re.fullmatch(r'0\.15\.0-ocr-preview\.[1-9][0-9]*', version):
+        raise ValueError('Unsupported preview version')
     build = output / 'build'
     original = json.loads((source / 'delivery-manifest.json').read_text(encoding='utf-8'))
     application = verify_application(source, original, unified=unified)

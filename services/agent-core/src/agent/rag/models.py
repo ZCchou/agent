@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import importlib.util
 import json
+import logging
 import math
 import os
 import shutil
@@ -24,6 +25,7 @@ from agent.gpu_resources import system_memory
 from agent.rag.model_profiles import PROFILES, validate_onnx_package
 from agent.rag.worker_client import WorkerClient
 from agent.execution.execution_wait import current_activity, current_task_id, current_monitor, Diagnostic
+from agent.infrastructure.logging import log_event
 
 _UNSAFE = {".bin", ".pt", ".pth", ".pkl", ".pickle", ".py", ".pyc", ".pyo", ".exe", ".dll", ".so", ".bat", ".cmd", ".ps1", ".sh"}
 _DTYPES = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1, "I16": 2, "U16": 2, "F16": 2, "BF16": 2, "I32": 4, "U32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
@@ -39,6 +41,8 @@ class _IntegrityProgress:
         self.files_processed = 0
         self.bytes_read = 0
         self.last_report = float('-inf')
+        if self.activity is not None:
+            self.activity.observe('integrity')
         self.report()
 
     def read(self, count):
@@ -202,6 +206,7 @@ class ModelStore:
         self._lock = threading.RLock()
         self._mutation_lock = threading.RLock()
         self._runtime_lock = threading.Lock()
+        self._verification_lock = threading.Lock()
         self._runtime_verified = None
         self._workers: dict[str, WorkerClient] = {}
         self._closed = False
@@ -474,7 +479,7 @@ class ModelStore:
             raise _model_file_error(exc, root, 'Model integrity verification failed') from exc
         return root
 
-    def _command(self, force=True):
+    def _command(self, force=False):
         with self._runtime_lock:
             return self._runtime_command(force)
 
@@ -515,7 +520,8 @@ class ModelStore:
                 raise ValueError("Inference runtime executable is unlisted")
             inventory.report(force=True)
             identity = (str(base), tuple(sorted(stamp)))
-            if force or self._runtime_verified != identity:
+            cache_hit = not force and self._runtime_verified == identity
+            if not cache_hit:
                 progress = _IntegrityProgress('runtime_hashes', len(hashes))
                 for name, expected in hashes.items():
                     if _hash(_safe_relative(base, name), progress=progress.read) != expected:
@@ -523,6 +529,8 @@ class ModelStore:
                     progress.file_processed()
                 progress.report(force=True)
                 self._runtime_verified = identity
+            log_event(logging.getLogger(__name__), logging.INFO, 'runtime_integrity_checked',
+                      'Inference component integrity checked', cache_hit=cache_hit, file_count=len(hashes))
             return [str(executable)]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise CoreDataError("rag_model_error", f"Trusted packaged inference runtime unavailable: {exc}") from exc
@@ -543,18 +551,26 @@ class ModelStore:
             raise _model_file_error(exc, root, 'Model integrity stat check failed') from exc
 
     def _verified_path(self, record, root, force):
+        with self._verification_lock:
+            return self._verified_model_path(record, root, force)
+
+    def _verified_model_path(self, record, root, force):
         path = root / record["id"]
         key = (str(root), record["id"], record["digest"])
         before = self._stat_identity(path)
         with self._lock:
             cached = self._verified_files.get(key)
-        if force or cached != before:
+        cache_hit = not force and cached == before
+        if not cache_hit:
             self._verify(record, root=root)
             after = self._stat_identity(path)
             if before != after:
                 raise CoreDataError("rag_model_error", "Model changed during integrity verification")
             with self._lock:
                 self._verified_files[key] = after
+        log_event(logging.getLogger(__name__), logging.INFO, 'model_integrity_checked',
+                  'Auxiliary model integrity checked', model_id=record['id'],
+                  cache_hit=cache_hit, file_count=len(before))
         return path
 
     def set_idle_timeout(self, seconds):
@@ -684,7 +700,8 @@ class ModelStore:
         def is_resident():
             worker = self._resident_workers.get(key)
             return worker is not None and worker.process is not None and worker.process.returncode is None
-        guard = self.gpu_resources.auxiliary(record, resident=is_resident) if self.gpu_resources else nullcontext()
+        admission = dict(record)
+        guard = self.gpu_resources.auxiliary(admission, resident=is_resident) if self.gpu_resources else nullcontext()
         async with guard, self._device_locks[device]:
             if activity:
                 activity.queue(False, **model_details)
@@ -699,18 +716,15 @@ class ModelStore:
             worker = self._resident_workers.get(key)
             force = worker is None or not is_resident()
             try:
-                path = await asyncio.to_thread(self._verified_path, record, root, force)
+                path = await asyncio.to_thread(self._verified_path, record, root, False)
                 fingerprint = self._stat_identity(path)
                 if worker is not None and (force or worker.model_fingerprint != fingerprint or worker.model_root != str(root)):
                     await self._discard_worker(key)
                     worker = None
+                    force = True
                 if worker is None:
                     if device == 'cpu':
                         await self._admit_cpu(record)
-                    else:
-                        for old in list(self._resident_workers):
-                            if old[2] == 'cuda':
-                                await self._discard_worker(old)
                     command = await asyncio.to_thread(self._command)
                     if self._closed:
                         raise CoreDataError('rag_model_error', 'Local model store is closed')
@@ -726,6 +740,7 @@ class ModelStore:
                 self._workers[device] = worker
                 self._loaded_models[device] = (worker, identity)
                 if activity:
+                    activity.observe('rag_worker')
                     activity._rag_worker = worker
                     activity.progress(stage='worker_starting' if force else 'model_ready', **model_details)
                 request_params = {"path": str(path), "profile": record["profile"], "backend": record["backend"],
@@ -796,7 +811,6 @@ class ModelStore:
                             if exc.code != 'rag_resource_exhausted' or batch_size == 1:
                                 raise
                             batch_size = 1
-                            await asyncio.to_thread(self._verified_path, record, root, True)
                             continue
                         if not isinstance(batch_result, list) or len(batch_result) != len(batch):
                             raise CoreDataError('rag_model_error', 'Inference returned an invalid batch size')
@@ -840,6 +854,14 @@ class ModelStore:
             for key in list(self._resident_workers):
                 if key[2] == 'cuda':
                     await self._discard_worker(key)
+
+    async def release_cuda_one(self):
+        async with self._device_locks['cuda']:
+            for key in list(self._resident_workers):
+                if key[2] == 'cuda':
+                    await self._discard_worker(key)
+                    return True
+        return False
 
     async def probe(self, model_id):
         try:

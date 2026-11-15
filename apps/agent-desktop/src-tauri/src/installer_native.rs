@@ -696,7 +696,11 @@ fn previous(root: &Path, managed: &Path) -> Result<Option<Manifest>> {
         return Ok(None);
     }
     let mut m: Manifest = read_json(&legacy)?;
-    if m.schema_version != 1 || !m.release_id.starts_with("agent-0.16.0-preview.") {
+    let version = m
+        .release_id
+        .strip_prefix("agent-")
+        .and_then(|value| semver::Version::parse(value).ok());
+    if m.schema_version != 1 || version.is_none() {
         return Err("unsupported legacy inventory".into());
     }
     m.schema_version = 2;

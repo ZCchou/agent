@@ -65,7 +65,7 @@ export function LocalModelsPanel({ onChanged, onAuxiliary }: { onChanged(): Prom
   const refresh = useCallback(async () => {
     const [next, status, taskList] = await Promise.all([localModelRepository.list(), localModelRepository.status(), localModelRepository.jobs()]);
     setCatalog(next); setRuntime(status); setJobs(taskList.jobs);
-    const revision = JSON.stringify(next.models.map(model => [model.id, model.status, model.is_default]));
+    const revision = JSON.stringify(next.models.map(model => [model.id, model.status, model.is_default, model.tool_verification?.status]));
     if (catalogRevision.current && revision !== catalogRevision.current) await onChanged();
     catalogRevision.current = revision;
   }, [onChanged]);
@@ -102,7 +102,6 @@ export function LocalModelsPanel({ onChanged, onAuxiliary }: { onChanged(): Prom
       : jobs.some(job => (job.state ?? job.status) === "waiting_recovery")
         ? "模型任务等待处理，请在任务卡中恢复或取消。" : undefined;
   return <section className="local-models" aria-label="本地模型管理">
-    <p className="models-alert" role="status">离线模式 · 模型文件由本机导入 · 公网服务、检索、远程图片和在线更新已停用</p>
     {error && <div role="alert"><p>{error}</p><p>运行中请先停止对话或卸载模型后重试。指定设备加载失败时可修改配置后重新加载。</p><Button onClick={() => void act(refresh)}>重试刷新</Button></div>}
     <Card><h2>主模型</h2><p>选择单个 GGUF 文件。分片模型选择主文件，系统会校验同目录分片。</p>
       <Button disabled={busy} onClick={() => void act(selectModel)}>选择 GGUF 文件</Button>
@@ -117,10 +116,14 @@ export function LocalModelsPanel({ onChanged, onAuxiliary }: { onChanged(): Prom
         <p>{model.architecture} · {model.quantization} · {(model.size_bytes / 1024 ** 3).toFixed(2)} GiB · {model.status}</p>
         <p>来源 {model.source || "未标注"} · 许可证 {model.license || "未标注"}</p><p className="local-model-digest">指纹 {model.digest || model.id}</p>
         {model.error && <p role="alert">{formatLocalModelError(model.error)}</p>}
+        <p>工具能力 {({ untested: "首次使用时自动检测", probing: "正在检测", verified: model.tool_mode === "native" ? "原生工具" : "结构化兼容", unsupported: "本次调用格式未通过", incomplete: "检测未完成" } as const)[model.tool_verification?.status ?? "untested"]}</p>
+        {model.tool_verification?.updated_at ? <p>最近检测 {new Date(model.tool_verification.updated_at).toLocaleString()}</p> : null}
+        {model.tool_verification?.error ? <p role="status">{model.tool_verification.error.message}</p> : null}
+        {model.tool_probe_task_id ? <ExecutionTaskCard enabled owner={{ kind: "task", id: model.tool_probe_task_id }} onSettings={() => undefined} /> : null}
         <LocalModelConfigurationForm key={`${model.id}:${model.device}:${model.context_length}:${model.threads}:${model.gpu_layers}`} model={model} busy={busy || Boolean(runtimeBlocked)} blockedReason={runtimeBlocked} onSave={config => void act(() => localModelRepository.configure(model.id, config))} onSaveAndLoad={config => void act(() => localModelRepository.configureAndLoad(model.id, config))} />
         <div className="local-model-actions"><Button disabled={busy || Boolean(runtimeBlocked) || model.status === "loading"} title={runtimeBlocked || (model.status === "loading" ? "正在加载，请等待或取消任务" : undefined)} onClick={() => void act(() => localModelRepository.load(model.id))}>{model.status === "loaded" ? "重新加载模型" : "加载模型"}</Button>
           <Button disabled={busy || Boolean(runtimeBlocked) || runtime.model_id !== model.id} title={runtimeBlocked || (runtime.model_id !== model.id ? "该模型当前未加载" : undefined)} onClick={() => void act(() => localModelRepository.unload())}>卸载模型</Button>
-          <Button disabled={busy || model.status !== "loaded"} onClick={() => void act(() => modelCatalogRepository.probeTools(model.provider_profile_id, model.id))}>测试工具支持</Button>
+          <Button disabled={busy || model.status !== "loaded" || model.tool_verification?.status === "probing"} onClick={() => void act(() => modelCatalogRepository.probeTools(model.provider_profile_id, model.id))}>测试工具支持</Button>
           <Button disabled={busy || model.is_default} onClick={() => void act(() => modelCatalogRepository.updateDefault(model.provider_profile_id, model.id))}>设为默认</Button>
           <Button disabled={busy || model.status === "loaded" || model.status === "loading"} onClick={() => void act(() => localModelRepository.remove(model.id))}>删除模型</Button></div>
       </article>)}

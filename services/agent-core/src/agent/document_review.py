@@ -362,10 +362,13 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
             page.append(field)
         index = len(batches)
         context = {'evidence': []}
+        evidence_loaded = False
         while True:
             batch = _batch(base, page, index)
             if _fits(batch, {'evidence': []}, token_allowance):
-                context = await _invoke(evidence, batch)
+                if not evidence_loaded:
+                    context = await _invoke(evidence, batch)
+                    evidence_loaded = True
                 if not isinstance(context, dict) or not isinstance(context.get('evidence'), list):
                     raise _invalid('资料检索回调需要返回当前证据清单。')
                 expected_generation = review_identity.get('project_generation')

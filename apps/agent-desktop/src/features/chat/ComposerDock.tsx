@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import type { AttachmentPreview, CompactionTargetRequest, ContextCompactionState, Conversation, MessageAttachment, Project, ProjectGrant, RejectedAttachment } from "../../types/domain";
 import { ChatComposer } from "./ChatComposer";
 import { WorkExecutionControls } from "./WorkExecutionControls";
-import { WebSearchControl } from "../web-search/WebSearchControl";
 import type { WebSearchController } from "../web-search/useWebSearchController";
 import { CompactionRecoveryControl } from "./CompactionRecoveryControl";
 import type { RoutingModelOption } from "./ConversationRoutingControl";
@@ -64,8 +63,7 @@ export function ComposerDock(props: Props) {
       previews={props.attachmentPreviews} attachmentBusy={props.attachmentBusy}
       attachmentError={props.attachmentError} onAttach={props.onAttach} onPasteImages={props.onPasteImages}
       onRemoveAttachment={props.onRemoveAttachment} onRemoveRejectedAttachment={props.onRemoveRejectedAttachment}
-      webSearchControl={<WebSearchControl controller={props.webSearch} disabled={props.disabled || props.generating}
-        onOpenProjectSettings={props.onOpenProjectSettings} />} />
+      />
     {props.inlineNotice}
     {props.compaction && ["queued", "running", "interrupted", "failed"].includes(props.compaction.status) ? (
       <div className={`context-compaction-status context-compaction-status--${props.compaction.status}`} role="status">

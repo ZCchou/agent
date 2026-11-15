@@ -55,10 +55,11 @@ def nvidia_memory():
 
 
 class GpuResources:
-    def __init__(self, release_auxiliary, *, probe=nvidia_memory):
+    def __init__(self, release_auxiliary, *, probe=nvidia_memory, release_one=None):
         self._lock = asyncio.Lock()
         self._release_auxiliary = release_auxiliary
         self._probe = probe
+        self._release_one = release_one
 
     @asynccontextmanager
     async def primary(self, model):
@@ -78,13 +79,24 @@ class GpuResources:
         async with self._lock:
             loaded = resident() if callable(resident) else resident
             if not loaded:
-                await self._release_auxiliary()
                 memory = await asyncio.to_thread(self._probe)
                 if "free_bytes" not in memory:
                     raise CoreDataError("gpu_probe_unavailable", "无法核验 CUDA 可用显存。请检查驱动或选择 CPU。")
                 # Includes potential FP32 expansion plus workspace. Actual backend
                 # allocation remains authoritative and its errors stay visible.
-                required = 2 * model["size_bytes"] + 512 * 1024**2
+                required = max(2 * model["size_bytes"] + 512 * 1024**2,
+                               model.get('gpu_peak_bytes', 0)) + 1024**3
+                while memory['free_bytes'] < required:
+                    if self._release_one is not None:
+                        if not await self._release_one():
+                            break
+                    else:
+                        await self._release_auxiliary()
+                    memory = await asyncio.to_thread(self._probe)
+                    if 'free_bytes' not in memory:
+                        raise CoreDataError('gpu_probe_unavailable', '无法核验 CUDA 可用显存。')
+                    if self._release_one is None:
+                        break
                 if memory["free_bytes"] < required:
                     raise CoreDataError("insufficient_vram", "辅助模型可用显存不足。请卸载主模型、减少 GPU 层数，或将辅助模型设为 CPU。")
             yield

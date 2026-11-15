@@ -122,12 +122,12 @@ test("standalone loading exposes its saved recovery task in model settings", asy
     const original = window.__TAURI_INTERNALS__.invoke;
     window.__loadRecoveryActions = [];
     const task = { id: 'load-execution', revision: 0, sequence: 1, attempt: 1,
-      run_id: 'local_model:load-job', status: 'waiting_recovery', stage: 'main_model_loading',
+      run_id: 'local_model:load-job', status: 'failed', stage: 'main_model_loading',
       auto_recoveries: 2, elapsed_seconds: 400, can_retry: true, can_continue: false,
       current_stage: { details: { model_name: 'Fixture GGUF', device: 'cpu' } } };
     window.__TAURI_INTERNALS__.invoke = async (command, args) => {
       if (command === 'local_model_request' && args.action === 'job.list') return { jobs: [{
-        id: 'load-job', kind: 'runtime.load', status: 'waiting_recovery', progress: 0,
+        id: 'load-job', kind: 'runtime.load', status: 'failed', progress: 0,
         execution_task_id: task.id }] };
       if (command === 'execution_request') {
         if (args.action !== 'status') {
@@ -142,9 +142,9 @@ test("standalone loading exposes its saved recovery task in model settings", asy
   const card = page.locator('.execution-task-card');
   await expect(card).toContainText('Fixture GGUF');
   await expect(card).toContainText('CPU');
-  await card.getByRole('button', { name: 'Recover current stage', exact: true }).click();
+  await card.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__loadRecoveryActions)).toEqual(['retry']);
-  await expect(card.getByRole('button', { name: 'Recover current stage', exact: true })).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
 });
 test("maximum-context shortcut fills declared maximum and saves through the normal form", async ({ page }) => {
   await setup(page); await importModel(page);
@@ -244,8 +244,7 @@ test("a new chat can select and load its local default without opening model set
 
 test("model settings can select an unloaded imported model as the default", async ({ page }) => {
   await setup(page); await importModel(page);
-  await page.locator(".models-default-card select").first().selectOption(`managed:${"a".repeat(64)}`);
-  await page.locator(".models-default-card select").last().selectOption("a".repeat(64));
+  await page.getByRole('button', { name: '设为默认', exact: true }).click();
   await expect(page.getByRole("heading", { name: "Fixture GGUF · 默认模型" })).toBeVisible();
 });
 

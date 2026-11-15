@@ -112,9 +112,9 @@ if ($versionMismatches.Count -gt 0) {
     throw "Version contract mismatch. Desktop=$appVersion; $($versionMismatches -join '; ')"
 }
 if (-not $ReleaseTag) {
-    $ReleaseTag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } elseif ($UpdateChannel -eq "stable") { "v$appVersion" } else { "v$appVersion-preview.1" }
+    $ReleaseTag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } elseif ($UpdateChannel -eq "stable" -or $appVersion -match '-preview\.[1-9]\d*$') { "v$appVersion" } else { "v$appVersion-preview.1" }
 }
-$expectedTagPattern = if ($UpdateChannel -eq "stable") { "^v$([regex]::Escape($appVersion))$" } else { "^v$([regex]::Escape($appVersion))-preview\.[1-9]\d*$" }
+$expectedTagPattern = if ($UpdateChannel -eq "stable" -or $appVersion -match '-preview\.[1-9]\d*$') { "^v$([regex]::Escape($appVersion))$" } else { "^v$([regex]::Escape($appVersion))-preview\.[1-9]\d*$" }
 if ($ReleaseTag -notmatch $expectedTagPattern -or ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $ReleaseTag)) {
     throw "Release tag, application version and update channel disagree."
 }

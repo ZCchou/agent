@@ -42,14 +42,10 @@ test("clarification waits for explicit confirmation, dismisses and resumes with 
   expect(replies).toEqual([{ action: "respond", params: { task_id: "intent1", revision: 1, answers: { audience: "Research team with methods experience" } } }]);
 });
 
-test("closing a deadline notice preserves the deadline and another scope hides the dialog", async ({ page }) => {
+test("long identification continues without a waiting dialog", async ({ page }) => {
   await page.setViewportSize({ width: 680, height: 480 });
   await openTask(page, { status: "identifying", clarification: null });
-  const dialog = page.getByRole("dialog", { name: "Intent recognition is taking longer" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("Attempt 1/3");
-  await expect(dialog.getByRole("button", { name: "Continue waiting" })).toBeVisible();
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  const dialog = page.getByRole("dialog");
   await page.waitForTimeout(850);
   await expect(dialog).not.toBeVisible();
   expect(await page.evaluate(() => window.intentCalls.filter((value) => value.action === "extend"))).toEqual([]);
@@ -61,9 +57,44 @@ test("closing a deadline notice preserves the deadline and another scope hides t
 test("technical retry errors keep clarification fields hidden", async ({ page }) => {
   await openTask(page, { status: "waiting_user", clarification: null, can_retry: true, can_extend: false,
     error: { code: "provider_timeout", message: "Provider did not respond" } });
-  const dialog = page.getByRole("dialog", { name: "Intent recognition is taking longer" });
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Provider did not respond" })).toBeVisible();
+});
+
+test("clarification uses the available text width and preserves custom drafts", async ({ page }) => {
+  await openTask(page);
+  const dialog = page.getByRole("dialog", { name: "A little more information" });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("textbox")).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
-  await expect(dialog).toContainText("provider_timeout");
+  const bounds = await dialog.locator("header > div").boundingBox();
+  expect(bounds.width).toBeGreaterThan(300);
+  const answer = dialog.getByRole("textbox", { name: "Your answer" });
+  await answer.fill("Custom audience and long requirements");
+  await dialog.getByRole("radio", { name: "Research team" }).check();
+  await expect(answer).toHaveValue("Custom audience and long requirements");
+  await dialog.getByRole("button", { name: "Confirm and continue" }).click();
+  const replies = await page.evaluate(() => window.intentCalls.filter(value => value.action === "respond"));
+  expect(replies[0].params.answers).toEqual({ audience: "Research team" });
+});
+
+for (const scale of [1.25, 1.5, 2]) test(`long clarification remains usable at ${scale} DPI`, async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 900, height: 500 }, deviceScaleFactor: scale });
+  const page = await context.newPage();
+  try {
+    await openTask(page, { clarification: { summary: "审阅整份适航模板并保留原有章节。".repeat(12), questions: [1, 2, 3].map(id => ({
+      id: String(id), question: `问题 ${id} ` + "需要补充的章节信息与试验参数。".repeat(8),
+      options: ["F:/模型文件/很长的中文路径/".repeat(12), "使用当前项目资料"] })) } });
+    const dialog = page.getByRole("dialog", { name: "A little more information" });
+    await expect(dialog).toBeVisible();
+    const dimensions = await dialog.evaluate(element => ({
+      width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height,
+      scroll: element.scrollWidth, client: element.clientWidth,
+    }));
+    expect(dimensions.width).toBeLessThanOrEqual(868);
+    expect(dimensions.height).toBeLessThanOrEqual(468);
+    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client + 1);
+    await expect(dialog.getByRole("button", { name: "Confirm and continue" })).toBeInViewport();
+    await dialog.getByRole("radio", { name: "使用当前项目资料", exact: true }).last().check();
+    await expect(dialog.getByRole("button", { name: "Confirm and continue" })).toBeDisabled();
+  } finally { await context.close(); }
 });

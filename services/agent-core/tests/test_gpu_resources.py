@@ -27,7 +27,7 @@ def test_primary_gpu_load_releases_auxiliary_residency_and_serializes(tmp_path):
         assert calls == ["release", "primary"]
         finish.set()
         await asyncio.gather(task, other)
-        assert calls == ["release", "primary", "release", "auxiliary"]
+        assert calls == ["release", "primary", "auxiliary"]
     asyncio.run(scenario())
 
 
@@ -66,6 +66,22 @@ def test_auxiliary_switch_reclaims_old_cached_model_before_memory_check():
         gpu = GpuResources(release, probe=lambda: dict(memory))
         async with gpu.auxiliary({"device": "cuda", "size_bytes": 1024**3}, resident=False):
             assert memory["free_bytes"] == 8 * 1024**3
+    asyncio.run(scenario())
+
+
+def test_auxiliary_with_available_memory_keeps_other_resident_models():
+    from agent.gpu_resources import GpuResources
+
+    async def scenario():
+        released = []
+
+        async def release():
+            released.append(True)
+
+        gpu = GpuResources(release, probe=lambda: {"free_bytes": 12 * 1024**3})
+        async with gpu.auxiliary({"device": "cuda", "size_bytes": 1024**3}, resident=False):
+            assert released == []
+
     asyncio.run(scenario())
 
 

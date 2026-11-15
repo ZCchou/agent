@@ -271,7 +271,8 @@ def test_live_installer_holds_exclusive_lock_until_postflight_exits(tmp_path):
         process.communicate(timeout=10)
 
 
-def test_legacy_preview_inventory_is_adopted_without_full_payload_copy(tmp_path):
+@pytest.mark.parametrize('release', ['agent-0.16.0-preview.2', 'agent-0.17.0-preview.1'])
+def test_legacy_preview_inventory_is_adopted_without_full_payload_copy(tmp_path, release):
     root = tmp_path / 'installed'
     (root / '.managed-runtime').mkdir(parents=True)
     (root / 'rag-runtime').mkdir()
@@ -279,7 +280,7 @@ def test_legacy_preview_inventory_is_adopted_without_full_payload_copy(tmp_path)
     (root / 'agent-core.exe').write_bytes(b'legacy')
     (root / '.managed-runtime/owner.txt').write_text(APP + '.offline-runtime.v1')
     (root / '.managed-runtime/active.json').write_text(json.dumps({'schema_version': 1,
-        'release_id': 'agent-0.16.0-preview.2', 'files': {'rag-runtime/a': identity(b'old')}}))
+        'release_id': release, 'files': {'rag-runtime/a': identity(b'old')}}))
     manifest = package(tmp_path, {'rag-runtime/a': b'old', 'agent-core.exe': b'new'})
     (manifest.parent / '0.zip').unlink()
     ok(run(root, manifest))

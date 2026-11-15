@@ -19,8 +19,7 @@ test("Trash is a second-level settings page and only loads after it is opened", 
   await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Trash" })).toBeVisible();
   const remoteImages = page.getByRole("checkbox", { name: /Allow loading/ });
-  await expect(remoteImages).not.toBeChecked();
-  await expect(remoteImages).toBeDisabled();
+  await expect(remoteImages).toHaveCount(0);
   expect(calls).not.toContain("update_remote_image_policy");
   expect(calls).not.toContain("list_trash");
 

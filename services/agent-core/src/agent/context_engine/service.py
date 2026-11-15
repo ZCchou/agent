@@ -535,7 +535,7 @@ class ContextEngineService:
                     "Resolve tool errors from their specific codes. "
                     "Use Markdown relative links and never expose absolute paths."
                     if conversation["kind"] == "project_work"
-                    else "You have no file or computer tools in standard chat.")
+                    else "Use the current runtime capability snapshot to describe available tools and app-managed document actions. Project file actions require an authorized project workspace.")
         message += "</system-policy>"
         message += (
             f'<product-behavior-contract version="{DEFAULT_GLOBAL_INSTRUCTIONS_VERSION}">\n'
