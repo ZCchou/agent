@@ -85,7 +85,7 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
   return editor;
 }
 
-test('adaptive execution keeps progress visible across old deadlines and exposes recovery controls', async ({ page }) => {
+test('background execution keeps progress visible without manual waiting controls', async ({ page }) => {
   const editor = await openRecoveryChat(page);
   await page.evaluate(() => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
@@ -123,15 +123,10 @@ test('adaptive execution keeps progress visible across old deadlines and exposes
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 2,
     error_code: 'execution_activity_uncertain' }));
-  await expect(card).toContainText('Task needs attention');
-  await card.getByRole('button', { name: 'Continue waiting', exact: true }).click();
   await expect(card).toContainText('Reranking candidates');
-  await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 4 }));
-  await card.getByRole('button', { name: 'Recover current stage', exact: true }).click();
-  await expect(card).toContainText('Reranking candidates');
-  const controls = await page.evaluate(() => window.executionControls);
-  expect(controls.map(value => value.action)).toEqual(['continue', 'retry']);
-  expect(controls.every(value => value.params.idempotency_key.length > 0)).toBe(true);
+  await expect(card.getByRole('button', { name: 'Continue waiting', exact: true })).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Recover current stage', exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => window.executionControls)).toEqual([]);
   await card.getByRole('button', { name: 'Cancel task', exact: true }).click();
   await expect(card).toHaveCount(0);
 });
@@ -196,7 +191,7 @@ test("a definitive preparation failure rotates the unchanged send identity", asy
   const editor = await openRecoveryChat(page, "terminal");
   await send(page, editor);
   await expect(editor).toHaveValue("Unchanged original question");
-  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByRole("dialog")).not.toBeVisible();
   await page.locator(".chat-composer").getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.intentStarts.length)).toBe(2);
   const starts = await page.evaluate(() => window.intentStarts);

@@ -93,6 +93,125 @@ def execute(setup, artifact, generate=None, *, identity=None, allowance=16000,
     return asyncio.run(monitor.execute_stage(root['id'], 'document_review', operation))
 
 
+@pytest.mark.parametrize('locator,label', [
+    ({'page': 2}, 'Rules · A · 1 · 物理页 2'),
+    ({}, 'Rules · A · 1 · 物理页码未提供'),
+])
+def test_review_markdown_uses_application_source_labels(setup, locator, label):
+    workflow, run, _, _, sources = setup
+    sources.source['locator'] = locator
+    document = Document()
+    document.add_paragraph(SOURCE)
+    artifact = register(workflow, run, document)
+    result = execute(setup, artifact)
+    assert f'[{label}](rag-evidence:evidence-1)' in result['markdown']
+
+
+def test_model_classifies_authoring_guidance_without_treating_it_as_equipment_facts(setup):
+    workflow, run, _, _, _ = setup
+    document = Document()
+    document.add_paragraph('本章节主要说明大纲编制依据和参考文件。')
+    artifact = register(workflow, run, document)
+
+    def generate(batch, evidence):
+        return {'results': [{'target_id': item['id'], 'content_kind': 'instruction',
+            'status': 'pending', 'summary': '这是供编写者使用的模板说明，正式稿应提供实际文件清单。',
+            'problems': [], 'evidence': [], 'version_issues': [], 'gaps': ['实际文件清单待补充。']}
+            for item in batch['fields']]}
+
+    result = execute(setup, artifact, generate)
+    target = result['report']['targets'][0]
+    assert target['review_kind'] == 'instruction'
+    assert target['field_type'] == 'content'
+    assert target['evidence'] == []
+    assert '编写说明' in result['markdown']
+
+
+def test_every_review_batch_receives_document_wide_standard_references(setup):
+    workflow, run, _, _, sources = setup
+    document = Document()
+    document.add_heading('编制依据', 1)
+    document.add_paragraph('本模板拟按照 RTCA DO-160G 编制。')
+    document.add_heading('振动试验', 1)
+    for index in range(12):
+        document.add_paragraph(f'检查位置 {index}')
+    artifact = register(workflow, run, document)
+    batches = []
+    original_evidence = sources.evidence
+
+    def verify_context(batch):
+        assert batch['template_context'] == {'name': 'review.docx', 'referenced_standards': ['DO-160G']}
+
+    def evidence(batch):
+        verify_context(batch)
+        return original_evidence(batch)
+
+    def generate(batch, context):
+        verify_context(batch)
+        batches.append(batch)
+        return sources.response(batch)
+
+    sources.evidence = evidence
+    result = execute(setup, artifact, generate)
+    assert len(batches) == 3
+    assert all('DO-160G' not in field['text'] for batch in batches[1:] for field in batch['fields'])
+    assert result['report']['coverage']['total'] == 15
+
+
+def test_review_schema_selects_only_current_targets_and_quote_identifiers():
+    from agent.document_contracts import document_batch_schema
+    schema = document_batch_schema({'stage': 'review',
+        'fields': [{'id': 'p-2', 'field_type': 'instruction'}, {'id': 'p-3', 'field_type': 'example'}],
+        'evidence': [{'id': 'source-1', 'quote_options': [{'quote_id': 'quote-1', 'text': '原文。'}]}]}, [])
+    results = schema['properties']['response']['anyOf'][0]['properties']['results']
+    assert results['minItems'] == results['maxItems'] == 2
+    properties = results['items']['properties']
+    assert properties['target_id']['enum'] == ['p-2', 'p-3']
+    citation = properties['evidence']['items']['properties']
+    assert citation['id']['enum'] == ['source-1']
+    assert citation['quote_id']['enum'] == ['quote-1']
+
+
+def test_review_schema_disallows_citations_when_no_evidence_is_available():
+    from agent.document_contracts import document_batch_schema
+    schema = document_batch_schema({'stage': 'review', 'fields': [{'id': 'p-2', 'field_type': 'content'}]}, [])
+    results = schema['properties']['response']['anyOf'][0]['properties']['results']
+    assert results['items']['properties']['evidence']['maxItems'] == 0
+
+
+def test_review_fit_reserves_instruction_and_current_response_schema():
+    from agent.context_engine.policy import estimate_tokens
+    from agent.document_review import _fits
+
+    batch = {'stage': 'review', 'fields': [{'id': 'p-1', 'field_type': 'content', 'text': '试验目的'}]}
+    context = {'evidence': [{'id': 'evidence-1', 'quote_options': [
+        {'quote_id': f'quote-{index}', 'text': '实际条款原文。'} for index in range(40)]}]}
+    old_allowance = estimate_tokens({'batch': batch, 'evidence': context}) + 256
+    assert not _fits(batch, context, old_allowance)
+
+
+def test_schema_compatibility_retry_consumes_one_of_the_three_model_calls(setup):
+    workflow, run, monitor, root, sources = setup
+    document = Document()
+    document.add_paragraph(SOURCE)
+    artifact = register(workflow, run, document)
+    calls = []
+
+    def generate(batch, context):
+        calls.append(batch.get('format_error'))
+        if len(calls) == 1:
+            raise ProviderError('response_format_unsupported', 'Schema unavailable')
+        return sources.response(batch)
+
+    result = execute(setup, artifact, generate)
+    assert calls == [None, 'response_format_unsupported']
+    assert result['report']['coverage']['reviewed'] == 1
+    with workflow.repository._connect() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM execution_wait_activity WHERE task_id=? AND kind='progress' "
+            "AND json_extract(payload_json,'$.review_call_number') IS NOT NULL", (root['id'],)).fetchone()[0]
+    assert count == 2
+
+
 def test_restored_batches_do_not_reset_repeated_failure_recovery_limit(setup):
     workflow, run, monitor, root, sources = setup
     document = Document()
@@ -118,16 +237,13 @@ def test_restored_batches_do_not_reset_repeated_failure_recovery_limit(setup):
             safe_to_retry=True, recoverable=lambda error: isinstance(error, CoreDataError)
                 and error.code == 'runtime_crashed'))
         try:
-            while not task.done() and monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-                await asyncio.sleep(0)
-            if task.done():
+            with pytest.raises(CoreDataError) as failure:
                 await task
+            assert failure.value.code == 'runtime_crashed'
             current = monitor.get_task(root['id'])
             assert current['auto_recoveries'] == 2
             assert calls == [0, 1, 1, 1]
-            monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='end-probe')
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            assert current['status'] == 'failed'
         finally:
             if not task.done():
                 task.cancel()
@@ -176,7 +292,10 @@ def test_inventory_covers_nonempty_nested_targets_and_duplicate_chapters_without
 
 
 def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(setup):
+    from agent.context_engine.policy import estimate_tokens
+    from agent.document_review import review_request
     workflow, run, _, _, sources = setup
+    sources.source['text'] = SOURCE * 12
     document = Document()
     document.add_heading('要求', 1)
     for index in range(23):
@@ -186,14 +305,16 @@ def test_batches_have_at_most_ten_targets_and_shrink_for_context_with_evidence(s
 
     def generate(batch, evidence):
         sizes.append(len(batch['fields']))
-        costs.append(len(json.dumps({'batch': batch, 'evidence': evidence}, ensure_ascii=False, separators=(',', ':'))))
+        messages, schema = review_request(batch, evidence)
+        costs.append(estimate_tokens({'messages': messages, 'response_schema': schema, 'tools': []}) + 256)
         return sources.response(batch)
 
-    result = execute(setup, artifact, generate, allowance=1600)
+    result = execute(setup, artifact, generate, allowance=2000)
     assert max(sizes) < 10
-    assert max(costs) <= 4032
+    assert max(costs) <= 2000
     assert result['report']['coverage']['total'] == 24
     assert result['report']['coverage']['pending'] == 0
+    assert len(sources.calls) == len(sizes)
 
 
 def test_two_committed_batches_restore_after_restart_without_regeneration(setup):

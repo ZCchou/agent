@@ -10,7 +10,7 @@ test("application pages retain the global typography and contain their content",
   const records = [];
   for (const viewport of [{ width: 1280, height: 850 }, { width: 1000, height: 680 }, { width: 900, height: 600 }]) {
     await page.setViewportSize(viewport);
-    for (const [name, ready] of [["Models", ".models-default-card"], ["Skills", ".skill-card"], ["Global behavior instructions", ".global-instructions-editor:not(:disabled)"], ["Approvals", ".approvals-page"], ["Settings", ".settings-language-control select:not(:disabled)"], ["Diagnostics", ".diagnostics-core-card"]]) {
+    for (const [name, ready] of [["Models", ".local-models"], ["Skills", ".skill-card"], ["Global behavior instructions", ".global-instructions-editor:not(:disabled)"], ["Approvals", ".approvals-page"], ["Settings", ".settings-language-control select:not(:disabled)"], ["Diagnostics", ".diagnostics-core-card"]]) {
       await page.getByRole("navigation").getByRole("button", { name, exact: true }).click();
       await expect(page.locator("main")).toBeVisible();
       await expect(page.locator(ready)).toBeVisible();
@@ -65,10 +65,10 @@ test("composer and model controls remain usable at the minimum desktop size", as
   expect.soft(labelsFit, "top bar label extends vertically beyond its button").toBe(true);
   await page.getByRole("button", { name: "System features" }).click();
   await page.getByRole("navigation").getByRole("button", { name: "Models", exact: true }).click();
-  const copy = page.locator(".models-routing-card .models-default-card__copy");
+  const copy = page.locator(".model-tabs");
   await expect(copy).toBeVisible();
   expect.soft((await copy.boundingBox()).width, "routing copy collapsed to a narrow text strip").toBeGreaterThanOrEqual(200);
-  const inputs = await page.locator(".models-routing-card__controls input:not([type=checkbox]), .models-routing-card__controls select").evaluateAll((elements) => elements.map((e) => e.getBoundingClientRect().height));
+  const inputs = await page.locator(".local-models input:not([type=checkbox]), .local-models select").evaluateAll((elements) => elements.map((e) => e.getBoundingClientRect().height));
   expect.soft(inputs.every((height) => height >= 32), "routing controls use native browser sizing").toBe(true);
   await page.getByRole("navigation").getByRole("button", { name: "Global behavior instructions", exact: true }).click();
   const card = page.locator(".global-instructions-card");
@@ -82,7 +82,7 @@ test("stacked model settings do not turn horizontal flex bases into empty vertic
   await page.goto("http://127.0.0.1:5173");
   await page.getByRole("button", { name: "System features", exact: true }).click();
   await page.getByRole("navigation").getByRole("button", { name: "Models", exact: true }).click();
-  const copy = page.locator(".models-routing-card .models-default-card__copy");
+  const copy = page.locator(".model-tabs");
   await expect(copy).toBeVisible();
   expect((await copy.boundingBox()).height).toBeLessThan(160);
 });
@@ -132,18 +132,12 @@ for (const locale of ["en", "zh-CN"]) test(`long content remains contained with 
     const overflow = await root.evaluate((e) => ({ client: e.clientWidth, scroll: e.scrollWidth }));
     expect.soft(overflow.scroll, label).toBeLessThanOrEqual(overflow.client + 1);
   }
-  for (const [name, ready] of [[zh ? "模型" : "Models", ".models-default-card"], [zh ? "技能" : "Skills", ".skill-card"], [zh ? "全局行为指令" : "Global behavior instructions", ".global-instructions-editor"], [zh ? "设置" : "Settings", ".settings-language-card"], [zh ? "诊断" : "Diagnostics", ".diagnostics-core-card"]]) {
+  for (const [name, ready] of [[zh ? "模型" : "Models", ".local-models"], [zh ? "技能" : "Skills", ".skill-card"], [zh ? "全局行为指令" : "Global behavior instructions", ".global-instructions-editor"], [zh ? "设置" : "Settings", ".settings-language-card"], [zh ? "诊断" : "Diagnostics", ".diagnostics-core-card"]]) {
     await page.getByRole("navigation").getByRole("button", { name, exact: true }).click();
     await expect(page.locator(ready).first()).toBeVisible();
     await contained(`${locale}: ${name}`);
     await contained(`${locale}: header ${name}`, ".top-bar");
-    if (name === (zh ? "模型" : "Models")) {
-      await page.getByRole("button", { name: zh ? "管理模型" : "Manage models", exact: true }).click();
-      const dialog = page.getByRole("dialog");
-      await expect(dialog).toBeVisible();
-      await contained(`${locale}: model catalog`, "[role=dialog]");
-      await dialog.getByRole("button", { name: zh ? "关闭" : "Close", exact: true }).click();
-    }
+
   }
   await page.getByRole("button", { name: /^Project Alpha \/ / }).click();
   await expect(page.locator(".project-detail__settings")).toBeVisible();
@@ -171,9 +165,6 @@ for (const locale of ["en", "zh-CN"]) test(`long content remains contained with 
   expect.soft(labelsOnOneLine, "short work-control labels must not collapse into narrow text columns").toBe(true);
   await page.screenshot({ path: `../../.artifacts/ui-consistency-2026-10-24/long-work-${locale}.png` });
   await page.getByRole("navigation").getByRole("button", { name: zh ? "设置" : "Settings", exact: true }).click();
-  await page.getByRole("button", { name: zh ? "打开" : "Open", exact: true }).click();
-  await expect(page.getByText("离线模式已停用联网检索。")).toBeVisible();
-  await expect(page.locator(".web-search-backend-form")).toHaveCount(0);
-  await contained(`${locale}: offline search settings`);
-  await page.screenshot({ path: `../../.artifacts/ui-consistency-2026-10-24/search-settings-${locale}.png` });
+  await expect(page.locator('.web-search-backend-form')).toHaveCount(0);
+  await contained(`${locale}: local settings`);
 });

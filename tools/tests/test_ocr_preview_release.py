@@ -74,9 +74,10 @@ def test_unified_delivery_preserves_office_and_separates_application_identity(tm
     assert release.is_public_file('office-runtime/libreoffice/program/soffice.exe', unified=True)
     assert not release.is_public_file('model.gguf', unified=True)
     result = release.write_installer(source, output, payload, parts, tmp_path / 'compiler',
-                                     version='0.16.0-preview.1', unified=True)
+                                     version='0.17.0-preview.1', unified=True)
     script = (output / 'build/setup.nsi').read_text(encoding='utf-8-sig')
-    assert result.name == 'agent-0.16.0-preview.1-windows-x64-setup.exe'
+    assert result.name == 'agent-0.17.0-preview.1-windows-x64-setup.exe'
+    assert 'VIProductVersion "0.17.0.1"' in script
     assert 'agent-updater.exe' in script and 'application.json' in script
     assert 'agentAirworthiness' in script
     assert 'agentOCRPreview' not in script

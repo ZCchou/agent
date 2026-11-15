@@ -736,7 +736,10 @@ pub async fn execution_request(
     action: String,
     params: Value,
 ) -> Result<Value, String> {
-    if !matches!(action.as_str(), "status" | "continue" | "retry" | "cancel") {
+    if !matches!(
+        action.as_str(),
+        "status" | "continue" | "retry" | "cancel" | "diagnostics"
+    ) {
         return Err("execution_action_invalid".into());
     }
     if !params.is_object() {
@@ -749,6 +752,36 @@ pub async fn execution_request(
         json!({"action": action, "params": params}),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn open_log_directory(app: AppHandle) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    tauri_plugin_opener::open_path(path, None::<&str>).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn export_execution_diagnostics(
+    app: AppHandle,
+    manager: State<'_, Mutex<CoreProcessManager>>,
+    task_id: Option<String>,
+) -> Result<String, String> {
+    let report = request_core(&app, &manager, "execution.request",
+        json!({"action":"diagnostics","params":task_id.map_or_else(|| json!({}), |id| json!({"task_id":id}))})).await?;
+    let directory = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| error.to_string())?
+        .join("diagnostics");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join(format!("task-{}.json", uuid::Uuid::new_v4()));
+    let data = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
+    std::fs::write(&path, data).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -1464,9 +1497,9 @@ mod routing_serialization_tests {
             crate::core_bridge::PROTOCOL_VERSION
         );
         assert_eq!(contract["settings_schema_version"], 20);
-        assert_eq!(contract["core_schema_version"], 32);
+        assert_eq!(contract["core_schema_version"], 33);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema32-agent-unified-v1");
+        assert_eq!(contract["build_id"], "schema33-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

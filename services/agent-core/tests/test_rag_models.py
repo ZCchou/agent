@@ -78,6 +78,64 @@ def model_directory(root, profile="bge-m3"):
     return root
 
 
+def test_worker_restart_reuses_verified_model_files(tmp_path, monkeypatch):
+    import sys
+
+    script = tmp_path / 'worker.py'
+    script.write_text("import json, sys\nfor line in sys.stdin:\n r=json.loads(line); print(json.dumps({'id':r['id'],'result':[[1.0]+[0.0]*1023 for _ in r['params']['texts']]}),flush=True)\n")
+    store = ModelStore(tmp_path / 'data')
+    record = asyncio.run(store.import_model(model_directory(tmp_path / 'source'), 'bge-m3'))
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+    verify = store._verify
+    checks = []
+
+    def counted(*args, **kwargs):
+        checks.append(True)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(store, '_verify', counted)
+
+    async def scenario():
+        try:
+            await store.embed(record['id'], ['first'])
+            await store._discard_worker((record['id'], record['digest'], 'cpu'))
+            await store.embed(record['id'], ['second'])
+            assert len(checks) == 1
+        finally:
+            await store.close()
+
+    asyncio.run(scenario())
+
+
+def test_memory_batch_fallback_keeps_worker_observation(tmp_path, monkeypatch):
+    import sys
+    from agent.execution.execution_wait import ExecutionMonitor, current_activity
+    from agent.storage import CoreRepository
+
+    script = tmp_path / 'memory_worker.py'
+    script.write_text("import json,sys\nfor line in sys.stdin:\n r=json.loads(line); t=r['params']['texts']; out={'error':'Failed to allocate memory'} if len(t)>1 else {'result':[[1.0]+[0.0]*1023]}; print(json.dumps({'id':r['id'],**out}),flush=True)\n")
+    store = ModelStore(tmp_path / 'data')
+    record = asyncio.run(store.import_model(model_directory(tmp_path / 'source'), 'bge-m3'))
+    store.execution_monitor = ExecutionMonitor(CoreRepository(tmp_path / 'core.db'))
+    monkeypatch.setattr(store, '_command', lambda: [sys.executable, str(script)])
+    sources = []
+
+    def progress(event):
+        if event.get('completed'):
+            activity = current_activity.get()
+            task = store.execution_monitor.get_task(activity.task_id)
+            sources.append(task['current_stage']['details']['observation_source'])
+
+    async def scenario():
+        try:
+            assert len(await store.embed(record['id'], ['first', 'second'], progress=progress)) == 2
+            assert sources == ['rag_worker', 'rag_worker']
+        finally:
+            await store.close()
+
+    asyncio.run(scenario())
+
+
 def test_permission_denied_directory_reports_actual_path_and_retries_after_access_restored(tmp_path, monkeypatch):
     import agent.rag.models as model_module
 
@@ -376,12 +434,12 @@ def test_embedding_batches_reuse_hash_verification_and_keep_loop_responsive(tmp_
     hashes = []
     pending_ticks = []
     responsive_hashes = []
-    def slow_hash(path):
+    def slow_hash(path, **options):
         hashes.append(path.name)
         tick = threading.Event()
         pending_ticks.append(tick)
         responsive_hashes.append(tick.wait(5))
-        return original(path)
+        return original(path, **options)
     monkeypatch.setattr(models, "_hash", slow_hash)
     async def exercise():
         finished = asyncio.Event()
@@ -454,9 +512,9 @@ def test_runtime_status_is_lightweight_but_worker_admission_checks_hashes(tmp_pa
     store = ModelStore(tmp_path / "data")
     original = models._hash
     hashes = []
-    def counted_hash(path):
+    def counted_hash(path, **options):
         hashes.append(path)
-        return original(path)
+        return original(path, **options)
     monkeypatch.setattr(models, "_hash", counted_hash)
     assert store.runtime_status()["available"]
     assert store.runtime_status()["available"]

@@ -1,6 +1,6 @@
 use serde_json::Value;
 pub const OFFLINE_ERROR: &str =
-    "offline_operation_disabled: 离线模式禁用公网服务、检索、远程图片和在线更新。";
+    "offline_operation_disabled: 当前智能体使用本地模型与资料。应用更新请使用更新器。";
 pub fn deny_network() -> Result<(), String> {
     Err(OFFLINE_ERROR.into())
 }

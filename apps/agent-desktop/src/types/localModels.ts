@@ -11,6 +11,9 @@ export interface LocalModel {
   is_default: boolean; source: string; license: string; error?: LocalModelError | string | null;
   files: unknown[]; created_at: string; source_type: "managed_local";
   capabilities: Record<string, unknown>; tool_mode: string;
+  tool_probe_task_id?: string | null;
+  tool_verification?: { status: "untested" | "probing" | "verified" | "unsupported" | "incomplete";
+    tool_mode: string; updated_at?: string; error?: LocalModelError | null };
 }
 export interface LocalModelConfiguration {
   device?: LocalDevice; context_length?: number; gpu_layers?: number; threads?: number;

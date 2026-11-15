@@ -124,10 +124,6 @@ export function ProjectsPage() {
     await action.run(async () => { await projectRepository.updateModelPolicy(selected.id, policy); await refreshWorkspace(); });
   }
 
-  async function changeWebAccess(policy: "disabled" | "allow_search") {
-    if (!selected) return;
-    await action.run(async () => { await projectRepository.updateWebAccess(selected.id, policy); await refreshWorkspace(); });
-  }
 
   async function changeModelScopePolicy(policy: "inherit_global" | "restricted") {
     if (!selected || !appSettings) return;
@@ -245,15 +241,6 @@ export function ProjectsPage() {
                 <option value="inherit_global">{t("models.inheritGlobalModels")}</option>
                 <option value="restricted">{t("models.restrictProjectModels")}</option>
               </select>
-            </label>
-            <label>{t("settings.webSearch.projectAccess")}
-              <select value={selected.web_access_policy ?? "disabled"}
-                disabled title="离线模式已停用联网检索"
-                onChange={(event) => void changeWebAccess(event.target.value as "disabled" | "allow_search")}>
-                <option value="disabled">{t("settings.webSearch.projectOff")}</option>
-                <option value="allow_search">{t("settings.webSearch.projectOn")}</option>
-              </select>
-              <small>{t("settings.webSearch.projectAccessHint")}</small>
             </label>
             {modelScope?.policy === "restricted" && appSettings ? <div className="project-model-scope">
               <strong>{t("models.allowedInProject")}</strong>

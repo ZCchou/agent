@@ -981,6 +981,25 @@ label.top-select > svg:last-child {
 .confirm-dialog > header > button:hover { background: var(--color-background); color: var(--color-text); }
 .confirm-dialog > footer { display: flex; justify-content: flex-end; gap: 9px; border-top: 1px solid var(--color-border-soft); padding: 12px 20px; background: var(--color-background); }
 .confirm-dialog__details { max-height: min(44vh, 360px); overflow: auto; border-top: 1px solid var(--color-border-soft); padding: 0 20px 18px; }
+
+.intent-task-dialog { width: min(640px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); color: var(--color-text); box-shadow: 0 24px 70px rgba(15, 23, 42, .2); overflow: hidden; }
+.intent-task-dialog[open] { display: flex; flex-direction: column; }
+.intent-task-dialog::backdrop { background: rgba(15, 23, 42, .32); }
+.intent-task-dialog > header { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 16px; padding: 20px 24px; flex: none; }
+.intent-task-dialog h2 { margin: 0; font-size: 16px; line-height: 1.6; }
+.intent-task-dialog p, .intent-task-dialog legend, .intent-task-dialog label { font-size: 14px; line-height: 1.6; text-align: left; overflow-wrap: anywhere; white-space: pre-wrap; }
+.intent-task-dialog p { margin: 8px 0 0; color: var(--color-text-secondary); }
+.intent-task-dialog__body { padding: 0 24px 24px; overflow-y: auto; min-height: 0; }
+.intent-task-dialog fieldset { border: 0; padding: 0; margin: 0 0 24px; min-width: 0; }
+.intent-task-dialog fieldset:last-of-type { margin-bottom: 0; }
+.intent-task-dialog legend { font-weight: 600; padding: 0; margin-bottom: 12px; width: 100%; }
+.intent-task-dialog__options { display: grid; gap: 8px; }
+.intent-task-dialog__option { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; cursor: pointer; }
+.intent-task-dialog__option input { width: 16px; height: 16px; margin: 4px 0 0; }
+.intent-task-dialog__option:has(input:checked) { border-color: var(--color-primary); background: var(--color-primary-soft); }
+.intent-task-dialog__answer { display: grid; gap: 8px; margin-top: 16px; }
+.intent-task-dialog textarea { box-sizing: border-box; width: 100%; min-width: 0; resize: vertical; font: inherit; line-height: 1.6; }
+.intent-task-dialog > footer { display: flex; justify-content: flex-end; padding: 16px 24px; border-top: 1px solid var(--color-border); flex: none; }
 .undo-dialog-details { display: grid; gap: 10px; color: var(--color-text-secondary); font-size: 11px; }
 .undo-dialog-details > div { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 3px 7px; border-radius: 9px; padding: 10px; background: var(--color-background); }
 .undo-dialog-details > div > span { grid-column: 2; color: var(--color-text-muted); }

@@ -11,9 +11,9 @@ from agent.repositories.context_repository import ContextRepository
 from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
-PROTOCOL_VERSION = 25
-CORE_VERSION = "0.16.0-preview.5"
-BUILD_ID = "schema32-agent-unified-v1"
+PROTOCOL_VERSION = 26
+CORE_VERSION = "0.17.0-preview.1"
+BUILD_ID = "schema33-agent-unified-v1"
 
 
 def _execution_identity(repository, run):
@@ -481,6 +481,8 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
             result = {"provider": service.configure_provider(params)}
         elif message_type == "routing.configure":
             result = {"routing": service.configure_routing(params)}
+            if service.offline:
+                service.schedule_background_resume()
         elif message_type == "provider.clear":
             service.clear_provider(_required_string(params, "provider_profile_id"))
             result = {"cleared": True}
@@ -612,10 +614,10 @@ async def _dispatch_async_message(message: Any, service: ChatRunService) -> dict
         elif message_type == "model.run.tool.review":
             result = await service.review_tool(params)
         elif message_type == "model.tool_capability.probe":
-            result = await service.probe_tool_capability(
-                _required_string(params, "provider_profile_id"),
-                _required_string(params, "model_id"),
-            )
+            profile_id = _required_string(params, 'provider_profile_id')
+            model_id = _required_string(params, 'model_id')
+            result = service.start_tool_probe(profile_id, model_id) if params.get('background') else \
+                await service.probe_tool_capability(profile_id, model_id)
         else:
             return _error(request_id, message_type, "unsupported_message_type", "Message type is not supported.")
         return _success(request_id, message_type, result)

@@ -1,6 +1,7 @@
 """Offline behavioral checks for release tooling; no live services or signing credentials."""
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,17 @@ TOOLS = Path(__file__).resolve().parents[1]
 HELPER = TOOLS / 'release_windows.py'
 VERIFIER = TOOLS / 'verify-updater-signature.cjs'
 CARGO = 'apps/agent-desktop/src-tauri/Cargo.toml'
+
+
+def test_preview_version_uses_exact_single_suffix_release_tag():
+    spec = importlib.util.spec_from_file_location('release_windows_contract', HELPER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    manifest = {'version': '0.17.0-preview.1', 'release_tag': 'v0.17.0-preview.1', 'update_channel': 'preview',
+        'git_commit': 'a' * 40, 'dirty_worktree': False, 'updater_signed': True,
+        'build_gates': {'tests_passed': True, 'installer_smoke_passed': True},
+        'platform': 'windows-x86_64', 'product': 'agent', 'built_at_utc': '2026-11-15T00:00:00Z'}
+    assert module.release_contract(manifest) == ('0.17.0-preview.1', 'v0.17.0-preview.1', 'preview')
 
 
 def run(*args, cwd=None, check=True, env=None):

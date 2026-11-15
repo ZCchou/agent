@@ -70,9 +70,14 @@ def normalize_source(root: Path, initial_commit: str, allow_dirty: bool = False)
 
 def release_contract(manifest: dict) -> tuple[str, str, str]:
     version, tag, channel = (manifest.get(k, '') for k in ('version', 'release_tag', 'update_channel'))
-    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
-        raise ValueError('Expected numeric application version')
-    valid_tag = tag == f'v{version}' if channel == 'stable' else bool(re.fullmatch(rf'v{re.escape(version)}-preview\.[1-9]\d*', tag)) if channel == 'preview' else False
+    if not re.fullmatch(r'\d+\.\d+\.\d+(?:-preview\.[1-9]\d*)?', version):
+        raise ValueError('Expected semantic application version')
+    prerelease = '-preview.' in version
+    valid_tag = False
+    if channel == 'stable':
+        valid_tag = not prerelease and tag == f'v{version}'
+    elif channel == 'preview':
+        valid_tag = tag == f'v{version}' if prerelease else bool(re.fullmatch(rf'v{re.escape(version)}-preview\.[1-9]\d*', tag))
     if not valid_tag:
         raise ValueError('Release tag, version and update channel disagree')
     if not re.fullmatch(r'[0-9a-f]{40}', manifest.get('git_commit', '')) or manifest.get('dirty_worktree') is not False:

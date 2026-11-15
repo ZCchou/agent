@@ -72,6 +72,37 @@ def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), parti
     return fake_runtime(tmp_path / 'runtime'), counter
 
 
+def test_main_invocation_replaces_auxiliary_loading_progress(tmp_path, monkeypatch):
+    async def exercise():
+        async def emit(event):
+            pass
+
+        runtime, _ = recovering_runtime(tmp_path, monkeypatch, failures=0)
+        service = ChatRunService(CoreRepository(tmp_path / 'core.db'), emit)
+        service.local_models.runtime_root = runtime
+        model = await imported(service.local_models, tmp_path / 'model.gguf')
+        await finish(service.local_models, await service.local_models.handle('runtime.load', {'model_id': model['id']}))
+        root = service.execution_monitor.start_task(run_id='progress-handoff')
+
+        async def invoke(activity):
+            activity.observe('rag_worker')
+            activity.resource(stage='model_loading', device='cuda', model_name='Auxiliary', model_role='embedding')
+            async with service.local_models.observe_activity(model['provider_profile_id']):
+                details = service.execution_monitor.get_task(root['id'])['current_stage']['details']
+                assert details['stage'] == 'model_output'
+                assert details['model_name'] == model['name']
+                assert details['model_role'] == 'main_model'
+                assert details['device'] == 'cpu'
+                assert details['observation_source'] == 'main_model'
+
+        try:
+            await service.execution_monitor.execute_stage(root['id'], 'document_review', invoke)
+        finally:
+            await service.shutdown()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize('failures', [1, 3])
 def test_managed_engine_death_before_first_output_reloads_and_redispatches_normal_run(tmp_path, monkeypatch, failures):
     async def exercise():
@@ -91,6 +122,7 @@ def test_managed_engine_death_before_first_output_reloads_and_redispatches_norma
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
 
         async def classify(**params):
             return {'files': 'none', 'tools': 'none', 'web': 'off', 'web_evidence': 'optional',
@@ -104,13 +136,14 @@ def test_managed_engine_death_before_first_output_reloads_and_redispatches_norma
                 'model_id': model['id']})
             task = service.run_tasks[response['run']['id']]
             if failures == 3:
-                await asyncio.wait_for(paused.wait(), 20)
+                await asyncio.wait_for(task, 20)
                 activity = service.execution_status({'owner_kind': 'run', 'owner_id': response['run']['id']})
                 assert activity['auto_recoveries'] == 2
                 assert len(json.loads(counter.read_text())) == 3
-                assert not task.done()
-                await service.handle_execution('retry', {'task_id': activity['id'], 'revision': activity['revision'],
-                    'idempotency_key': 'manual-after-exhaustion'})
+                assert task.done()
+                assert core.get_model_run(response['run']['id'])['status'] == 'failed'
+                await service.retry(response['run']['id'])
+                task = service.run_tasks[response['run']['id']]
             await asyncio.wait_for(task, 20)
             run = core.get_model_run(response['run']['id'])
             assert run['status'] == 'completed', (run['error_code'], run['error_message'])
@@ -120,7 +153,8 @@ def test_managed_engine_death_before_first_output_reloads_and_redispatches_norma
             with core._connect() as connection:
                 specs = connection.execute('SELECT i.status FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=? ORDER BY i.round_no',
                     (run['id'],)).fetchall()
-            assert [row['status'] for row in specs] == ['failed'] * failures + ['completed']
+            assert sum(row['status'] == 'failed' for row in specs) == failures
+            assert sum(row['status'] == 'completed' for row in specs) == 1
             assert not service.tool_loop.repository.list_for_run(run['id'])
             activity = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
             assert activity['status'] == 'completed'
@@ -156,6 +190,7 @@ def test_managed_recovery_preserves_partial_output_and_rejects_configuration_dri
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
 
         async def classify(**params):
             return {'files': 'none', 'tools': 'none', 'web': 'off', 'web_evidence': 'optional',
@@ -204,6 +239,7 @@ def test_managed_engine_death_during_intent_restarts_same_root_before_run(tmp_pa
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
         attachment = runtime_attachment(tmp_path, 'reference', 'Authorized equipment values')
         try:
             task = (await service.intent_sessions.handle('start', {'request': {
@@ -253,6 +289,7 @@ def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_ro
         assert (await finish(service.local_models, await service.local_models.handle('runtime.load',
             {'model_id': model['id']})))['status'] == 'completed'
         service.local_models.set_tool_mode(model['provider_profile_id'], 'text_only')
+        service.tool_verification._save(service.local_models.tool_verification_identity(model['provider_profile_id']), 'unsupported', 'text_only')
         core.update_conversation_routing(conversation['id'], 'fixed', 'balanced', model['provider_profile_id'], model['id'])
         await service.rag.close()
         service.rag = RagService(core, Engines())

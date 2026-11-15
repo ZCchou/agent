@@ -17,9 +17,20 @@ import {
 import {
   useApp,
 } from "../../contexts/AppContext";
+import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { Button } from "../../components/ui/Button";
 
 
 export function DiagnosticsPage() {
+  const [diagnostic, setDiagnostic] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function exportTask() {
+    setBusy(true);
+    try { setDiagnostic(await invoke<string>("export_execution_diagnostics")); }
+    catch (error) { setDiagnostic(String(error)); }
+    finally { setBusy(false); }
+  }
   const {
     t,
   } =
@@ -115,6 +126,10 @@ export function DiagnosticsPage() {
           )}
         </button>
       </Card>
+      <Card><div className="execution-task-card__actions">
+        <Button onClick={() => void invoke("open_log_directory").catch(error => setDiagnostic(String(error)))}>打开日志目录</Button>
+        <Button busy={busy} disabled={!coreOnline} onClick={() => void exportTask()}>导出最近任务诊断</Button>
+      </div>{diagnostic ? <p role="status" style={{ overflowWrap: "anywhere" }}>{diagnostic}</p> : null}</Card>
     </div>
   );
 }

@@ -188,7 +188,10 @@ export function ChatPage() {
       failed: 'intentPaused', interrupted: 'intentPaused',
     };
     const phase = phases[intentTask.status];
-    if (phase) setRunActivityLabel(tChat(`routing.status.${phase}`, { attempt: intentTask.attempts, max: 3 }));
+    const stage = intentTask.execution?.current_stage?.details?.stage;
+    if (intentTask.status === 'identifying' && typeof stage === 'string') {
+      setRunActivityLabel(tChat(`execution.stages.${stage}`, { defaultValue: tChat('routing.status.identifying') }));
+    } else if (phase) setRunActivityLabel(tChat(`routing.status.${phase}`, { attempt: intentTask.attempts, max: 3 }));
   }, [intentTask, inspectorKey, setRunActivityLabel, tChat]);
 
   function showModelPreparation(state: string, model: string) {

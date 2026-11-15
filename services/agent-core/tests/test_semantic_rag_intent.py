@@ -275,7 +275,7 @@ def test_real_preflight_strict_schema_and_counted_unsupported_fallback(tmp_path,
                 return httpx.Response(400, json={'error': {'message': 'response_format json_schema unsupported'}})
         else:
             assert 'response_format' not in payload
-            assert '"task_kinds":["general"]' in payload['messages'][0]['content']
+            assert 'task_kinds is a JSON array' in payload['messages'][0]['content']
         return httpx.Response(200, text='data: ' + json.dumps({'choices': [{'delta': {'content': json.dumps(result)}, 'finish_reason': 'stop'}]}) + '\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def scenario():

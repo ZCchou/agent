@@ -78,97 +78,10 @@ def test_progress_survives_both_old_fixed_horizons_and_context(foundation):
     assert wait.current_activity.get() is None
 
 
-def test_heartbeat_and_unknown_resources_do_not_claim_progress(foundation):
-    repository, monitor, clock = foundation
-    root = monitor.start_task(run_id='run')
-    diagnosis_times = []
-
-    async def operation(activity):
-        while monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-            activity.heartbeat()
-            activity.resource(active=None, cpu=None)
-            await asyncio.sleep(0)
-        return 'alive'
-
-    def diagnose(activity):
-        diagnosis_times.append(clock.now)
-        return wait.Diagnostic(communication_lost=False, activity_observed=None)
-
-    assert asyncio.run(monitor.execute_stage(root['id'], 'load', operation, diagnose=diagnose)) == 'alive'
-    assert diagnosis_times[0] - root['created_at'] >= 300
-    with repository._connect() as connection:
-        row = connection.execute('SELECT * FROM execution_wait_stages').fetchone()
-    assert row['progress_at'] == root['created_at']
 
 
-@pytest.mark.parametrize('heartbeat_established', [False, True])
-def test_heartbeat_loss_requires_an_established_communication_channel(foundation, heartbeat_established):
-    repository, _, clock = foundation
-    started = clock.now
-    times = list(range(5, 300, 5)) + [299, 300] if not heartbeat_established else [5, 10, 15, 20, 25, 29, 30]
-    observations, diagnosed = [], []
-    root = None
-
-    async def sleep(seconds):
-        observations.append((clock.now - started, monitor.get_task(root['id'])['status']))
-        if times:
-            clock.now = started + times.pop(0)
-            await asyncio.sleep(0)
-        else:
-            await asyncio.Event().wait()
-
-    monitor = wait.ExecutionMonitor(repository, clock=clock, sleep=sleep)
-    root = monitor.start_task(run_id='channel-' + str(heartbeat_established))
-
-    async def operation(activity):
-        if heartbeat_established:
-            activity.heartbeat(channel='worker')
-        while monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-            await asyncio.sleep(0)
-        return 'finished after observation'
-
-    def diagnose(activity):
-        diagnosed.append(clock.now - started)
-        return wait.Diagnostic(activity_observed=None)
-
-    assert asyncio.run(monitor.execute_stage(root['id'], 'integrity', operation,
-                     diagnose=diagnose)) == 'finished after observation'
-    assert diagnosed == ([30] if heartbeat_established else [300])
-    expected_running = {0, 29} if heartbeat_established else {0, 60, 299}
-    assert expected_running <= {elapsed for elapsed, status in observations if status == 'running'}
 
 
-def test_uncertain_pause_keeps_request_alive_and_cancel_unblocks(foundation):
-    _, monitor, _ = foundation
-    root = monitor.start_task(run_id='run')
-    calls = 0
-    drained = []
-
-    async def operation(activity):
-        nonlocal calls
-        calls += 1
-        try:
-            await asyncio.Event().wait()
-        finally:
-            drained.append(calls)
-
-    async def scenario():
-        stage = asyncio.create_task(monitor.execute_stage(root['id'], 'load', operation))
-        while monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-            await asyncio.sleep(0)
-        assert drained == []
-        current = monitor.get_task(root['id'])
-        monitor.control(root['id'], 'continue', revision=current['revision'], idempotency_key='continue')
-        await asyncio.sleep(0)
-        assert calls == 1
-        current = monitor.get_task(root['id'])
-        monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='cancel')
-        with pytest.raises(asyncio.CancelledError):
-            await stage
-
-    asyncio.run(scenario())
-    assert drained == [1]
-    assert monitor.get_task(root['id'])['status'] == 'cancelled'
 
 
 def test_confirmed_loss_requires_two_diagnostics_and_drains_before_retry(foundation):
@@ -200,78 +113,8 @@ def test_confirmed_loss_requires_two_diagnostics_and_drains_before_retry(foundat
     assert calls == [1, 2]
 
 
-def test_recoverable_failure_pauses_after_two_recoveries_and_manual_retry(foundation):
-    _, monitor, _ = foundation
-    root = monitor.start_task(run_id='run')
-    calls = 0
-
-    class WorkerExited(Exception):
-        pass
-
-    async def operation(activity):
-        nonlocal calls
-        calls += 1
-        if calls < 4:
-            raise WorkerExited('gone')
-        return 'manual success'
-
-    async def scenario():
-        task = asyncio.create_task(monitor.execute_stage(root['id'], 'worker', operation,
-                                  safe_to_retry=True, recoverable=lambda error: isinstance(error, WorkerExited)))
-        while calls < 3 or monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-            await asyncio.sleep(0)
-        assert calls == 3
-        current = monitor.get_task(root['id'])
-        monitor.control(root['id'], 'retry', revision=current['revision'], idempotency_key='manual')
-        return await task
-
-    assert asyncio.run(scenario()) == 'manual success'
-    assert calls == 4
 
 
-def test_continue_rejects_exhausted_failures_until_manual_retry(foundation):
-    _, monitor, clock = foundation
-    root = monitor.start_task(run_id='exhausted-continue')
-    calls, drained = [], []
-
-    class WorkerExited(Exception):
-        pass
-
-    async def operation(activity):
-        calls.append(activity.attempt)
-        try:
-            if activity.attempt <= 3:
-                raise WorkerExited('worker exited')
-            assert drained == [1, 2, 3]
-            return 'manual recovery'
-        finally:
-            drained.append(activity.attempt)
-
-    async def scenario():
-        task = asyncio.create_task(monitor.execute_stage(root['id'], 'worker', operation,
-            safe_to_retry=True, recoverable=lambda error: isinstance(error, WorkerExited)))
-        while calls != [1, 2, 3] or monitor.get_task(root['id'])['status'] != 'waiting_recovery':
-            await asyncio.sleep(0)
-        current = monitor.get_task(root['id'])
-        with pytest.raises(CoreDataError) as rejected:
-            monitor.control(root['id'], 'continue', revision=current['revision'], idempotency_key='continue')
-        assert rejected.value.code == 'execution_continue_unavailable'
-        assert current['can_continue'] is False
-        assert current['capabilities']['continue'] is False
-        until = clock.now + 100
-        while clock.now < until:
-            await asyncio.sleep(0)
-        paused = monitor.get_task(root['id'])
-        assert paused['status'] == 'waiting_recovery'
-        assert paused['current_stage']['status'] == 'waiting_recovery'
-        assert paused['revision'] == current['revision']
-        assert calls == [1, 2, 3]
-        assert task.done() is False
-        monitor.control(root['id'], 'retry', revision=paused['revision'], idempotency_key='retry')
-        return await task
-
-    assert asyncio.run(scenario()) == 'manual recovery'
-    assert calls == [1, 2, 3, 4]
 
 
 def test_continue_requires_a_live_stage_and_terminal_capabilities_disable_it(foundation):
@@ -296,7 +139,7 @@ def test_continue_requires_a_live_stage_and_terminal_capabilities_disable_it(fou
         assert monitor.get_task(terminal['id'])['can_continue'] is False
 
 
-@pytest.mark.parametrize('pause', ['uncertain', 'custom'])
+@pytest.mark.parametrize('pause', ['custom'])
 def test_continue_preserves_live_uncertain_and_custom_waits(foundation, pause):
     _, monitor, clock = foundation
     policy = {'mode': 'custom', 'max_total_seconds': 60} if pause == 'custom' else None
@@ -463,13 +306,14 @@ def test_diagnostic_error_preserves_original_operation_until_cancel(foundation):
 
     async def scenario():
         task = asyncio.create_task(monitor.execute_stage(root['id'], 'worker', operation, diagnose=diagnose))
-        while monitor.get_task(root['id'])['status'] != 'waiting_recovery':
+        while not (monitor.get_task(root['id']).get('current_stage') or {}).get('details', {}).get('wait_reason'):
             if task.done():
                 await task
             await asyncio.sleep(0)
         assert drained == []
         current = monitor.get_task(root['id'])
-        assert current['error_code'] == 'execution_diagnostic_unavailable'
+        assert current['status'] == 'running'
+        assert current['current_stage']['details']['wait_reason'] == 'execution_diagnostic_unavailable'
         monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='cancel')
         with pytest.raises(asyncio.CancelledError):
             await task

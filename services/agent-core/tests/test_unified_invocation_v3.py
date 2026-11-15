@@ -163,13 +163,15 @@ def test_native_search_executor_never_uses_the_host_tool_allowlist() -> None:
     assert denied.value.code == "native_search_event_unauthorized"
 
 
-def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed() -> None:
+@pytest.mark.parametrize('response_schema', [None, {'type': 'object', 'properties': {'result': {'type': 'string'}}}])
+def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed(response_schema) -> None:
     class ExecutionRepositoryStub:
         def __init__(self) -> None:
             self.finished: list[tuple[str, str, str | None]] = []
 
-        def save_invocation_spec(self, _spec):
-            return None
+        def save_invocation_spec(self, spec):
+            from agent.execution.domain import stable_hash
+            assert spec.spec_hash == stable_hash(spec.hash_payload())
 
         def mark_invocation_dispatched(self, _spec_id, _fingerprint):
             return None
@@ -213,6 +215,7 @@ def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed()
                 },
                 {"id": "attempt", "attempt_number": 1}, SimpleNamespace(profile=service.profiles['provider']),
                 [{"role": "user", "content": "hello"}], max_output_tokens=32,
+                response_schema=response_schema,
             )
         assert denied.value.code == "provider_empty_output"
         assert service.execution_repository.finished == [

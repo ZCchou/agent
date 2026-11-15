@@ -671,8 +671,8 @@ pub async fn probe_model_tool_capability(
         &app,
         &core,
         "model.tool_capability.probe",
-        json!({"provider_profile_id": provider_id, "model_id": model_id}),
-        std::time::Duration::from_secs(130),
+        json!({"provider_profile_id": provider_id, "model_id": model_id, "background": provider_id.starts_with("managed:")}),
+        std::time::Duration::from_secs(15),
     )
     .await?;
     if provider_id.starts_with("managed:") {

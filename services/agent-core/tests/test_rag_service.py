@@ -145,6 +145,33 @@ def test_explicit_subject_retrieval_excludes_preface_and_contents(tmp_path):
     asyncio.run(exercise())
 
 
+def test_template_review_excludes_chapter_cover_even_with_high_rerank_score(tmp_path):
+    cover = 'RTCA，INC.\n1828 L Street\nWashington, DC 20036\nRTCA/DO－160F\n第 17 章\n电压尖峰\n发行日期：2007年12月6日'
+
+    class CoverScores(Engines):
+        async def rerank(self, model_id, query, texts):
+            return [.99 if text.startswith('RTCA') else .5 for text in texts]
+
+    async def exercise():
+        core = CoreRepository(tmp_path / 'agent.db')
+        service = RagService(core, CoverScores())
+        project = core.create_project('Review', 'work')['id']
+        try:
+            library = (await service.handle('library.create', {'name': 'Sources',
+                'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await ready(service, library, content=cover + '\n\n1.1 环境试验适用范围及试验大纲。')
+            await wait_job(service, await service.handle('index.build', {'library_id': library}))
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            found = await service.search(project, '审阅试验大纲的概述和适用范围')
+            assert all(not item['text'].startswith('RTCA') for item in found['evidence'])
+            bibliographic = await service.search(project, '该标准封面的发行日期是什么')
+            assert any(item['text'].startswith('RTCA') for item in bibliographic['evidence'])
+        finally:
+            await service.close()
+
+    asyncio.run(exercise())
+
+
 async def ready(service, library, title='标准', content='25.1309 失效状态安全性要求'):
     result = await service.handle('document.paste', {'library_id': library, 'title': title, 'content': content})
     version_id = result['version']['id']
@@ -856,6 +883,6 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         with closing(service.repository.connect()) as connection:
             versions = connection.execute('SELECT splitter_versions FROM rag_indexes').fetchone()[0]
         import json
-        assert json.loads(versions) == ['source-block-v4']
+        assert json.loads(versions) == ['source-block-v5']
         await service.close()
     asyncio.run(exercise())

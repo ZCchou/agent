@@ -7,6 +7,7 @@ import re
 import struct
 
 from agent.storage import CoreDataError
+from agent.rag.documents import CLAUSE
 
 
 def explicit_subject(query: str) -> str | None:
@@ -27,10 +28,23 @@ def matches_subject(text: str, subject: str) -> bool:
 def reference_material(text: str, query: str) -> bool:
     """Identify explicit front matter/navigation without excluding formal scope sections."""
     titles = r'译者的话|译者序|编者的话|前言|序言|目\s*录|foreword|preface|table of contents'
-    if re.search(titles + r'|译者|作者|编者|谁翻译|谁编写|出版|修订历史|版本历史', query, re.IGNORECASE):
+    if re.search(titles + r'|译者|作者|编者|谁翻译|谁编写|出版|修订历史|版本历史|封面|扉页|发行日期|title page|cover page', query, re.IGNORECASE):
         return False
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if any(re.fullmatch(titles, line, re.IGNORECASE) for line in lines[:3]):
+        return True
+    publisher = re.search(r'^\s*RTCA\s*[,，]\s*INC\.?\s*$', text, re.IGNORECASE | re.MULTILINE)
+    contact = re.search(r'\bWashington\s*,\s*D\.?\s*C\.?(?=\s|\d|$)', text, re.IGNORECASE)
+    chapter = re.search(r'^\s*(?:第\s*[一二三四五六七八九十百零〇\d]+\s*章|section\s+\d+\b)',
+                        text, re.IGNORECASE | re.MULTILINE)
+    standard = re.search(r'RTCA\s*/\s*DO[-－ ]?160[A-Z]?', text, re.IGNORECASE)
+    issued = re.search(r'发行日期|issue date|date of issue', text, re.IGNORECASE)
+    technical_prose = re.search(
+        r'\b(?:shall|must|should|appl(?:y|ies|icable)|verif(?:y|ies)|purpose|requirements?)\b'
+        r'|(?:设备|系统|试验)[^\n]{0,32}(?:应|须|必须|不得|验证|满足)'
+        r'|(?:^|\n)\s*本(?:章|节|试验)(?:适用|用于|规定)', text, re.IGNORECASE)
+    if publisher and contact and chapter and standard and issued and not technical_prose \
+            and not any(CLAUSE.match(line) for line in lines):
         return True
     return sum(bool(re.search(r'(?:…{2,}|\.{5,}|·{5,})\s*\w+(?:[-－]\d+)?\s*$', line)) for line in lines) >= 2
 

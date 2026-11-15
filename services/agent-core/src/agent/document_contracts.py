@@ -14,6 +14,7 @@ def document_batch_schema(task, attachment_ids):
     writable = [field.get('target_id', field.get('id')) for field in task['fields']
                 if field.get('field_type') not in {'heading', 'container'}]
     target_id = {'type': 'string', **({'enum': writable} if writable else {})}
+    citation = object_schema({'id': {'type': 'string'}, 'quote_id': {'type': 'string'}})
     if task['stage'] == 'plan':
         target = object_schema({'target_id': target_id,
             'field_type': {'type': 'string', 'enum': ['instruction', 'example', 'placeholder', 'content']},
@@ -22,8 +23,26 @@ def document_batch_schema(task, attachment_ids):
                 'start': {'type': 'integer', 'minimum': 0}, 'end': {'type': 'integer', 'minimum': 1}})]}})
         completed = object_schema({'targets': {'type': 'array', 'maxItems': len(writable), 'items': target},
                                    'equipment_parameters': parameters, 'gaps': strings})
+    elif task['stage'] == 'review':
+        sources = task.get('evidence', [])
+        source_ids = list(dict.fromkeys(source['id'] for source in sources))
+        quote_ids = list(dict.fromkeys(quote['quote_id'] for source in sources
+                                      for quote in source.get('quote_options', [])))
+        if source_ids:
+            citation['properties']['id']['enum'] = source_ids
+        if quote_ids:
+            citation['properties']['quote_id']['enum'] = quote_ids
+        review_strings = {'type': 'array', 'maxItems': 200,
+                          'items': {'type': 'string', 'minLength': 1, 'maxLength': 1000}}
+        reviewed = object_schema({'target_id': target_id,
+            'content_kind': {'type': 'string', 'enum': ['instruction', 'example', 'placeholder', 'content', 'filled_content']},
+            'status': {'type': 'string', 'enum': ['reviewed', 'pending']},
+            'summary': {'type': 'string', 'minLength': 1, 'maxLength': 8000}, 'problems': review_strings,
+            'evidence': {'type': 'array', 'maxItems': 8 if source_ids and quote_ids else 0, 'items': citation},
+            'version_issues': review_strings, 'gaps': review_strings})
+        completed = object_schema({'results': {'type': 'array', 'minItems': len(writable),
+                                               'maxItems': len(writable), 'items': reviewed}})
     else:
-        citation = object_schema({'id': {'type': 'string'}, 'quote_id': {'type': 'string'}})
         field = object_schema({'target_id': target_id, 'text': {'type': 'string', 'maxLength': 16000},
             'evidence': {'type': 'array', 'maxItems': 8, 'items': citation}, 'missing': strings,
             'parameter_values': parameters})

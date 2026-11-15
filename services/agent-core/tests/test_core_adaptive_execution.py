@@ -374,8 +374,8 @@ def test_parser_adaptive_exchange_accepts_only_matching_worker_heartbeats():
     assert observed == [{'worker': 'document_parser'}]
 
 
-@pytest.mark.parametrize('linked_retry', [False, True])
-def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry):
+@pytest.mark.parametrize('linked_retry,long_targets', [(False, False), (True, False), (False, True)])
+def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry, long_targets):
     import hashlib
     import io
     import json
@@ -396,11 +396,16 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         batch, sources = value['batch'], value['sources']['evidence']
         batches.append(batch)
         assert sources
+        schema = payload['response_format']['json_schema']['schema']
+        results = schema['properties']['response']['anyOf'][0]['properties']['results']
+        assert results['minItems'] == results['maxItems'] == len(batch['fields'])
+        assert results['items']['properties']['target_id']['enum'] == batch['target_ids']
         source = sources[0]
-        response = {'results': [{'target_id': field['id'], 'status': 'reviewed',
+        response = {'response': {'results': [{'target_id': field['id'], 'status': 'reviewed',
+            'content_kind': field['field_type'],
             'summary': '依据本批受控资料核对，适用性仍需人工确认。', 'problems': [],
             'evidence': [{'id': source['id'], 'quote_id': source['quote_options'][0]['quote_id']}],
-            'version_issues': [], 'gaps': []} for field in batch['fields']]}
+            'version_issues': [], 'gaps': []} for field in batch['fields']]}}
         chunk = {'choices': [{'delta': {'content': json.dumps(response)}, 'finish_reason': 'stop'}]}
         return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n')
 
@@ -422,6 +427,8 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:19999/v1'
         config['model_tool_modes']['model'] = 'text_only'
+        if long_targets:
+            config['model_capabilities']['model']['context_length'] = 8192
         core, project, work, service = await fixture(tmp_path, emit, config)
         await service.rag.close()
         service.rag = RagService(core, Engines())
@@ -430,9 +437,9 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         service.rag.execution_monitor = service.execution_monitor
         document = Document()
         document.add_heading('技术内容', 1)
-        paragraph_count = 36
+        paragraph_count = 6 if long_targets else 36
         for index in range(paragraph_count):
-            document.add_paragraph('检查项目 ' + str(index))
+            document.add_paragraph('检查项目 ' + str(index) + ('要求内容' * 600 if long_targets else ''))
         table = document.add_table(rows=1, cols=2)
         table.cell(0, 0).text = '说明：核对所引用版本'
         table.cell(0, 1).text = '示例：设备参数'

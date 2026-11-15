@@ -82,6 +82,16 @@ class StageActivity:
         self.heartbeat_seen = False
         self.resource_clock: float | None = None
         self.queue_clock: float | None = None
+        self.source = None
+
+    def observe(self, source: str) -> None:
+        if self.source == source:
+            return
+        self.source = source
+        self.heartbeat_seen = False
+        self.resource_clock = None
+        self._rag_worker = None
+        self.resource(active=None, observation_source=source)
 
     def progress(self, completed: float | None = None, total: float | None = None,
                  **details: Any) -> bool:
@@ -314,7 +324,7 @@ class ExecutionMonitor:
                 '''UPDATE execution_wait_stages SET status='interrupted',finished_at=?
                    WHERE status IN ('running','waiting_recovery')''', (now,))
             cursor = connection.execute(
-                '''UPDATE execution_wait_tasks SET status='interrupted',error_code='core_interrupted',
+                '''UPDATE execution_wait_tasks SET status='interrupted',error_code='core_interrupted',resume_pending=1,
                    revision=revision+1,sequence=sequence+1,finished_at=?,updated_at=?
                    WHERE status IN ('running','waiting_recovery')''', (now, now))
             return cursor.rowcount
@@ -471,7 +481,7 @@ class ExecutionMonitor:
                 raise CoreDataError('execution_stage_active', 'The prior execution stage is still active.')
             attempt = task['attempt'] + 1
             connection.execute(
-                '''UPDATE execution_wait_tasks SET attempt=?,stage=?,status='running',command=NULL,sequence=sequence+1,
+                '''UPDATE execution_wait_tasks SET attempt=?,stage=?,status='running',command=NULL,resume_pending=0,sequence=sequence+1,
                    updated_at=?,auto_recoveries=CASE WHEN stage=? THEN auto_recoveries ELSE 0 END WHERE id=?''',
                 (attempt, stage, now, stage, task_id))
             connection.execute(
@@ -578,6 +588,7 @@ class ExecutionMonitor:
                         raise
                     except Exception as error:
                         if not safe_to_retry or recoverable is None or not recoverable(error):
+                            activity.resource(active=None, reason=str(error), error_code=getattr(error, 'code', 'execution_failed'))
                             self._stage_status(activity, 'failed')
                             raise
                         failure = error
@@ -623,12 +634,19 @@ class ExecutionMonitor:
                     should_diagnose = (stalled or heartbeat_lost) and not active_resource and not total_reached
                     if should_diagnose and (diagnosed_at is None or now - diagnosed_at >= HEARTBEAT_LOSS_SECONDS):
                         diagnosed_at = now
+                        diagnostic_unavailable = False
                         try:
-                            diagnostic = diagnose(activity) if diagnose is not None else Diagnostic()
+                            if activity.source == 'integrity':
+                                diagnostic = Diagnostic()
+                            elif getattr(activity, '_rag_worker', None) is not None:
+                                diagnostic = activity._rag_worker.diagnose()
+                            else:
+                                diagnostic = diagnose(activity) if diagnose is not None else Diagnostic()
                             if inspect.isawaitable(diagnostic):
                                 diagnostic = await diagnostic
                         except Exception:
-                            self._pause(activity, 'execution_diagnostic_unavailable')
+                            diagnostic_unavailable = True
+                            activity.resource(active=None, wait_reason='execution_diagnostic_unavailable')
                             diagnostic = Diagnostic()
                         observed_status = self.get_task(task_id)['status']
                         if observed_status in TERMINAL:
@@ -647,7 +665,8 @@ class ExecutionMonitor:
                             first_lost_at = None
                         else:
                             first_lost_at = None
-                            self._pause(activity, 'execution_activity_uncertain')
+                            if not diagnostic_unavailable:
+                                activity.resource(active=None, wait_reason='execution_activity_uncertain')
                 if confirmed_failure:
                     task = self.get_task(task_id)
                     if safe_to_retry and task['auto_recoveries'] < policy.max_auto_recoveries:
@@ -663,7 +682,11 @@ class ExecutionMonitor:
                         continued_at = self.active_clock()
                         self._emit(task_id, 'recovery')
                     else:
-                        self._pause(activity, 'execution_recovery_required')
+                        error = failure or CoreDataError('execution_recovery_failed', '当前阶段连续恢复失败，已保存完成结果。')
+                        activity.resource(active=None, reason=str(error), error_code=getattr(error, 'code', 'execution_recovery_failed'))
+                        self._stage_status(activity, 'failed')
+                        self.finish_task(task_id, 'failed', error_code=getattr(error, 'code', 'execution_recovery_failed'))
+                        raise error
                 sleeper = asyncio.create_task(self.sleep(HEARTBEAT_INTERVAL_SECONDS))
                 try:
                     # Completed failed operations must wait for a control without spinning.

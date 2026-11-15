@@ -70,6 +70,12 @@ class LocalModelService:
     def set_tool_mode(self, provider_id, mode, verified=True):
         return self._backend().set_tool_mode(provider_id, mode, verified=verified)
 
+    def tool_verification_identity(self, provider_id):
+        self.get_profile(provider_id)
+        from agent.tool_verification import PROBE_VERSION
+        runtime = self._runtime
+        return runtime._tool_key(self.catalog.get(runtime.model_id)) + ':probe:' + str(PROBE_VERSION)
+
     def runtime_identity(self, provider_id):
         self.get_profile(provider_id)
         runtime = self._runtime
@@ -465,6 +471,8 @@ class LocalModelService:
         from agent.execution.execution_wait import current_activity
         activity = current_activity.get()
         if activity is not None:
+            activity.progress(stage=activity.stage, model_id=self._runtime.model_id,
+                              model_name=profile.name, model_role='main_model', device=self._runtime.backend)
             activity.queue(waiting=self._permit.locked(), resource='main_model')
         async with self._permit:
             if activity is not None:
@@ -487,6 +495,10 @@ class LocalModelService:
         runtime = self._runtime
         sampler = None
         if activity is not None and runtime is not None and runtime.matches(provider_id):
+            activity.observe('main_model')
+            phase = activity.stage if activity.stage in {'intent_identification', 'tool_verification'} else 'model_output'
+            activity.resource(stage=phase, model_id=runtime.model_id, model_name=runtime.profile.name,
+                              model_role='main_model', device=runtime.backend)
             sampler = asyncio.create_task(watch_process(runtime.process, activity, heartbeat=runtime.heartbeat, job=runtime.job))
         try:
             yield
