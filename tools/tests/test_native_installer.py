@@ -77,6 +77,20 @@ def test_verified_unchanged_file_keeps_identity_and_never_reads_its_volume(tmp_p
     assert 'completed' in result.stdout and '"percent":100' in result.stdout
 
 
+def test_file_progress_uses_sampled_events_and_keeps_exact_stage_counts(tmp_path):
+    root = tmp_path / 'installed'
+    files = {f'rag-runtime/items/{index:03}.txt': b'content' for index in range(48)}
+    result = run(root, package(tmp_path, files, 'progress-bulk'))
+    ok(result)
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+    elapsed = max(event['elapsed_ms'] for event in events) / 1000
+    assert len(events) <= 30 + elapsed * 3, 'Per-file synchronous UI/log output must be sampled'
+    preflight = [event for event in events if event['phase'] == 'preflight/difference']
+    assert max(event['files_done'] for event in preflight) == len(files)
+    assert any(event['current_file'] for event in preflight)
+    assert events[-1]['phase'] == 'completed' and events[-1]['percent'] == 100
+
+
 def test_progress_reports_target_current_file_and_count_driven_percent(tmp_path):
     root = tmp_path / 'installed'
     manifest = package(tmp_path, {'rag-runtime/a': b'a' * 10000, 'rag-runtime/b': b'b' * 20000})
