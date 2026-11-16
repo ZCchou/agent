@@ -9,7 +9,6 @@ import { Button } from "../../components/ui/Button";
 import { useApp } from "../../contexts/AppContext";
 import { useResourceActions } from "../resources/ResourceActionsProvider";
 import { ProjectLibraries } from "../rag/ProjectLibraries";
-import { defaultAttachmentPurpose } from './attachmentDraft';
 import { useChatInspectorStore } from "../../contexts/ChatInspectorContext";
 import {
   agentExecutionRepository, attachmentRepository, changeSetRepository, conversationRepository, modelCatalogRepository,
@@ -94,7 +93,6 @@ export function ChatPage() {
   const [messages, setMessages] = useConversationState<ChatMessage[]>(inspectorKey, []);
   const [input, setInput] = useConversationState(inspectorKey, "");
   const [ragModeBusy, setRagModeBusy] = useConversationState(inspectorKey, false);
-  const [attachmentPurposes, setAttachmentPurposes] = useConversationState<Record<string, 'template' | 'reference'>>(inspectorKey, {});
   const ragMode = conversation?.rag_mode ?? activeConversation?.rag_mode ?? draft.ragMode ?? 'auto';
 
   async function toggleRagMode() {
@@ -550,7 +548,6 @@ export function ChatPage() {
     const normalized = content.trim();
     const selectedReferences = editedMessage ? [] : references.selected.map((item) => item.reference);
     const stagedAttachments = editedMessage ? [] : attachmentController.attachments;
-    const purposes = Object.fromEntries(stagedAttachments.map((item) => [item.id, attachmentPurposes[item.id] ?? defaultAttachmentPurpose(item.name)]));
     const stagedRejections = editedMessage ? [] : attachmentController.rejectedAttachments;
     if ((!normalized && stagedAttachments.length === 0 && !editedMessage?.attachments?.length
       && stagedRejections.length === 0 && selectedReferences.length === 0)
@@ -650,7 +647,6 @@ export function ChatPage() {
         model: selected.model.id,
         mode: automaticMode ? "automatic" : "fixed",
         attachments: stagedAttachments.map((item) => item.id),
-        attachmentPurposes: purposes,
         attachmentReferences: selectedReferences,
         rejectedAttachments: stagedRejections.map((item) => item.receipt_id),
         web: webSearch.requestMode,
@@ -691,7 +687,6 @@ export function ChatPage() {
           source: conversation ? "conversation_override" : "global_default",
         },
         attachmentStagingIds: stagedAttachments.map((item) => item.id),
-        attachmentPurposes: purposes,
         attachmentReferences: selectedReferences,
         attachmentRejectionStagingIds: stagedRejections.map((item) => item.receipt_id),
         webSearchRequestMode: webSearch.requestMode,
@@ -1411,7 +1406,6 @@ export function ChatPage() {
         onGrantChange={setGrant}
         onConversationChange={(updated) => { setConversation(updated); void refreshWorkspace(); }}
         attachments={attachmentController.attachments}
-        attachmentPurposes={attachmentPurposes} onAttachmentPurpose={(id, purpose) => setAttachmentPurposes((current) => ({ ...current, [id]: purpose }))}
         rejectedAttachments={attachmentController.rejectedAttachments}
         attachmentPreviews={attachmentController.previews}
         attachmentBusy={attachmentController.busy}

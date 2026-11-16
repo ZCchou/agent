@@ -176,3 +176,19 @@ def test_builtin_runtime_identity_and_frozen_paging(tmp_path, monkeypatch, froze
         assert len(calls) == 6
         await service.close()
     asyncio.run(scenario())
+
+def test_read_cursor_binds_filters_source_and_parser(tmp_path):
+    async def scenario():
+        parser = Parser()
+        service = DocumentAttachments(CoreRepository(tmp_path / 'agent.db'), parser=parser, ocr=Ocr())
+        attachment = source_attachment(tmp_path)
+        first = await service.read(attachment, limit=1)
+        assert first['next_cursor']
+        second = await service.read(attachment, cursor=first['next_cursor'], limit=1)
+        assert second['blocks'][0]['character_offset'] == 256
+        with pytest.raises(CoreDataError):
+            await service.read(attachment, cursor=first['next_cursor'], physical_page=2)
+        parser.cache_identity = 'parser-changed'
+        with pytest.raises(CoreDataError):
+            await service.read(attachment, cursor=first['next_cursor'])
+    asyncio.run(scenario())

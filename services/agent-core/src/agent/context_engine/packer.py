@@ -243,8 +243,8 @@ def pack_context(
     items.append(ContextItem(
         SourceRef("current_message", current_message["id"], TrustKind.USER_AUTHORED,
                   source_hash=hashlib.sha256(current_message["content"].encode("utf-8")).hexdigest()),
-        ContextSection.CURRENT, Representation.ORIGINAL,
-        estimate_tokens(current_message["content"]), True, "current_request",
+        ContextSection.CURRENT, Representation.METADATA if current_message.get('_externalized_input') else Representation.ORIGINAL,
+        _message_cost(current_message), True, "externalized_current_request" if current_message.get('_externalized_input') else "current_request",
     ))
     for attachment_item in current_message.get("_attachment_items", []):
         attachment = attachment_item["attachment"]

@@ -206,7 +206,9 @@ def test_classifier_input_has_bounded_request_roles_and_history():
 @pytest.mark.parametrize('window', [8192, 128])
 def test_real_preflight_preserves_complete_attachment_metadata_and_resumed_answers(tmp_path, monkeypatch, window):
     import httpx
-    from agent.context_engine.policy import estimate_tokens
+    import hashlib
+    from agent.rag.routing import intent_payload, intent_tokens
+    from agent.tool_contracts import ToolCall
     from test_tool_continuation_retry import configuration, fixture
     captured = []
     original = httpx.AsyncClient
@@ -221,12 +223,12 @@ def test_real_preflight_preserves_complete_attachment_metadata_and_resumed_answe
         config = configuration()
         config['model_capabilities']['model']['context_length'] = window
         async def sink(event): pass
-        _, _, _, service = await fixture(tmp_path, sink, config)
+        core, _, work, service = await fixture(tmp_path, sink, config)
         attachments = [{'id': '597922fb-90a2-41e6-8c48-3532e89563ef', 'name': '适航设备实际参数说明.docx',
                         'purpose': 'reference', 'media_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'byte_size': 4321},
                        {'id': '8a315a60-7ac4-4be9-af30-f768e923b158', 'name': 'template.docx',
                         'purpose': 'template', 'media_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'byte_size': 9876}]
-        content = 'Read my supplied actual equipment values. ' + '背景资料 ' * 6000 + '\n\n补充信息\n用户补充回答：只读取第二份附件的第三页，不允许模拟。'
+        content = 'Read my supplied actual equipment values. ' + '背景资料 ' * 3000 + '\n\n补充信息\n用户补充回答：只读取第二份附件的第三页，不允许模拟。'
         try:
             intent, code = await service._preflight_intent_advisor(content=content, attachments=attachments,
                 profile=service._profile('synthetic'), model_id='model', conversation_kind='project_work',
@@ -236,14 +238,34 @@ def test_real_preflight_preserves_complete_attachment_metadata_and_resumed_answe
                 assert captured == []
                 return
             assert code is None
-            assert captured[0]['response_format']['type'] == 'json_schema'
-            assert captured[0]['response_format']['json_schema']['strict'] is True
-            payload = json.loads(captured[0]['messages'][-1]['content'])
+            assert captured == []
+            assert intent['defer_interpretation']
+            assert intent['files'] == 'available' and intent['tools'] == 'available'
+            assert intent['rag_requirement'] == 'uncertain'
+            assert intent['read_attachment_ids'] == []
+            projected = intent_payload(content, attachments, [], 'project_work', budget_tokens=1024)
+            payload = json.loads(projected)
             assert payload['attachments'] == attachments
             assert '用户补充回答：只读取第二份附件的第三页，不允许模拟。' in payload['request']
             assert payload['request'].startswith('Read my supplied actual equipment values.')
             assert payload['request_truncated']
-            assert estimate_tokens(captured[0]['messages']) + 512 + 64 <= window
+            assert payload['input_source']['defer_interpretation']
+            assert payload['input_source']['sha256'] == hashlib.sha256(content.encode('utf-8')).hexdigest()
+            assert intent_tokens(projected) <= 1024
+            run = core.start_model_run(content=content, conversation_id=work['id'], idempotency_key='raw-input',
+                provider_profile_id='synthetic', model_id='model')
+            pages, cursor = [], None
+            while True:
+                arguments = {'result_id': 'user-input', 'length': 1000}
+                if cursor:
+                    arguments['cursor'] = cursor
+                page = json.loads(service._saved_result_tool(run['id'], ToolCall('read-source', 'tools.read_result', arguments)))
+                pages.append(page['content'])
+                cursor = page['next_cursor']
+                if cursor is None:
+                    break
+            assert ''.join(pages) == content
+            assert '用户补充回答：只读取第二份附件的第三页，不允许模拟。' in pages[-1]
         finally:
             await service.shutdown()
     asyncio.run(scenario())

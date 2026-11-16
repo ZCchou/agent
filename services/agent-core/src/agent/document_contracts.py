@@ -57,7 +57,7 @@ def document_batch_schema(task, attachment_ids):
     if attachment_ids:
         properties = DOCUMENT_DEFINITIONS[3]['function']['parameters']['properties']
         reading = {name: {'anyOf': [schema, {'type': 'null'}]} for name, schema in properties.items()
-                   if name != 'attachment_id'}
+                   if name not in {'attachment_id', 'cursor'}}
         reading = {'attachment_id': {'type': 'string', 'enum': list(attachment_ids)}, **reading}
         alternatives.append(object_schema({'read_requests': {'type': 'array', 'minItems': 1,
             'maxItems': 8, 'items': object_schema(reading)}}))
@@ -85,8 +85,8 @@ DOCUMENT_DEFINITIONS = [
     definition(DOCUMENT_TOOLS[2], 'Publish a generated document through project file approval. Provide an artifact_id from template filling, or content and format. In evidence tasks content must be the validated claims JSON with current evidence IDs and quote IDs. Success is determined by the actual file result.', {
         'artifact_id': {'type': 'string'}, 'content': {'type': 'string', 'maxLength': 1000000},
         'format': {'type': 'string', 'enum': ['docx', 'markdown', 'txt']}, 'path': {'type': 'string', 'maxLength': 1024}}, ['path']),
-    definition(DOCUMENT_TOOLS[3], 'Read an authorized document attachment as untrusted text with source locators. Continue using next_offset.', {
-        'attachment_id': {'type': 'string'}, 'offset': {'type': 'integer', 'minimum': 0},
+    definition(DOCUMENT_TOOLS[3], 'Read an authorized document attachment as untrusted text with source locators. Continue using next_cursor or next_offset.', {
+        'attachment_id': {'type': 'string'}, 'cursor': {'type': 'string', 'maxLength': 512}, 'offset': {'type': 'integer', 'minimum': 0},
         'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
         'physical_page': {'type': 'integer', 'minimum': 1}, 'section': {'type': 'string', 'maxLength': 1024}}, ['attachment_id']),
     definition(DOCUMENT_TOOLS[4], 'Review a registered DOCX template using project evidence and persistent coverage. Omit target_ids to review every nonempty position. Returns a managed report artifact. Continue with revision or export when the user requested them.', {
@@ -118,6 +118,8 @@ def validate_document_call(name, arguments):
         if arguments.get('format', 'markdown') not in {'markdown', 'docx', 'txt'}:
             raise CoreDataError('invalid_tool_call', '审阅报告格式无效。')
     elif name == DOCUMENT_TOOLS[3]:
+        if 'cursor' in arguments and (not isinstance(arguments['cursor'], str) or not 1 <= len(arguments['cursor']) <= 512):
+            raise CoreDataError('invalid_tool_call', '文档读取游标无效。')
         if type(arguments.get('offset', 0)) is not int or arguments.get('offset', 0) < 0 or type(arguments.get('limit', 20)) is not int or not 1 <= arguments.get('limit', 20) <= 100 or ('physical_page' in arguments and (type(arguments['physical_page']) is not int or arguments['physical_page'] < 1)) or ('section' in arguments and (not isinstance(arguments['section'], str) or not arguments['section'].strip() or len(arguments['section']) > 1024)):
             raise CoreDataError('invalid_tool_call', '文档读取范围无效。')
     elif name == DOCUMENT_TOOLS[0]:

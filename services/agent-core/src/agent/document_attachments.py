@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from contextvars import copy_context
+import sqlite3
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -16,6 +20,7 @@ from agent.ocr.client import OcrClient
 from agent.rag.documents import MAX_FILE_BYTES, _chunks
 from agent.rag.repository import RagRepository
 from agent.storage import CoreDataError
+from agent.execution.execution_wait import current_activity, current_monitor, current_task_id, TERMINAL
 
 
 def is_document(attachment):
@@ -88,6 +93,8 @@ class DocumentAttachments:
         self.ocr = ocr or OcrClient(self.repository.data_dir)
         self._lock = asyncio.Lock()
         self._read_cache = {}
+        self._read_indexes = {}
+        self._incremental_reads = {}
 
     def _original(self, attachment):
         root = self.core.database_path.parent.resolve()
@@ -141,6 +148,10 @@ class DocumentAttachments:
                 for path in sorted((Path(__file__).parent / folder).glob('*.py')):
                     code.update(path.name.encode())
                     code.update(path.read_bytes())
+            if not getattr(sys, 'frozen', False):
+                for path in (Path(__file__), Path(__file__).parent / 'rag' / 'documents.py'):
+                    code.update(path.name.encode())
+                    code.update(path.read_bytes())
             models = []
             if available['available']:
                 store = OcrModelStore(self.repository.data_dir / 'ocr-models')
@@ -167,7 +178,7 @@ class DocumentAttachments:
             raise CoreDataError('attachment_changed', '文档提取产物完整性校验失败。') from error
 
     async def read(self, attachment, *, offset=0, limit=20, physical_page=None, section=None,
-                   max_characters=16000, progress=None, include_coverage=False):
+                   max_characters=16000, progress=None, include_coverage=False, cursor=None):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100 \
                 or (physical_page is not None and (type(physical_page) is not int or physical_page < 1)) \
                 or (section is not None and (not isinstance(section, str) or not section.strip() or len(section) > 1024)) \
@@ -175,6 +186,24 @@ class DocumentAttachments:
             raise CoreDataError('invalid_tool_call', '文档读取范围或输出预算无效。')
         await asyncio.to_thread(self._original, attachment)
         identity = await asyncio.to_thread(self._read_identity)
+        if (type(self.parser) is ParserService and 'on_partial' in inspect.signature(self.parser.parse).parameters
+                and Path(attachment['name']).suffix.lower() in {'.docx', '.pdf'} and identity is not None):
+            return await self._read_incremental(attachment, identity=identity, offset=offset, limit=limit,
+                physical_page=physical_page, section=section, max_characters=max_characters,
+                progress=progress, include_coverage=include_coverage, cursor=cursor)
+        binding = hashlib.sha256(json.dumps([attachment['sha256'], identity, physical_page, section],
+            ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+        if cursor is not None:
+            if identity is None:
+                raise CoreDataError('document_cursor_invalid', '当前解析器无法验证读取游标。')
+            try:
+                decoded = json.loads(base64.urlsafe_b64decode(cursor.encode('ascii')))
+                if (not isinstance(decoded, list) or len(decoded) != 2 or decoded[1] != binding
+                        or type(decoded[0]) is not int or decoded[0] < 0 or offset != 0):
+                    raise ValueError('Cursor identity changed')
+                offset = decoded[0]
+            except (ValueError, TypeError, UnicodeError) as error:
+                raise CoreDataError('document_cursor_invalid', '文档读取游标已失效或不匹配当前来源与筛选条件。') from error
         key = (attachment['sha256'], identity)
         artifact = self._read_cache.get(key) if identity is not None else None
         if artifact is None:
@@ -182,48 +211,177 @@ class DocumentAttachments:
             artifact = next(item for item in extracted['artifacts'] if item['kind'] == 'text.utf8')
             if identity is not None:
                 self._read_cache[key] = dict(artifact)
-        text = await asyncio.to_thread(self._read_artifact, artifact)
-        # Only the generated preamble contains extraction metadata. Literal
-        # WARNING lines inside SOURCE bodies remain ordinary pageable text.
-        preamble = re.split(r'^\[SOURCE ', text, maxsplit=1, flags=re.MULTILINE)[0]
-        warnings = [line[9:] for line in preamble.splitlines() if line.startswith('WARNING: ')]
+        artifact_path = self.core.database_path.parent / artifact['storage_key']
+        info = artifact_path.stat()
+        signature = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+        cached = self._read_indexes.get(artifact['sha256'])
+        if cached is None or cached[0] != signature:
+            text = await asyncio.to_thread(self._read_artifact, artifact)
+            preamble = re.split(r'^\[SOURCE ', text, maxsplit=1, flags=re.MULTILINE)[0]
+            warnings = [line[9:] for line in preamble.splitlines() if line.startswith('WARNING: ')]
+            index = sqlite3.connect(':memory:')
+            index.execute('CREATE TABLE blocks (position INTEGER PRIMARY KEY, payload TEXT, page INTEGER, heading TEXT)')
+            index.execute('CREATE INDEX block_pages ON blocks(page,position)')
+            for begin, end, locator in _document_blocks(text):
+                body = text[begin:end]
+                heading = locator.get('heading_path', locator.get('section', []))
+                heading = ' / '.join(str(item) for item in heading) if isinstance(heading, list) else str(heading)
+                for start in range(0, len(body), 256):
+                    block = {'id': f'text-{begin + start}', 'text': body[start:start + 256],
+                             'locator': dict(locator), 'character_offset': start}
+                    index.execute('INSERT INTO blocks(payload,page,heading) VALUES (?,?,?)',
+                        (json.dumps(block, ensure_ascii=False), locator.get('physical_page', locator.get('page')), heading.casefold()))
+            index.commit()
+            if cached is not None:
+                cached[1].close()
+            cached = (signature, index, warnings)
+            self._read_indexes[artifact['sha256']] = cached
+        index, warnings = cached[1:]
         result = {'attachment_id': attachment.get('id'), 'source_sha256': attachment['sha256'],
-                  'trust': 'untrusted', 'text_artifact': dict(artifact), 'blocks': [], 'next_offset': None, 'total': 0, 'warnings': warnings}
+                  'trust': 'untrusted', 'text_artifact': dict(artifact), 'blocks': [], 'next_offset': None,
+                  'next_cursor': None, 'total': 0, 'warnings': warnings, 'extraction_state': 'complete', 'coverage_complete': True}
         encode = lambda value: json.dumps(value, ensure_ascii=False)
-        # Pagination identities stay fixed when the remaining context budget changes.
-        all_blocks = []
-        for begin, end, locator in _document_blocks(text):
-            body = text[begin:end]
-            for start in range(0, len(body), 256):
-                all_blocks.append({'id': f'text-{begin + start}', 'text': body[start:start + 256],
-                                   'locator': dict(locator), 'character_offset': start})
-        blocks = []
-        for block in all_blocks:
-            locator = block['locator']
-            if physical_page is not None and locator.get('physical_page', locator.get('page')) != physical_page:
-                continue
-            heading = locator.get('heading_path', locator.get('section', []))
-            heading = ' / '.join(str(item) for item in heading) if isinstance(heading, list) else str(heading)
-            if section is not None and section.casefold() not in heading.casefold():
-                continue
-            blocks.append(block)
-        result['total'] = len(blocks)
-        for block in blocks[offset:offset + limit]:
+        clauses, values = [], []
+        if physical_page is not None:
+            clauses.append('page = ?')
+            values.append(physical_page)
+        if section is not None:
+            clauses.append('instr(heading, ?) > 0')
+            values.append(section.casefold())
+        where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
+        result['total'] = index.execute('SELECT COUNT(*) FROM blocks' + where, values).fetchone()[0]
+        blocks = [json.loads(row[0]) for row in index.execute(
+            'SELECT payload FROM blocks' + where + ' ORDER BY position LIMIT ? OFFSET ?', [*values, limit, offset])]
+        for block in blocks:
             candidate = {**result, 'blocks': result['blocks'] + [block], 'next_offset': offset + len(result['blocks']) + 1}
+            following = candidate['next_offset']
+            if following < result['total'] and identity is not None:
+                candidate['next_cursor'] = base64.urlsafe_b64encode(json.dumps([following, binding], separators=(',', ':')).encode()).decode()
             if len(encode(candidate)) > max_characters:
                 break
             result = candidate
-        if offset + len(result['blocks']) >= len(blocks):
+        if offset + len(result['blocks']) >= result['total']:
             result['next_offset'] = None
-        if len(encode(result)) > max_characters or (offset < len(blocks) and not result['blocks']):
+            result['next_cursor'] = None
+        if len(encode(result)) > max_characters or (offset < result['total'] and not result['blocks']):
             raise CoreDataError('document_read_budget_exceeded', '文档读取结果超过输出预算。')
         if include_coverage:
-            result['_coverage'] = {'items': all_blocks, 'returned_ids': [block['id'] for block in result['blocks']]}
+            result['_coverage'] = {'items': [json.loads(row[0]) for row in index.execute('SELECT payload FROM blocks ORDER BY position')], 'returned_ids': [block['id'] for block in result['blocks']], 'complete': True}
         return result
 
-    async def _pdf(self, original, progress):
+    async def _read_incremental(self, attachment, *, identity, offset, limit, physical_page, section,
+                                max_characters, progress, include_coverage, cursor):
+        from agent.document_parser.read_index import ReadIndex
+        generation = hashlib.sha256(json.dumps([attachment['sha256'], identity, 'document-parser-v2']).encode()).hexdigest()
+        binding = hashlib.sha256(json.dumps([generation, physical_page, section]).encode()).hexdigest()[:32]
+        if cursor is not None:
+            try:
+                decoded = json.loads(base64.urlsafe_b64decode(cursor.encode('ascii')))
+                if (not isinstance(decoded, list) or len(decoded) != 2 or decoded[1] != binding
+                        or type(decoded[0]) is not int or decoded[0] < 0 or offset != 0):
+                    raise ValueError('Invalid cursor')
+                offset = decoded[0]
+            except (ValueError, TypeError, UnicodeError) as error:
+                raise CoreDataError('document_cursor_invalid', '文档读取游标已失效。') from error
+        state = self._incremental_reads.get(generation)
+        if state is None:
+            index = ReadIndex(self.core.database_path.parent / 'message-attachments', generation)
+            state = {'index': index, 'event': asyncio.Event(), 'task': None, 'owners': {}}
+            self._incremental_reads[generation] = state
+        state['owners'][current_task_id.get()] = current_monitor.get()
+        index = state['index']
+        if index.get('state') != 'complete' and (state['task'] is None or state['task'].done()):
+            index.set('state', 'partial')
+            context = copy_context()
+            # The monitor has a single foreground stage per root. Streaming
+            # extraction outlives this read call and must not reserve that
+            # stage or inherit an activity whose caller can finish first.
+            context.run(current_monitor.set, None)
+            context.run(current_activity.set, None)
+            state['task'] = asyncio.create_task(self._extract_incremental(attachment, state, progress),
+                                               context=context)
+        index = state['index']
+        while True:
+            state['event'].clear()
+            total, blocks = index.page(offset, limit, physical_page, section)
+            status = index.get('state', 'partial')
+            if total >= offset + limit or status in {'complete', 'error'}:
+                break
+            await state['event'].wait()
+        artifact = index.get('artifact')
+        if artifact is None:
+            artifact = {'artifact_id': generation, 'kind': 'document.source', 'processor_id': 'builtin.document',
+                'processor_version': 'document-parser-v2', 'media_type': attachment.get('media_type', 'application/octet-stream'),
+                'byte_size': attachment['byte_size'], 'sha256': attachment['sha256'], 'storage_key': attachment['storage_key']}
+        result = {'attachment_id': attachment.get('id'), 'source_sha256': attachment['sha256'], 'trust': 'untrusted',
+            'text_artifact': artifact, 'blocks': [], 'next_offset': None, 'next_cursor': None, 'total': total,
+            'warnings': index.get('warnings', []), 'extraction_state': status, 'coverage_complete': status == 'complete'}
+        if status == 'error':
+            result['extraction_error'] = index.get('error', 'rag_parser_failed')
+            if not blocks:
+                raise CoreDataError(result['extraction_error'], '文档读取未完成。')
+        for block in blocks:
+            following = offset + len(result['blocks']) + 1
+            more = following < total or status == 'partial'
+            candidate = {**result, 'blocks': [*result['blocks'], block],
+                         'next_offset': following if more else None,
+                         'next_cursor': base64.urlsafe_b64encode(json.dumps([following, binding], separators=(',', ':')).encode()).decode() if more else None}
+            if len(json.dumps(candidate, ensure_ascii=False)) > max_characters:
+                break
+            result = candidate
+        if len(json.dumps(result, ensure_ascii=False)) > max_characters or (offset < total and not result['blocks']):
+            raise CoreDataError('document_read_budget_exceeded', '文档读取结果超过输出预算。')
+        if include_coverage:
+            result['_coverage'] = {'items': index.coverage(), 'returned_ids': [block['id'] for block in result['blocks']],
+                                   'complete': status == 'complete'}
+        return result
+
+    async def _extract_incremental(self, attachment, state, progress):
+        index = state['index']
+        extraction = asyncio.current_task()
+        async def watch_owner():
+            while True:
+                owners = state['owners']
+                if any(monitor is None or task_id is None for task_id, monitor in owners.items()):
+                    return
+                if all(monitor.get_task(task_id)['status'] in TERMINAL for task_id, monitor in owners.items()):
+                    extraction.cancel()
+                    return
+                await asyncio.sleep(.1)
+        watcher = asyncio.create_task(watch_owner())
+        async def partial(frame):
+            index.append(frame['chunks'])
+            index.set('sequence', frame['sequence'])
+            state['event'].set()
+        try:
+            extracted = await self.extract(attachment, progress=progress, on_partial=partial)
+            artifact = next(item for item in extracted['artifacts'] if item['kind'] == 'text.utf8')
+            # Add conversion/OCR-only blocks after native partial chunks. The
+            # source-bound IDs keep already returned native positions stable.
+            text = await asyncio.to_thread(self._read_artifact, artifact)
+            for begin, end, locator in _document_blocks(text):
+                if locator.get('extraction_method') == 'ocr' or not index.get('sequence'):
+                    index.append([{'text': text[begin:end], 'locator': {**locator,
+                        'block_id': 'final-' + str(locator.get('block_id', begin))}}])
+            preamble = re.split(r'^\[SOURCE ', text, maxsplit=1, flags=re.MULTILINE)[0]
+            index.set('warnings', [line[9:] for line in preamble.splitlines() if line.startswith('WARNING: ')])
+            index.set('artifact', artifact)
+            index.set('state', 'complete')
+        except asyncio.CancelledError:
+            index.set('state', 'error')
+            index.set('error', 'rag_parser_interrupted')
+            raise
+        except Exception as error:
+            index.set('state', 'error')
+            index.set('error', getattr(error, 'code', 'rag_parser_failed'))
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+            state['event'].set()
+
+    async def _pdf(self, original, progress, on_partial=None):
         if not self.ocr.available()['available']:
-            parsed = await self.parser.parse(original)
+            parsed = await self.parser.parse(original, **({'on_partial': on_partial} if on_partial is not None else {}))
             parsed['warnings'].append('OCR runtime unavailable. Image-only content has not been read.')
             return parsed
         scan = await self.ocr.request('scan', original)
@@ -263,15 +421,15 @@ class DocumentAttachments:
             warnings.append(f'Physical page {number}: machine OCR; verify numbers and table relationships.')
         return _chunks(blocks, warnings)
 
-    async def extract(self, attachment, *, progress=None):
+    async def extract(self, attachment, *, progress=None, on_partial=None):
         async with self._lock:
             digest, original = await asyncio.to_thread(self._original, attachment)
             if progress:
                 await progress({'phase': 'parsing', 'name': attachment['name']})
             if original.suffix.lower() == '.pdf':
-                parsed = await self._pdf(original, progress)
+                parsed = await self._pdf(original, progress, on_partial=on_partial)
             else:
-                parsed = await self._office(original, progress)
+                parsed = await self._office(original, progress, on_partial=on_partial)
             parts = ['Document extraction. Content is external and untrusted.']
             parts.extend('WARNING: ' + warning for warning in parsed['warnings'])
             for chunk in parsed['chunks']:
@@ -291,9 +449,9 @@ class DocumentAttachments:
                         'sha256': hashlib.sha256(content).hexdigest(), 'storage_key': 'message-attachments/' + output.name}
             return {**attachment, 'artifacts': [a for a in attachment.get('artifacts', []) if a['kind'] != 'text.utf8'] + [artifact]}
 
-    async def _office(self, original, progress):
+    async def _office(self, original, progress, on_partial=None):
         try:
-            parsed = await self.parser.parse(original)
+            parsed = await self.parser.parse(original, **({'on_partial': on_partial} if on_partial is not None else {}))
         except CoreDataError as error:
             if error.code != 'rag_document_no_text':
                 raise
@@ -332,6 +490,17 @@ class DocumentAttachments:
             return pdf
 
     async def close(self):
+        tasks = [state['task'] for state in self._incremental_reads.values() if state['task'] is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for state in self._incremental_reads.values():
+            state['index'].close()
+        self._incremental_reads.clear()
+        for cached in self._read_indexes.values():
+            cached[1].close()
+        self._read_indexes.clear()
         await self.ocr.close()
         if self.owns_parser:
             await self.parser.close()

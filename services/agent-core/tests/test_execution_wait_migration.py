@@ -8,7 +8,7 @@ def test_fresh_repository_exposes_adaptive_execution_tables(tmp_path):
     repository = CoreRepository(tmp_path / 'core.db')
     with repository._connect() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert SCHEMA_VERSION == 35
+        assert SCHEMA_VERSION == 36
         assert {'execution_wait_tasks', 'execution_wait_stages', 'execution_wait_checkpoints'} <= tables
         schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='model_runs'").fetchone()[0]
         assert "'waiting_recovery'" in schema
@@ -37,7 +37,7 @@ def test_schema34_upgrade_preserves_existing_plan_and_creates_independent_goals(
     with upgraded._connect() as connection:
         assert connection.execute('SELECT COUNT(*) FROM task_goal_verifications').fetchone()[0] == 0
         assert not connection.execute('PRAGMA foreign_key_check').fetchall()
-    assert list(tmp_path.glob('*.pre-schema35-*.bak'))
+    assert list(tmp_path.glob('*.pre-schema36-*.bak'))
 
 
 def test_schema31_upgrade_keeps_business_rows_and_creates_backup(tmp_path):
@@ -48,10 +48,10 @@ def test_schema31_upgrade_keeps_business_rows_and_creates_backup(tmp_path):
         before = connection.execute('SELECT COUNT(*) FROM projects').fetchone()[0]
     migrated = CoreRepository(repository.database_path)
     with migrated._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 35
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 36
         assert connection.execute('SELECT COUNT(*) FROM projects').fetchone()[0] == before
         assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
-    assert list(tmp_path.glob('*.pre-schema35-*.bak'))
+    assert list(tmp_path.glob('*.pre-schema36-*.bak'))
 
 
 def test_permanent_conversation_delete_cleans_unadmitted_intent_and_execution(tmp_path):

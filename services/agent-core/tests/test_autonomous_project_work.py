@@ -180,7 +180,8 @@ def test_confirmation_receives_real_file_tools_and_completes_change_set(tmp_path
         assert len(requests) == 3
         assert {item["function"]["name"] for item in requests[0]["tools"]} == {
             "fs_list", "fs_search", "fs_read", "fs_propose_changes", "terminal_run",
-            "skills_load", "skills_read_resource", "skills_save", "tools_discover", "task_update_plan", "task_request_input"}
+            "skills_load", "skills_read_resource", "skills_save", "tools_discover", "task_update_plan", "task_request_input",
+            "tools_read_result", "tools_search_result"}
         assert "tool" in {item["role"] for item in requests[1]["messages"]}
         assert not any(event["event_type"] == "run.waiting_permission" for event in events)
 

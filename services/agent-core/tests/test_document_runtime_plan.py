@@ -192,6 +192,9 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
         if retry_mode == 'schema_unsupported' and len(payloads) == 1:
             return httpx.Response(400, json={'error': {'message': 'response_format unsupported'}})
         task = json.loads(payload['messages'][-1]['content'])['task']
+        if task['stage'] == 'select_template':
+            chunk = {'choices': [{'delta': {'content': json.dumps({'attachment_id': 'doc'})}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
         supplied = json.loads(payload['messages'][-1]['content'])['source_context']
         if equipment_value not in json.dumps(supplied, ensure_ascii=False):
             result = {'read_requests': [{'attachment_id': 'equipment', 'offset': 0, 'limit': 1},
@@ -333,9 +336,9 @@ def test_normal_template_run_uses_audited_batches_and_publishes_docx(tmp_path, m
             fallback = retry_mode == 'schema_unsupported'
             assert all(payload.get('response_format', {}).get('type') == (
                 'json_object' if fallback and index == 1 else 'json_schema') for index, payload in enumerate(payloads))
-            assert len(payloads) == (4 if retry else 5) + int(fallback)
+            assert len(payloads) == (5 if retry else 6) + int(fallback)
             plan = application.execution_coordinator.get_for_run(run['id'])
-            assert len(plan['invocations']) == (2 if retry_mode == 'linked' else 4 if retry else 5) + int(fallback)
+            assert len(plan['invocations']) == (2 if retry_mode == 'linked' else 5 if retry else 6) + int(fallback)
             assert sum(item['status'] == 'failed' for item in plan['invocations']) == int(fallback)
             assert all(item['status'] in {'completed', 'failed'} for item in plan['invocations'])
         finally:

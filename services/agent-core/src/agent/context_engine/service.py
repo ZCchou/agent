@@ -71,12 +71,13 @@ class ContextEngineService:
     VERSION = "context-engine-v2"
 
     def __init__(self, repository: CoreRepository, *, skill_context: Callable[..., str] | None = None,
-                 rag_context: Callable[[str], list[dict]] | None = None) -> None:
+                 rag_context: Callable[[str], list[dict]] | None = None, source_reads_enabled: bool = False) -> None:
         self.repository = repository
         self.context_repository = ContextRepository(repository)
         self.behavior = BehaviorPolicyResolver()
         self.skill_context = skill_context
         self.rag_context = rag_context
+        self.source_reads_enabled = source_reads_enabled
 
     async def assemble_async(self, run: dict[str, Any], *, context_window: int | None = None,
                              max_output_tokens: int | None = None, strict: bool = False,
@@ -192,6 +193,25 @@ class ContextEngineService:
         system_message = self._system_message(
             conversation, profile, global_instructions=global_instructions,
         )
+        from agent.execution.input_sources import project_input, UserInputSources
+        input_allowance = max(512, hard_limit // 3)
+        projected_input = project_input(current['content'], input_allowance) if self.source_reads_enabled else current['content']
+        if projected_input != current['content']:
+            current['_externalized_input'] = True
+            UserInputSources(self.repository.database_path).save(run['id'])
+            current = dict(current)
+            rendered_input = current.get('_model_content', current['content'])
+            if isinstance(rendered_input, str):
+                current['_model_content'] = projected_input + rendered_input[len(current['content']):]
+                current['_estimated_tokens'] = estimate_tokens(current['_model_content'])
+            elif isinstance(rendered_input, list):
+                parts = [dict(part) for part in rendered_input]
+                textual = next(part for part in parts if part.get('type') == 'text')
+                original_text = textual['text']
+                textual['text'] = projected_input + original_text[len(current['content']):]
+                current['_model_content'] = parts
+                current['_estimated_tokens'] = (current['_estimated_tokens']
+                    - estimate_tokens(original_text) + estimate_tokens(textual['text']))
         current_cost = int(current.get("_estimated_tokens") or estimate_tokens(
             current.get("_model_content", current["content"]),
         ))
@@ -617,8 +637,16 @@ class ContextEngineService:
                 if any(item['source_sha256'] != attachment['sha256'] for item in reads):
                     raise CoreDataError('attachment_changed', '已读取的文档身份与当前附件不一致。')
                 observation = {'attachment_id': attachment['id'], 'name': attachment['name'],
-                               'sha256': attachment['sha256'], 'read_results': reads,
+                               'sha256': attachment['sha256'], 'read_results': [],
+                               'saved_ranges': [{key: item[key] for key in ('text_artifact_id', 'source_sha256', 'next_offset', 'next_cursor') if key in item} for item in reads],
                                'body_status': 'read_ranges' if reads else 'not_read'}
+                initial = [item['result'] for item in message.get('_document_reads', [])
+                           if item.get('initial_read') and item['request']['attachment_id'] == attachment['id']]
+                if initial:
+                    # A routing-selected first read has not yet reached the chat model.
+                    # Admit a small initial observation, never the accumulated read history.
+                    observation['read_results'] = [{key: value for key, value in initial[-1].items() if key != 'blocks'} |
+                        {'blocks': initial[-1].get('blocks', [])[:2]}]
                 rendered = '<external-untrusted source="document-attachment">\n' + html.escape(json.dumps(observation, ensure_ascii=False)) + '\n</external-untrusted>'
                 extra_text.append(rendered)
                 attachment_items.append({'attachment': attachment, 'estimated_tokens': estimate_tokens(rendered),

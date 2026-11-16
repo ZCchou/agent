@@ -437,6 +437,7 @@ const chat = {
       document_export: "正在保存文档",
       reranking: "正在重排序",
       assembling_context: "正在准备输入",
+      context_compacting: "正在整理工作上下文",
       waitingOutput: "正在等待模型输出",
       generatingAnswer: "正在生成回答",
       validating_evidence: "正在校验引用",

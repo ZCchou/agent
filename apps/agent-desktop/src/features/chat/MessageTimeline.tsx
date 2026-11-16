@@ -41,7 +41,7 @@ export const MessageTimelineItem = memo(function MessageTimelineItem({ message, 
       <AssistantMessageBody content={message.content} state="complete" onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
     ) : (
       <div className="chat-message__bubble chat-message__bubble--plain">{editing ? <div className="message-editor">
-        <textarea autoFocus aria-label={t("messages.editQuestion")} value={editValue} maxLength={20000}
+        <textarea autoFocus aria-label={t("messages.editQuestion")} value={editValue} maxLength={1000000}
           disabled={editBusy} onChange={(event) => setEditValue(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape" && !editBusy) { event.preventDefault(); setEditing(false); }

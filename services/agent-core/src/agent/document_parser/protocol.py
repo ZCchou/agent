@@ -108,26 +108,31 @@ def decode_frame(data):
 
 
 def write_result(path, request_id, parsed, result_limit):
-    total = 0
-    header = encode_frame({'type': 'header', 'request_id': request_id, 'warnings': parsed['warnings']})
-    if len(header) > STATUS_LIMIT:
-        raise invalid('Document metadata exceeds its limit.')
-    with path.open('xb') as output:
-        frames = iter(parsed['chunks'])
-        frame = header
-        while True:
-            total += len(frame)
-            if total > result_limit:
-                raise invalid('Document result exceeds its byte limit.')
-            output.write(frame)
-            chunk = next(frames, None)
-            if chunk is None:
-                break
-            frame = encode_frame({'type': 'chunk', 'chunk': chunk})
-        trailer = encode_frame({'type': 'end', 'request_id': request_id, 'chunks': len(parsed['chunks'])})
-        if total + len(trailer) > result_limit:
+    version = parsed.get('protocol_version', 1)
+    identity = {'protocol_version': 2, 'source_sha256': parsed['source_sha256'],
+                'parser_version': 'document-parser-v2'} if version == 2 else {}
+    total = count = 0
+    def emit(output, frame):
+        nonlocal total
+        data = encode_frame(frame)
+        total += len(data)
+        if len(data) > STATUS_LIMIT or total > result_limit:
             raise invalid('Document result exceeds its byte limit.')
-        output.write(trailer)
+        output.write(data)
+        output.flush()
+    with path.open('xb') as output:
+        emit(output, {'type': 'header', 'request_id': request_id, 'warnings': parsed['warnings'], **identity})
+        for chunk in parsed['chunks']:
+            count += 1
+            frame = {'type': 'chunk', 'chunk': chunk}
+            if version == 2:
+                frame.update(request_id=request_id, sequence=count, **identity)
+            emit(output, frame)
+            if callback := parsed.get('on_partial'):
+                callback(frame)
+        emit(output, {'type': 'end', 'request_id': request_id, 'chunks': count,
+                      **({'sequence': count, 'warnings': list(dict.fromkeys(parsed['warnings'])), **identity}
+                         if version == 2 else {})})
 
 
 def validate_locator(locator, text_length):
@@ -166,7 +171,7 @@ def validate_locator(locator, text_length):
             raise invalid()
 
 
-def read_result(path, request_id, result_limit):
+def _read_result(path, request_id, result_limit, source_sha256=None, partial=False):
     plain_path(path)
     info = path.stat()
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > result_limit:
@@ -178,7 +183,11 @@ def read_result(path, request_id, result_limit):
         with path.open('rb') as source:
             while line := source.readline(STATUS_LIMIT + 1):
                 total_bytes += len(line)
-                if ended or len(line) > STATUS_LIMIT or not line.endswith(b'\n') or total_bytes > result_limit:
+                if ended or len(line) > STATUS_LIMIT or total_bytes > result_limit:
+                    raise invalid()
+                if not line.endswith(b'\n'):
+                    if partial:
+                        break
                     raise invalid()
                 frame = decode_frame(line)
                 if not isinstance(frame, dict):
@@ -189,9 +198,17 @@ def read_result(path, request_id, result_limit):
                     warnings = frame.get('warnings')
                     if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
                         raise invalid()
+                    if source_sha256 is not None and (frame.get('protocol_version') != 2 or frame.get('source_sha256') != source_sha256):
+                        raise invalid('Document source identity changed.')
+                    if frame.get('protocol_version') == 2 and (not isinstance(frame.get('source_sha256'), str)
+                            or not re.fullmatch('[0-9a-f]{64}', frame['source_sha256'])
+                            or frame.get('parser_version') != 'document-parser-v2'):
+                        raise invalid()
                     header = frame
                     metadata_bytes += len(line)
                 elif frame.get('type') == 'chunk':
+                    if header.get('protocol_version') == 2:
+                        validate_partial_frame(frame, request_id, header['source_sha256'], len(chunks) + 1)
                     chunk = frame.get('chunk')
                     if not isinstance(chunk, dict) or set(chunk) != {'text', 'text_hash', 'clause_number', 'locator'}:
                         raise invalid()
@@ -210,12 +227,51 @@ def read_result(path, request_id, result_limit):
                 elif frame.get('type') == 'end':
                     if frame.get('request_id') != request_id or frame.get('chunks') != len(chunks):
                         raise invalid()
+                    if header.get('protocol_version') == 2:
+                        if (frame.get('sequence') != len(chunks) or any(frame.get(key) != header.get(key)
+                                for key in ('source_sha256', 'parser_version', 'protocol_version'))):
+                            raise invalid()
+                        warnings = frame.get('warnings')
+                        if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
+                            raise invalid()
+                        header['warnings'] = warnings
                     metadata_bytes += len(line)
                     ended = True
                 else:
                     raise invalid()
-        if not ended or not chunks or metadata_bytes > STATUS_LIMIT:
+        if (not ended and not partial) or (not chunks and not partial) or header is None or metadata_bytes > STATUS_LIMIT:
             raise invalid()
-        return {'chunks': chunks, 'warnings': header['warnings']}
+        result = {'chunks': chunks, 'warnings': header['warnings']}
+        if partial:
+            result.update(complete=ended, sequence=len(chunks), source_sha256=header.get('source_sha256'),
+                          parser_version=header.get('parser_version'))
+        return result
     except (ValueError, UnicodeError, TypeError, RecursionError) as error:
         raise invalid() from error
+
+
+def read_result(path, request_id, result_limit, source_sha256=None):
+    return _read_result(path, request_id, result_limit, source_sha256)
+
+
+def read_partial_result(path, request_id, result_limit, source_sha256):
+    """Validate an available prefix. Only an end frame establishes completion."""
+    return _read_result(path, request_id, result_limit, source_sha256, partial=True)
+
+
+def validate_partial_frame(frame, request_id, source_sha256, sequence):
+    if (frame.get('type') != 'chunk' or frame.get('request_id') != request_id
+            or frame.get('protocol_version') != 2 or frame.get('parser_version') != 'document-parser-v2'
+            or frame.get('source_sha256') != source_sha256 or type(frame.get('sequence')) is not int
+            or frame['sequence'] != sequence):
+        raise invalid('Document partial result identity or sequence changed.')
+    chunk = frame.get('chunk')
+    if not isinstance(chunk, dict) or set(chunk) != {'text', 'text_hash', 'clause_number', 'locator'}:
+        raise invalid()
+    text, locator = chunk['text'], chunk['locator']
+    if (not isinstance(text, str) or not text or len(text) > 1200 or not isinstance(locator, dict)
+            or chunk['text_hash'] != hashlib.sha256(text.encode('utf-8')).hexdigest()
+            or (chunk['clause_number'] is not None and not isinstance(chunk['clause_number'], str))):
+        raise invalid()
+    validate_locator(locator, len(text))
+    return chunk

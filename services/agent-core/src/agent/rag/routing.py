@@ -40,8 +40,9 @@ def resolve_attachment_roles(attachments, requested=None):
     selected = {item['id'] for item in attachments}
     if not isinstance(requested, dict) or set(requested) - selected or any(not isinstance(role, str) or role not in {'template', 'reference'} for role in requested.values()):
         raise CoreDataError('attachment_purpose_invalid', '附件用途须对应本轮已授权的附件。')
-    return {item['id']: requested.get(item['id'], item.get('purpose') or ('template' if item['name'].lower().endswith('.docx')
-        and re.search(r'模板|template', item['name'], re.I) else 'reference')) for item in attachments}
+    # Stored purposes and old clients supply compatibility hints only.
+    return {item['id']: role for item in attachments
+            if (role := requested.get(item['id'], item.get('purpose'))) in {'template', 'reference'}}
 
 
 def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evidence=False, skill_required=False):
@@ -152,7 +153,7 @@ def routing_intent_schema(attachment_ids, *, pending_action=False):
     read = next(item['function']['parameters'] for item in DOCUMENT_DEFINITIONS
                 if item['function']['name'] == 'document.read_attachment')
     read_properties = {key: {**value, 'type': [value['type'], 'null']}
-                       for key, value in read['properties'].items() if key != 'attachment_id'}
+                       for key, value in read['properties'].items() if key not in {'attachment_id', 'cursor'}}
     read_properties = {'attachment_id': identity, **read_properties}
     question = object_schema({'id': {'type': 'string', 'minLength': 1, 'maxLength': 80},
         'question': {'type': 'string', 'minLength': 1, 'maxLength': 160},
@@ -211,32 +212,35 @@ def intent_payload(content, attachments, recent_messages, conversation_kind, *, 
 
     for attachment in attachments:
         entry = {'id': attachment.get('id', ''),
-                 'name': attachment.get('name', 'attachment'),
-                 'purpose': attachment.get('purpose', 'reference')}
-        for key in ('media_type', 'byte_size'):
+                 'name': attachment.get('name', 'attachment')}
+        for key in ('media_type', 'byte_size', 'purpose'):
             if key in attachment:
                 entry[key] = attachment[key]
         value['attachments'].append(entry)
-    # Complete authorized metadata and appended clarification answers precede history.
-    request, separator, answers = content.partition('\n\n补充信息\n')
-    essential_tail = separator + answers
-    minimum = request[:128] + essential_tail
-    value['request'] = minimum
-    if measure(render()) > budget:
-        raise CoreDataError('routing_intent_context_too_small',
-            '当前模型上下文不足以保留附件标识与补充回答，请扩大上下文、减少附件或缩短补充信息后重试。')
     value['request'] = content
-    retained = len(request)
-    while measure(render()) > budget:
-        retained = max(min(len(request), 128), retained - max(32, retained // 10))
-        if essential_tail:
-            value['request'] = request[:retained] + '\n[request middle truncated]\n' + essential_tail
-        else:
-            value['request'] = request[:retained // 2] + '\n[request middle truncated]\n' + request[-(retained - retained // 2):]
-        value['request_truncated'] = True
-        if retained <= min(len(request), 128) and measure(render()) > budget:
-            value['request'] = minimum
-            break
+    if measure(render()) > budget:
+        from agent.execution.input_sources import input_descriptor
+        value.update(request='', request_truncated=True,
+                     input_source={**input_descriptor(content), 'defer_interpretation': True,
+                                   'routing_hint': {'files': 'available', 'tools': 'available', 'reason': 'raw_input_read_required'}})
+        # A projection is insufficient to classify all requirements or scope.
+        value.pop('task_scope_constraint', None)
+        if measure(render()) > budget:
+            raise CoreDataError('routing_intent_context_too_small',
+                '当前模型上下文不足以保留附件标识与原始输入回读信息，请扩大上下文或减少附件后重试。')
+        request, separator, answers = content.partition('\n\n补充信息\n')
+        essential_tail = separator + answers
+        retained = len(content)
+        while True:
+            if essential_tail and len(essential_tail) < retained // 2:
+                preview = request[:retained - len(essential_tail)] + '\n[original input requires reading]\n' + essential_tail
+            else:
+                half = retained // 2
+                preview = content[:half] + '\n[original input requires reading]\n' + content[-(retained - half):] if retained else ''
+            value['request'] = preview
+            if measure(render()) <= budget:
+                break
+            retained //= 2
     for message in reversed(recent_messages[-6:]):
         entry = {'role': message['role'], 'content': clip(message.get('content', ''), 256)}
         value['recent_conversation'].insert(0, entry)

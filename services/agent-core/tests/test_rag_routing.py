@@ -86,14 +86,15 @@ def test_real_schema28_upgrade_defaults_to_auto_and_preserves_history(tmp_path):
     assert restored['rag_mode'] == 'auto'
     assert restored['messages'][0]['content'] == 'Existing message'
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 35
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 36
         assert not connection.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_attachment_purposes_are_scoped_to_selected_files():
     from agent.rag.routing import resolve_attachment_roles
     selected = [{'id': 'template', 'name': '试验模板.docx'}, {'id': 'facts', 'name': '设备资料.docx'}]
-    assert resolve_attachment_roles(selected) == {'template': 'template', 'facts': 'reference'}
+    assert resolve_attachment_roles(selected) == {}
+    assert resolve_attachment_roles([{**selected[0], 'purpose': 'template'}]) == {'template': 'template'}
     assert resolve_attachment_roles(selected, {'template': 'reference'})['template'] == 'reference'
     for invalid in [{'other': 'template'}, {'facts': []}, []]:
         with pytest.raises(CoreDataError):
@@ -117,3 +118,10 @@ def test_attachment_roles_remap_to_cloned_ids_and_survive_work_copy(tmp_path, pu
     assert second['rag_decision']['attachment_roles'] == {stored['id']: purpose}
     copied = core.copy_work(work['id'], project['id'])
     assert copied['messages'][-1]['attachments'][0]['purpose'] == purpose
+
+
+def test_intent_payload_does_not_manufacture_attachment_purpose():
+    import json
+    from agent.rag.routing import intent_payload
+    payload = json.loads(intent_payload('Read this document', [{'id': 'a', 'name': 'template.docx'}], [], 'casual', budget_bytes=4096))
+    assert payload['attachments'] == [{'id': 'a', 'name': 'template.docx'}]

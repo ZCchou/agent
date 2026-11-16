@@ -107,12 +107,13 @@ def validate_task_call(name, arguments):
 
 def discover_tools(arguments, authorized):
     from agent.tool_contracts import ToolContractRegistry
+    from agent.providers import _internal_tool_name
     validate_task_call(TASK_TOOLS[0], arguments)
-    names = list(dict.fromkeys(arguments.get('names', [])))
+    names = list(dict.fromkeys(_internal_tool_name(name) for name in arguments.get('names', [])))
     if set(names) - set(authorized):
         raise CoreDataError('tool_not_allowed', '所选工具当前不可用，请查看本轮能力目录。')
     definitions = ToolContractRegistry.definitions(names or authorized)
-    result = {'tools': [{'name': item['function']['name'], 'description': item['function']['description']}
+    result = {'tools': [{'name': item['function']['name'], 'description': item['function']['description'][:100]}
                         for item in definitions], 'enabled': names}
     if names:
         result['available_names'] = sorted(authorized)

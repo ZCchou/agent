@@ -37,6 +37,18 @@ def test_plan_tools_reject_unsupported_arguments():
             'expected_revision': 0, 'steps': [], 'success_criteria': [], 'project_id': 'other'}))
 
 
+def test_discovery_normalizes_native_aliases_before_authorization_and_schema_selection():
+    from agent.execution.task_tools import discover_tools
+    authorized = {'document.inspect_template', 'document.review_targets'}
+    selected = discover_tools({'names': ['document_inspect_template', 'document_review_targets',
+                                         'document.inspect_template']}, authorized)
+    assert selected['enabled'] == ['document.inspect_template', 'document.review_targets']
+    assert {tool['name'] for tool in selected['tools']} == authorized
+    with pytest.raises(CoreDataError) as failure:
+        discover_tools({'names': ['document_review_targets']}, {'document.inspect_template'})
+    assert failure.value.code == 'tool_not_allowed'
+
+
 def test_selected_document_review_is_a_composable_tool():
     call = validate_tool_call(ToolCall('review', 'document.review_targets', {
         'template_id': 'registered-source', 'target_ids': ['p-0'], 'format': 'markdown'}))

@@ -200,3 +200,29 @@ def test_model_save_admission_serializes_with_disable(tmp_path, monkeypatch):
     assert revoked.is_set()
     assert r.inspect('custom')['content'] == 'Updated'
     assert r.list()[0]['enabled'] is False
+
+def test_builtin_document_skill_installation_is_progressive_and_preserves_preferences(tmp_path):
+    from agent.skills import SkillRegistry
+    from agent.rag.bootstrap import install_builtin_skill
+    skills = SkillRegistry(tmp_path / 'skills.json')
+    assert skills.list() == []
+    install_builtin_skill(skills)
+    item = skills.load('local-document-work', explicit=False)
+    assert item['enabled'] and not item['rag_required']
+    assert not skills.requires_rag('$local-document-work summarize attachment')
+    assert 'document.read_attachment' in item['content']
+    assert 'references/examples.md' in item['content']
+    assert 'Evidence table example' not in skills.render('Read attachment', tools_available=True)
+    assert 'Evidence table example' in skills.read_resource('local-document-work', 'references/examples.md')['content']
+    skills.set_enabled(item['id'], False)
+    install_builtin_skill(skills)
+    assert not skills.inspect('local-document-work')['enabled']
+
+
+def test_existing_rag_marker_does_not_skip_new_document_skill(tmp_path):
+    from agent.skills import SkillRegistry
+    from agent.rag.bootstrap import install_builtin_skill
+    skills = SkillRegistry(tmp_path / 'skills.json')
+    (tmp_path / 'builtin-rag-skill-v1.installed').write_text('1')
+    install_builtin_skill(skills)
+    assert skills.load('local-document-work')['enabled']

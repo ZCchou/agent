@@ -57,7 +57,7 @@ def install_http(monkeypatch, replies, *, goal_checks=False):
 
 
 async def configure(service, value):
-    response = await handle_async_message({"v": 28, "id": "host-feedback",
+    response = await handle_async_message({"v": 29, "id": "host-feedback",
         "type": "provider.configure", "params": value}, service)
     assert "error" not in response, response
 
@@ -383,7 +383,7 @@ def test_explicit_retry_continues_after_twenty_four_prior_tools(tmp_path, monkey
             if event["event_type"] == "run.tool_requested":
                 operation = event["data"]["operation"]
                 service.tool_status(operation["id"], "executing")
-                service.resolve_tool(operation["id"], True, '{"path":".","entries":[]}')
+                service.resolve_tool(operation["id"], True, json.dumps({'path': '.', 'entries': [], 'inspection': operation['sequence']}))
 
         repository, _, work, service = await fixture(tmp_path, sink)
         run_id = await start(service, work)

@@ -49,8 +49,20 @@ def main() -> int:
             announce()
             heartbeat = threading.Thread(target=keep_alive, daemon=True)
             heartbeat.start()
-        from agent.rag.documents import parse_document
-        parsed = parse_document(original, adaptive=request.get('adaptive_wait', False))
+        from agent.document_parser.incremental import stream_document
+        import hashlib
+        with original.open('rb') as source:
+            source_sha256 = hashlib.file_digest(source, 'sha256').hexdigest()
+        if source_sha256 != original.stem or request.get('source_sha256', source_sha256) != source_sha256:
+            raise ValueError('Source identity changed')
+        parsed = stream_document(original, adaptive=request.get('adaptive_wait', False))
+        parsed.update(protocol_version=2, source_sha256=source_sha256)
+        if request.get('partial_results'):
+            def partial(frame):
+                with output_lock:
+                    sys.stdout.buffer.write(encode_frame({'request_id': request_id, 'status': 'partial', 'frame': frame}))
+                    sys.stdout.buffer.flush()
+            parsed['on_partial'] = partial
         write_result(output, request_id, parsed, result_limit)
         status = {'request_id': request_id, 'status': 'complete'}
         code = 0

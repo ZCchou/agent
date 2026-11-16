@@ -151,3 +151,26 @@ test("selected preview text uses Unicode character offsets in the visible refere
   expect(await page.evaluate(() => window.__referenceRequests[0].attachment_references))
     .toEqual([{ attachment_id: "notes", source_start: 4, source_end: 8 }]);
 });
+
+
+test("new DOCX uploads leave their use to the agent and omit purpose hints from send", async ({ page }) => {
+  const attachment = { ...file("uploaded-docx", "template.docx"),
+    media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    artifacts: [{ artifact_id: "source-docx", kind: "document.source", processor_id: "builtin.document",
+      processor_version: "office-document-v1", media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      byte_size: 100, sha256: "source-hash" }] };
+  const editor = await openHistory(page, [], {
+    select_message_attachments: { accepted: [attachment], rejected: [] },
+    preview_staged_attachment: { ...attachment, content: "Uploaded document", data_url: null },
+  });
+  await page.getByRole("button", { name: "Attach file", exact: true }).click();
+  const tray = page.locator(".attachment-tray");
+  await expect(tray).toContainText("template.docx");
+  await expect(tray.getByRole("combobox")).toHaveCount(0);
+  await editor.fill("Summarize the attached document");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__referenceRequests.length)).toBe(1);
+  const request = await page.evaluate(() => window.__referenceRequests[0]);
+  expect(request.attachment_staging_ids).toEqual([attachment.id]);
+  expect(request).not.toHaveProperty("attachment_purposes");
+});

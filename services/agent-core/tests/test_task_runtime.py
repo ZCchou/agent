@@ -158,7 +158,7 @@ def test_ordinary_template_fill_is_admitted_before_any_project_evidence_obligati
                 'attachments': [attachment], 'idempotency_key': 'ordinary-template'})
             run = core.get_model_run(response['run']['id'])
             assert not run['rag_decision']['required']
-            assert run['rag_decision']['rule_hint']['reason'] == 'template_fill'
+            assert run['rag_decision']['rule_hint']['reason'] == 'business_evidence'
         finally:
             await service.shutdown()
     asyncio.run(scenario())

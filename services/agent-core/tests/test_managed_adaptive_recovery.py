@@ -375,7 +375,8 @@ def test_second_review_batch_engine_death_resumes_first_checkpoint_under_same_ro
             await service.rag.handle('library.bind', {'library_id': library, 'project_id': project['id'], 'enabled': True})
             response = await service.start({'content': 'Review every existing item.', 'conversation_id': conversation['id'],
                 'attachments': [attachment], 'idempotency_key': 'recover-review'})
-            await asyncio.wait_for(service.run_tasks[response['run']['id']], 30)
+            # Full invalid-output coverage requires three audited calls per batch.
+            await asyncio.wait_for(service.run_tasks[response['run']['id']], 120)
             run = core.get_model_run(response['run']['id'])
             if invalid_review:
                 assert run['status'] == 'failed'

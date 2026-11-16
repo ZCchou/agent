@@ -127,7 +127,7 @@ class PreparedRequest:
     tool_schema_hash: str
     options: GenerationOptions
     request_fingerprint: str
-    input_budget: dict[str, int] | None = None
+    input_budget: dict[str, Any] | None = None
 
 
 class InvocationCompiler:
@@ -221,6 +221,7 @@ class InvocationCompiler:
             request_tokens = estimate_tokens(envelope)
             message_tokens = estimate_tokens(compiled_messages)
             input_budget = {'context_window': window, 'output_reserve': reserve, 'input_hard_limit': input_limit,
+                            'measurement': 'estimated',
                             'request_tokens': request_tokens, 'message_tokens': message_tokens,
                             'input_overhead_tokens': max(0, request_tokens - estimate_tokens(messages)),
                             'remaining_input_tokens': input_limit - request_tokens}

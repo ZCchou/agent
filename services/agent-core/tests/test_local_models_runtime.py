@@ -163,6 +163,49 @@ def test_authenticated_subprocess_load_profile_and_unload(tmp_path):
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("architecture", ["qwen2", "qwen3", "qwen35"])
+def test_runtime_thinking_control_and_configured_settings_reach_engine(tmp_path, monkeypatch, architecture):
+    import agent.local_models.runtime as runtime
+    original = runtime.launch_contained
+    commands = []
+
+    def launch(command, **kwargs):
+        commands.append(command)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(runtime, "launch_contained", launch)
+
+    async def exercise():
+        service = service_at(tmp_path, runtime_root=fake_runtime(tmp_path / "runtime"))
+        try:
+            source = gguf_file(tmp_path / "model.gguf", architecture=architecture)
+            job = await finish(service, await service.handle("model.import", {"path": str(source)}))
+            assert job["status"] == "completed", job
+            model = (await service.handle("model.list", {}))["models"][-1]
+            await service.handle("model.configure", {"model_id": model["id"],
+                "context_length": 8192, "threads": 3, "gpu_layers": 0, "device": "cpu"})
+            job = await finish(service, await service.handle("runtime.load", {"model_id": model["id"]}))
+            assert job["status"] == "completed", job
+            command = commands[-1]
+            for flag, value in (("--ctx-size", "8192"), ("--threads", "3"),
+                                ("--n-gpu-layers", "0"), ("--parallel", "1"), ("--fit", "off")):
+                assert command[command.index(flag) + 1] == value
+            assert "--jinja" in command
+            if architecture in {"qwen3", "qwen35"}:
+                assert command[command.index("--reasoning") + 1] == "off"
+            else:
+                assert "--reasoning" not in command
+            configured = service.catalog.get(model["id"])
+            assert configured["context_length"] == 8192
+            assert configured["threads"] == 3
+            assert configured["gpu_layers"] == 0
+            assert configured["device"] == "cpu"
+        finally:
+            await service.close()
+
+    asyncio.run(exercise())
+
+
 def test_serial_invocation_permits_busy_remove_and_switch_wait(tmp_path):
     async def exercise():
         service = service_at(tmp_path, runtime_root=fake_runtime(tmp_path / "runtime"))

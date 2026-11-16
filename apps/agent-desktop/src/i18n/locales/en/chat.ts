@@ -437,6 +437,7 @@ const chat = {
       document_export: 'Saving the document',
       reranking: "Reranking evidence",
       assembling_context: "Preparing context",
+      context_compacting: "Organizing working context",
       waitingOutput: "Waiting for model output",
       generatingAnswer: "Generating answer",
       validating_evidence: "Validating citations",

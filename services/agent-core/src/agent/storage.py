@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -497,6 +497,21 @@ class CoreRepository:
                 with connection:
                     migrate_goal_requirements(connection)
                     connection.execute('UPDATE schema_info SET version = 35')
+                version = 35
+            if version == 35:
+                from agent.migrations.v36_working_context import migrate as migrate_working_context
+                connection.execute('PRAGMA foreign_keys = OFF')
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    migrate_working_context(connection)
+                    connection.execute('UPDATE schema_info SET version = 36')
+                    self._validate_database(connection)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.execute('PRAGMA foreign_keys = ON')
             self._create_indexes(connection)
             self._reconcile_terminal_web_operations(connection)
             self._validate_database(connection)
@@ -3610,8 +3625,8 @@ class CoreRepository:
     @staticmethod
     def _message_content(content: str) -> str:
         normalized = content.strip()
-        if not 1 <= len(normalized) <= 20_000:
-            raise CoreDataError("invalid_message", "Message must contain 1 to 20,000 characters.")
+        if not 1 <= len(normalized) <= 1_000_000:
+            raise CoreDataError("invalid_message", "Message must contain 1 to 1,000,000 characters; attach larger material as a file.")
         try:
             normalized.encode("utf-8")
         except UnicodeEncodeError as error:
