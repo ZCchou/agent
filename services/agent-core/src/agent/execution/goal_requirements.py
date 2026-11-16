@@ -20,13 +20,26 @@ def format_name(value):
 def covers_scope(candidate, required):
     if candidate['source_id'] != required['source_id']:
         return False
-    if candidate['operation'] != required['operation'] and not (
-            required['operation'] == 'read' and candidate['operation'] == 'review'):
+    if candidate['operation'] != required['operation']:
         return False
-    if required['scope'] in {'metadata', 'excluded'}:
+    if not set(required.get('metadata_keys', [])) <= set(candidate.get('metadata_keys', [])):
+        return False
+    if required['scope'] == 'excluded' or candidate['scope'] == 'excluded':
+        return candidate['scope'] == required['scope']
+    if required['scope'] == 'metadata':
         return True
+    if (required.get('selector') or {}).get('kind') == 'selection_pending':
+        if candidate['scope'] != 'selected':
+            return False
+        if candidate['target_ids']:
+            count = required['selector'].get('count')
+            return count is None or len(candidate['target_ids']) == count
+        return candidate.get('selector') == required['selector']
     if candidate['scope'] == 'full':
         return True
+    if required.get('selector'):
+        candidate_selector = candidate.get('selector') or {}
+        return candidate_selector.get('kind') == required['selector']['kind'] and candidate_selector.get('count', 0) >= required['selector']['count']
     return (candidate['scope'] == required['scope'] == 'selected'
             and set(candidate['target_ids']) >= set(required['target_ids']))
 
@@ -110,6 +123,7 @@ class GoalRequirements:
         original = json.loads(request[0])
         allowed = {item['id'] for item in original.get('attachments', [])}
         allowed.update(row[0] for row in connection.execute('SELECT source_id FROM task_sources WHERE task_id=?', (task_id,)))
+        allowed.update(row[0] for row in connection.execute('SELECT alias FROM task_source_aliases WHERE task_id=?', (task_id,)))
         if any(scope['source_id'] not in allowed for scope in value['source_scopes']):
             raise CoreDataError('task_goal_invalid', '任务要求包含未授权的资料。')
         request_digest = self.request_digest(task_id, connection=connection)
@@ -123,8 +137,12 @@ class GoalRequirements:
             WHERE task_id=? AND provenance='user_clarification' ORDER BY revision DESC LIMIT 1''', (task_id,)).fetchone()
         if confirmed and not user_change:
             floors.append((json.loads(confirmed[0]), True))
+        aliases = dict(connection.execute('SELECT alias,source_id FROM task_source_aliases WHERE task_id=?', (task_id,)))
+        def canonical_scope(scope):
+            return {**scope, 'source_id': aliases.get(scope['source_id'], scope['source_id'])}
+
         for floor, user_confirmed in floors:
-            if any(not any(covers_scope(candidate, required) for candidate in value['source_scopes'])
+            if any(not any(covers_scope(canonical_scope(candidate), canonical_scope(required)) for candidate in value['source_scopes'])
                    for required in floor['source_scopes']):
                 raise CoreDataError('task_goal_change_requires_input', '缩小原任务范围需要用户明确补充要求。')
             remaining = list(value['deliverables'])

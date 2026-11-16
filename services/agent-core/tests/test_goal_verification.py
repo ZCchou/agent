@@ -27,7 +27,7 @@ def test_final_check_records_one_verified_result_and_reuses_same_candidate(tmp_p
         value = requirements()
         value['deliverables'] = []
         plans.capture_requirements(root['id'], value, expected_revision=0)
-        plans.register_source(root['id'], 'source', 'artifact', 'hash', [{'id': 'p-0'}])
+        plans.register_source(root['id'], 'source', 'artifact', 'hash', [{'id': 'p-0'}], operation='review')
         plans.record_results(root['id'], 'artifact', 'hash', [{'target_id': 'p-0', 'status': 'reviewed'}])
         calls = []
         async def invoke(messages, schema):
@@ -58,6 +58,23 @@ def test_checker_cannot_override_missing_application_coverage(tmp_path):
         assert result['status'] == 'needs_work'
         assert not plans.completion(root['id'])['ready']
         assert len(calls) == 1
+    asyncio.run(scenario())
+
+
+def test_satisfied_checker_cannot_add_a_new_file_obligation(tmp_path):
+    async def scenario():
+        core, _, root, plans = setup_task(tmp_path)
+        original = requirements()
+        original['source_scopes'] = [{**scope(), 'scope':'metadata', 'target_ids':[]}]
+        original['deliverables'] = []
+        plans.capture_requirements(root['id'], original, expected_revision=0)
+        invented = {**original, 'deliverables': [{'path': 'unrequested.docx', 'format': 'docx'}]}
+        async def invoke(messages, schema):
+            return json.dumps(answer(goals=invented))
+        result = await verifier(core).verify(root['id'], {'candidate':'已回答，不导出', 'outputs': []}, invoke,
+            fence=(root['revision'],root['attempt']), input_tokens=6000)
+        assert plans.goals.get(root['id'])['deliverables'] == []
+        assert result['status'] == 'satisfied'
     asyncio.run(scenario())
 
 

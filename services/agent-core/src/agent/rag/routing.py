@@ -49,7 +49,10 @@ def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evide
     if mode not in {'auto', 'required'}:
         raise CoreDataError('invalid_rag_mode', 'Choose auto or required RAG mode.')
     normalized = text.strip().rstrip('。.!！?？').strip()
-    export = bool(EXPORT.search(text) or re.search(r'(?:填写|回填|填好).{0,30}模板', text))
+    def positive_hint(pattern):
+        return any(not re.search(r'(?:不要|无需|不必|禁止|不需要|不做|不)(?:再|进行)?\s*$', text[max(0, match.start()-8):match.start()])
+                   for match in pattern.finditer(text))
+    export = positive_hint(EXPORT) or positive_hint(re.compile(r'(?:填写|回填|填好).{0,30}模板'))
     continuation = bool(CONTINUATION.fullmatch(text.strip()) or FOLLOWUP.fullmatch(normalized))
     business = bool(BUSINESS.search(text) or PROFESSIONAL.search(text))
     software_help = bool(SOFTWARE_CONTEXT.search(text) and SOFTWARE_ACTION.search(text) and not PROFESSIONAL_ACTION.search(text))
@@ -71,7 +74,8 @@ def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evide
     refers_to_answer = bool(re.search(r'刚才|上面|上述|这段|这个回答|previous|above|that answer', text, re.I))
     return {'requested_mode': mode, 'required': required, 'reason': reason,
             'reuse_evidence': required and previous_evidence and (continuation or contextual_question or (export and refers_to_answer and not business)),
-            'task_type': 'document_export' if export else 'evidence_answer' if required else 'chat'}
+            'operation_hint': 'export' if export else None,
+            'task_type': 'evidence_answer' if required else 'chat'}
 
 
 def explicit_document_scope(text):

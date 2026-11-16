@@ -59,6 +59,14 @@ TASK_DEFINITIONS = [
 ]
 
 _plan_properties = TASK_DEFINITIONS[1]['function']['parameters']['properties']
+_scope_properties = _plan_properties['source_scopes']['items']['properties']
+_scope_properties['selector'] = {'type':'object','additionalProperties':False,'properties':{'kind':{'type':'string','enum':['prefix_nonempty']},'count':{'type':'integer','minimum':1,'maximum':10000}},'required':['kind','count']}
+_scope_properties['selector'] = {'anyOf': [_scope_properties['selector'],
+    {'type':'object','additionalProperties':False,'properties':{'kind':{'type':'string','enum':['selection_pending']},
+        'condition':{'type':'string','minLength':1,'maxLength':2000},
+        'count':{'type':'integer','minimum':1,'maximum':10000}},'required':['kind','condition']}]}
+_scope_properties['metadata_keys'] = {'type':'array','items':{'type':'string','enum':['template_id','total']}}
+
 _plan_properties['expected_goal_revision'] = {'type': 'integer', 'minimum': 0}
 _plan_properties['goal_requirements'] = {
     'type': 'object', 'additionalProperties': False,

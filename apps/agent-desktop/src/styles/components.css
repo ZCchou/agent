@@ -1429,6 +1429,8 @@ label.top-select > svg:last-child {
 .project-drawer form { gap: 20px; }
 .project-drawer label { color: var(--color-text-secondary); font-size: 12px; font-weight: 600; }
 .project-drawer input, .project-drawer select { height: 42px; padding: 0 12px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-text); }
+.project-drawer .checkbox-row { flex-direction: row; align-items: center; }
+.project-drawer .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; min-height: 16px; flex: 0 0 16px; margin: 0; padding: 0; }
 .drawer-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
 
 .chat-page { height: calc(100vh - var(--topbar-height) - 84px); min-height: 0; }

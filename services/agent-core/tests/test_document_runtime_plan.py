@@ -13,12 +13,20 @@ from goal_check_support import goal_check_content
 
 def runtime_attachment(root, identity, text, name='reference.docx'):
     from test_document_attachments import source_attachment
-    document = Document()
-    document.add_paragraph(text)
-    stream = io.BytesIO()
-    document.save(stream)
-    attachment = source_attachment(root, stream.getvalue(), name)
-    path = root / 'message-attachments' / f'{identity}.docx'
+    if name.endswith('.pdf'):
+        from test_rag_documents import make_pdf
+        original = root / (identity + '.pdf')
+        make_pdf(original, text)
+        payload = original.read_bytes()
+    else:
+        document = Document()
+        document.add_paragraph(text)
+        stream = io.BytesIO()
+        document.save(stream)
+        payload = stream.getvalue()
+    attachment = source_attachment(root, payload, name)
+    suffix = '.pdf' if name.endswith('.pdf') else '.docx'
+    path = root / 'message-attachments' / (identity + suffix)
     (root / attachment['storage_key']).rename(path)
     attachment.update(id=identity, storage_key='message-attachments/' + path.name)
     attachment['artifacts'][0].update(artifact_id=identity + '-source', storage_key=attachment['storage_key'])
@@ -65,7 +73,7 @@ def test_normal_document_ranges_leave_unselected_originals_metadata_only(tmp_pat
         config['model_tool_modes']['model'] = 'native' if mode == 'native_deferred' else 'text_only'
         core, _, work, service = await fixture(tmp_path, sink, config)
         service.document_attachments.parser = Parser()
-        selected = runtime_attachment(tmp_path, 'selected', 'selected source')
+        selected = runtime_attachment(tmp_path, 'selected', 'selected source', 'selected.pdf')
         unselected = runtime_attachment(tmp_path, 'unselected', 'unselected binary body')
         async def intent(**kwargs):
             return {'files': 'available', 'tools': 'available', 'web': 'off', 'web_evidence': 'optional',
@@ -517,7 +525,7 @@ def test_strict_schema_rag_text_only_reads_late_page_before_grounded_answer(tmp_
             await ready(service.rag, library)
             assert (await wait_job(service.rag, await service.rag.handle('index.build', {'library_id': library})))['status'] == 'completed'
             await service.rag.handle('library.bind', {'library_id': library, 'project_id': project['id'], 'enabled': True})
-            attachment = runtime_attachment(tmp_path, 'late', 'Late document')
+            attachment = runtime_attachment(tmp_path, 'late', 'Late document', 'late.pdf')
             response = await service.start({'conversation_id': work['id'], 'content': 'Read the late equipment page and explain safety requirements using project evidence',
                 'attachments': [attachment], 'idempotency_key': 'strict-read'})
             await service.tasks[response['run']['id']]

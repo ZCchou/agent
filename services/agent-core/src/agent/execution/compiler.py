@@ -135,7 +135,7 @@ class InvocationCompiler:
 
     def compile_model(
         self, spec: InvocationSpec, messages: list[dict[str, Any]],
-        *, context_window: int | None = None,
+        *, context_window: int | None = None, measured_input_tokens: int | None = None,
     ) -> PreparedRequest:
         if spec.kind != "model" or not spec.model_id:
             raise CoreDataError("invocation_spec_invalid", "A model invocation requires a model.")
@@ -218,10 +218,12 @@ class InvocationCompiler:
             envelope = {'model': spec.model_id, 'messages': compiled_messages,
                         'response_schema': options.response_schema,
                         'tools': ToolContractRegistry.definitions(spec.allowed_tool_names) if has_function_tools else []}
-            request_tokens = estimate_tokens(envelope)
+            if measured_input_tokens is not None and (type(measured_input_tokens) is not int or measured_input_tokens < 0):
+                raise CoreDataError('invocation_payload_invalid', 'The measured input token count is invalid.')
+            request_tokens = measured_input_tokens + 64 if measured_input_tokens is not None else estimate_tokens(envelope)
             message_tokens = estimate_tokens(compiled_messages)
             input_budget = {'context_window': window, 'output_reserve': reserve, 'input_hard_limit': input_limit,
-                            'measurement': 'estimated',
+                            'measurement': 'engine_template_tokenizer' if measured_input_tokens is not None else 'estimated',
                             'request_tokens': request_tokens, 'message_tokens': message_tokens,
                             'input_overhead_tokens': max(0, request_tokens - estimate_tokens(messages)),
                             'remaining_input_tokens': input_limit - request_tokens}

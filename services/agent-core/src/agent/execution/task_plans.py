@@ -39,7 +39,7 @@ def validate_requirements(source_scopes, deliverables):
         raise CoreDataError('task_plan_invalid', '任务资料范围或交付物无效。')
     seen = set()
     for scope in source_scopes:
-        if (not isinstance(scope, dict) or set(scope) != {'source_id', 'operation', 'scope', 'target_ids', 'reason'}
+        if (not isinstance(scope, dict) or not {'source_id', 'operation', 'scope', 'target_ids', 'reason'} <= set(scope) or set(scope) - {'source_id', 'operation', 'scope', 'target_ids', 'reason', 'selector', 'metadata_keys'}
                 or not isinstance(scope['source_id'], str) or not 1 <= len(scope['source_id']) <= 1024
                 or not isinstance(scope['operation'], str) or not isinstance(scope['scope'], str)
                 or (scope['source_id'], scope.get('operation')) in seen or scope['operation'] not in {'read', 'review'}
@@ -47,10 +47,24 @@ def validate_requirements(source_scopes, deliverables):
                 or not isinstance(scope['target_ids'], list) or len(scope['target_ids']) > 10000
                 or any(not isinstance(key, str) or not 1 <= len(key) <= 256 for key in scope['target_ids'])
                 or len(set(scope['target_ids'])) != len(scope['target_ids'])
-                or (scope['scope'] == 'selected') != bool(scope['target_ids'])
+                or (scope['scope'] == 'selected') != bool(scope['target_ids'] or scope.get('selector'))
                 or not isinstance(scope['reason'], str) or len(scope['reason']) > 2000
                 or scope['scope'] == 'excluded' and not scope['reason'].strip()):
             raise CoreDataError('task_plan_invalid', '请明确每份资料的处理范围和位置。')
+        selector = scope.get('selector')
+        if selector is not None:
+            if scope['scope'] != 'selected' or scope['target_ids'] or not isinstance(selector, dict):
+                raise CoreDataError('task_selector_invalid', '范围选择器无效。')
+            prefix = (set(selector) == {'kind', 'count'} and selector['kind'] == 'prefix_nonempty'
+                      and type(selector['count']) is int and 1 <= selector['count'] <= 10000)
+            pending = (set(selector) in ({'kind', 'condition'}, {'kind', 'condition', 'count'})
+                       and selector['kind'] == 'selection_pending'
+                       and isinstance(selector['condition'], str) and 1 <= len(selector['condition'].strip()) <= 2000
+                       and ('count' not in selector or type(selector['count']) is int and 1 <= selector['count'] <= 10000))
+            if not prefix and not pending:
+                raise CoreDataError('task_selector_invalid', '范围选择器无效。')
+        if 'metadata_keys' in scope and (not isinstance(scope['metadata_keys'], list) or any(not isinstance(key, str) for key in scope['metadata_keys']) or set(scope['metadata_keys']) - {'template_id','total'}):
+            raise CoreDataError('task_selector_invalid', '元数据要求无效。')
         seen.add((scope['source_id'], scope['operation']))
     for output in deliverables:
         if (not isinstance(output, dict) or set(output) != {'path'} or not isinstance(output['path'], str)
@@ -141,6 +155,7 @@ class TaskPlans:
                 raise CoreDataError('task_plan_invalid', '原任务要求的资料范围与交付物需要保留。')
             allowed = {item['id'] for item in json.loads(current['request_json']).get('attachments', [])}
             allowed.update(row[0] for row in connection.execute('SELECT source_id FROM task_sources WHERE task_id=?', (task_id,)))
+            allowed.update(row[0] for row in connection.execute('SELECT alias FROM task_source_aliases WHERE task_id=?', (task_id,)))
             if any(scope['source_id'] not in allowed for scope in scopes):
                 raise CoreDataError('task_plan_invalid', '任务资料不属于当前请求。')
             connection.execute('INSERT INTO task_plan_revisions VALUES (?,?,?,?,?,?)',
@@ -149,11 +164,22 @@ class TaskPlans:
                         'deliverables': outputs, 'requirements_declared': declarations or previous.get('requirements_declared', False)}), _utc_now()))
         return self.get(task_id)
 
-    def register_source(self, task_id, source_id, artifact_id, source_hash, fields, *, operation='review', fence=None):
+    def register_source(self, task_id, source_id, artifact_id, source_hash, fields, *, operation, fence=None):
+        if operation not in {'read', 'review'}:
+            raise CoreDataError('task_source_invalid', '任务资料操作无效。')
         self.register_items(task_id, artifact_id, source_hash, fields, fence=fence)
         with self.repository._connect() as connection:
             connection.execute('BEGIN IMMEDIATE')
             self._active(connection, task_id, fence)
+            from agent.execution.source_inventory import SourceInventory
+            canonical = SourceInventory(self.repository).canonical(task_id, source_id, connection)
+            connection.execute('DELETE FROM task_review_proofs WHERE task_id=? AND source_id=? AND source_hash<>?',
+                               (task_id, canonical, source_hash))
+            if operation == 'review' and not connection.execute('''SELECT 1 FROM task_sources
+                    WHERE task_id=? AND artifact_id=? AND operation='review' AND source_hash=?''',
+                    (task_id, artifact_id, source_hash)).fetchone():
+                connection.execute("UPDATE task_work_items SET outcome='pending',result_json=NULL WHERE task_id=? AND source_id=? AND source_hash=?",
+                                   (task_id, artifact_id, source_hash))
             connection.execute('''INSERT INTO task_sources VALUES (?,?,?,?,?)
                 ON CONFLICT(task_id,source_id,operation) DO UPDATE SET
                 artifact_id=excluded.artifact_id,source_hash=excluded.source_hash''',
@@ -180,10 +206,30 @@ class TaskPlans:
                     content_json=excluded.content_json,updated_at=excluded.updated_at''',
                     (task_id, source_id, source_hash, item['id'], encoded, _utc_now()))
 
-    def record_results(self, task_id, source_id, source_hash, results, *, fence=None):
+    @staticmethod
+    def current_evidence_generation(connection, task_id):
+        row = connection.execute('''SELECT t.status,c.project_id,COALESCE(p.generation,0) AS generation
+            FROM execution_wait_tasks t JOIN model_runs r ON r.id=t.run_id
+            JOIN conversations c ON c.id=r.conversation_id
+            LEFT JOIN rag_projects p ON p.project_id=c.project_id WHERE t.id=?''', (task_id,)).fetchone()
+        return row['generation'] if row and row['status'] != 'completed' and row['project_id'] else None
+
+    def record_results(self, task_id, source_id, source_hash, results, *, fence=None,
+                       authorization_source_id=None, evidence_generation=None):
+        if evidence_generation is not None and (type(evidence_generation) is not int or evidence_generation < 0):
+            raise CoreDataError('task_result_invalid', '审阅依据版本身份无效。')
         with self.repository._connect() as connection:
             connection.execute('BEGIN IMMEDIATE')
             self._active(connection, task_id, fence)
+            reviewers = [row[0] for row in connection.execute('''SELECT source_id FROM task_sources
+                WHERE task_id=? AND artifact_id=? AND source_hash=? AND operation='review' ''',
+                (task_id, source_id, source_hash))]
+            if authorization_source_id is not None:
+                if authorization_source_id not in reviewers:
+                    raise CoreDataError('task_source_changed', '审阅结果与授权资料身份不一致。')
+                reviewers = [authorization_source_id]
+            if len(reviewers) > 1:
+                raise CoreDataError('task_source_alias_ambiguous', '请明确审阅结果所属的授权附件。')
             for result in results:
                 status = result.get('status')
                 if status not in {'reviewed', 'pending'}:
@@ -195,6 +241,12 @@ class TaskPlans:
                     (outcome, _json(result), _utc_now(), task_id, source_id, source_hash, result.get('target_id')))
                 if cursor.rowcount != 1:
                     raise CoreDataError('task_source_changed', '任务资料或位置身份已变化，请重新读取。')
+                if reviewers:
+                    from agent.execution.source_inventory import SourceInventory
+                    canonical = SourceInventory(self.repository).canonical(task_id, reviewers[0], connection)
+                    connection.execute('''INSERT OR REPLACE INTO task_review_proofs
+                        (task_id,source_id,source_hash,target_id,outcome,evidence_generation) VALUES (?,?,?,?,?,?)''',
+                        (task_id, canonical, source_hash, result['target_id'], outcome, evidence_generation))
 
     def items(self, task_id, *, offset=0, limit=100):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
@@ -241,17 +293,42 @@ class TaskPlans:
         plan = self.get(task_id)
         goals = plan.get('goal_requirements') if plan else None
         unmet = []
+        from agent.execution.source_inventory import SourceInventory
+        inventory = SourceInventory(self.repository)
+        inventory_counts = Counter()
+        inventory_total = 0
         with self.repository._connect() as connection:
             rows = connection.execute('SELECT source_id,target_id,outcome FROM task_work_items WHERE task_id=?', (task_id,)).fetchall()
             available = {(row['source_id'], row['target_id']): row['outcome'] for row in rows}
             sources = {(row['source_id'], row['operation']): row['artifact_id'] for row in connection.execute(
                 'SELECT * FROM task_sources WHERE task_id=?', (task_id,))}
             required, missing = set(), 0
+            unresolved_goal = False
             scopes = goals['source_scopes'] if goals else plan.get('source_scopes', []) if plan else []
             declared = bool(goals or plan and plan['requirements_declared'])
             if declared:
                 for scope in scopes:
-                    if scope['scope'] in {'metadata', 'excluded'}:
+                    known = connection.execute('SELECT 1 FROM task_source_aliases WHERE task_id=? AND alias=?', (task_id, scope['source_id'])).fetchone()
+                    if known:
+                        proof = inventory.coverage(task_id, scope)
+                        inventory_counts['done'] += proof['completed']
+                        inventory_counts['pending'] += proof['remaining']
+                        if not proof['ready'] and not proof['remaining']:
+                            missing += 1
+                            unmet.append({'code': proof.get('reason', 'scope_unresolved'), 'source_id': scope['source_id']})
+                        inventory_total += proof['completed'] + proof['remaining']
+                        continue
+                    if scope.get('selector'):
+                        missing += 1
+                        unmet.append({'code': 'scope_unresolved', 'source_id': scope['source_id']})
+                        continue
+                    if scope['scope'] == 'excluded':
+                        continue
+                    if scope['scope'] == 'metadata':
+                        if not scope.get('metadata_keys'):
+                            continue
+                        missing += 1
+                        unmet.append({'code': 'inventory_missing', 'source_id': scope['source_id']})
                         continue
                     artifact = sources.get((scope['source_id'], scope['operation']))
                     if artifact is None:
@@ -259,15 +336,29 @@ class TaskPlans:
                         unmet.append({'code': 'source_missing', 'source_id': scope['source_id'], 'operation': scope['operation']})
                         continue
                     ids = scope['target_ids'] if scope['scope'] == 'selected' else [key[1] for key in available if key[0] == artifact]
+                    if scope['operation'] == 'review':
+                        canonical = inventory.canonical(task_id, scope['source_id'], connection)
+                        generation = self.current_evidence_generation(connection, task_id)
+                        review_outcomes = dict(connection.execute('''SELECT p.target_id,p.outcome FROM task_review_proofs p
+                            JOIN task_sources s ON s.task_id=p.task_id AND s.source_hash=p.source_hash
+                              AND s.source_id=? AND s.operation='review'
+                            WHERE p.task_id=? AND p.source_id=? AND (? IS NULL OR p.evidence_generation=?)''',
+                            (scope['source_id'], task_id, canonical, generation, generation)))
+                        inventory_counts.update(review_outcomes.get(key, 'pending') for key in ids)
+                        inventory_total += len(ids)
+                        continue
                     required.update((artifact, key) for key in ids)
-                missing += len({item['id'] for item in plan['request'].get('attachments', [])} - {scope['source_id'] for scope in scopes})
+                missing += len({inventory.canonical(task_id,item['id']) for item in plan['request'].get('attachments', [])} - {inventory.canonical(task_id,scope['source_id']) for scope in scopes})
             else:
                 required.update(available)
                 missing += int(require_declared)
+                has_inventory = connection.execute('SELECT 1 FROM task_inventory_sources WHERE task_id=? LIMIT 1',(task_id,)).fetchone()
+                unresolved_goal = bool(has_inventory)
             if require_declared and goals is None:
                 missing += 1
                 unmet.append({'code': 'goal_requirements_missing'})
             counts = Counter(available.get(key, 'pending') for key in required)
+            counts.update(inventory_counts)
             root = connection.execute('SELECT run_id FROM execution_wait_tasks WHERE id=?', (task_id,)).fetchone()
             outputs = goals['deliverables'] if goals else plan.get('deliverables', []) if plan else []
             published = set()
@@ -328,7 +419,7 @@ class TaskPlans:
                 verified_outputs = sum(_path_key(output['path']) in published for output in outputs)
         counts['done'] += verified_outputs
         remaining = counts.get('pending', 0) + counts.get('failed', 0) + missing + len(outputs) - verified_outputs
-        result = {'ready': remaining == 0, 'total': len(required) + missing + len(outputs),
+        result = {'ready': remaining == 0 and not unresolved_goal, 'total': inventory_total + len(required) + missing + len(outputs),
                   'completed': counts.get('done', 0), 'gaps': counts.get('gap', 0), 'remaining': remaining}
         if goals or require_declared:
             result['unmet_requirements'] = unmet

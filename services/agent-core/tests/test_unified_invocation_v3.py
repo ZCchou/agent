@@ -164,7 +164,8 @@ def test_native_search_executor_never_uses_the_host_tool_allowlist() -> None:
 
 
 @pytest.mark.parametrize('response_schema', [None, {'type': 'object', 'properties': {'result': {'type': 'string'}}}])
-def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed(response_schema) -> None:
+def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed(response_schema, monkeypatch) -> None:
+    monkeypatch.setattr('agent.runtime.record_invocation_diagnostics', lambda *args, **kwargs: None)
     class ExecutionRepositoryStub:
         def __init__(self) -> None:
             self.finished: list[tuple[str, str, str | None]] = []

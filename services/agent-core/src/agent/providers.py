@@ -1006,6 +1006,12 @@ class OpenAICompatibleProvider(ModelProvider):
                     "native_search_call" if call.name == "native.web_search" else "tool_call",
                     tool_call=call,
                 )
+        except ProviderError as error:
+            error.details.update(text_character_count=len(streamed_text),
+                tool_argument_character_count=sum(len(call['arguments']) for call in calls.values()))
+            if finish_reason is not None:
+                error.details['finish_reason'] = finish_reason
+            raise
         except httpx.ConnectError as error:
             # With redirects disabled, a failed initial connection proves that
             # this generation request was not sent. Do not infer this from an

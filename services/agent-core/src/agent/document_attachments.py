@@ -23,6 +23,9 @@ from agent.storage import CoreDataError
 from agent.execution.execution_wait import current_activity, current_monitor, current_task_id, TERMINAL
 
 
+BLOCK_SERIALIZATION_VERSION = 2
+
+
 def is_document(attachment):
     return any(item.get('kind') == 'document.source' for item in attachment.get('artifacts', []))
 
@@ -38,6 +41,10 @@ def _document_blocks(text):
             continue
         locator.setdefault('block_id', f'block-{index + 1}')
         end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+        # _write inserts exactly two newlines between chunk bodies and the next
+        # source marker. They are framing, while earlier whitespace is source text.
+        if index + 1 < len(markers) and text[max(marker.end(), end - 2):end] == '\n\n':
+            end -= 2
         yield marker.end(), end, locator
 
 
@@ -191,7 +198,7 @@ class DocumentAttachments:
             return await self._read_incremental(attachment, identity=identity, offset=offset, limit=limit,
                 physical_page=physical_page, section=section, max_characters=max_characters,
                 progress=progress, include_coverage=include_coverage, cursor=cursor)
-        binding = hashlib.sha256(json.dumps([attachment['sha256'], identity, physical_page, section],
+        binding = hashlib.sha256(json.dumps([attachment['sha256'], identity, physical_page, section, BLOCK_SERIALIZATION_VERSION],
             ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
         if cursor is not None:
             if identity is None:
@@ -266,13 +273,16 @@ class DocumentAttachments:
         if len(encode(result)) > max_characters or (offset < result['total'] and not result['blocks']):
             raise CoreDataError('document_read_budget_exceeded', '文档读取结果超过输出预算。')
         if include_coverage:
-            result['_coverage'] = {'items': [json.loads(row[0]) for row in index.execute('SELECT payload FROM blocks ORDER BY position')], 'returned_ids': [block['id'] for block in result['blocks']], 'complete': True}
+            parser_view = hashlib.sha256(json.dumps([attachment['sha256'], identity, artifact['sha256'],
+                BLOCK_SERIALIZATION_VERSION], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            result['_coverage'] = {'items': [json.loads(row[0]) for row in index.execute('SELECT payload FROM blocks ORDER BY position')],
+                'returned_ids': [block['id'] for block in result['blocks']], 'complete': True, 'parser_view': parser_view}
         return result
 
     async def _read_incremental(self, attachment, *, identity, offset, limit, physical_page, section,
                                 max_characters, progress, include_coverage, cursor):
         from agent.document_parser.read_index import ReadIndex
-        generation = hashlib.sha256(json.dumps([attachment['sha256'], identity, 'document-parser-v2']).encode()).hexdigest()
+        generation = hashlib.sha256(json.dumps([attachment['sha256'], identity, 'document-parser-v2', BLOCK_SERIALIZATION_VERSION]).encode()).hexdigest()
         binding = hashlib.sha256(json.dumps([generation, physical_page, section]).encode()).hexdigest()[:32]
         if cursor is not None:
             try:
@@ -333,7 +343,7 @@ class DocumentAttachments:
             raise CoreDataError('document_read_budget_exceeded', '文档读取结果超过输出预算。')
         if include_coverage:
             result['_coverage'] = {'items': index.coverage(), 'returned_ids': [block['id'] for block in result['blocks']],
-                                   'complete': status == 'complete'}
+                                   'complete': status == 'complete', 'parser_view': generation}
         return result
 
     async def _extract_incremental(self, attachment, state, progress):

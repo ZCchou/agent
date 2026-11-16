@@ -290,7 +290,7 @@ def test_repeated_cancellation_during_inner_read_keeps_lease_until_cleanup():
 def test_native_tool_probe_closes_stream_before_return(tmp_path, monkeypatch):
     from agent.runtime import ChatRunService
     from agent.storage import CoreRepository
-    from agent.tool_contracts import ToolCall
+    from test_tool_probe_v2 import SemanticProvider
 
     async def scenario():
         async def sink(event):
@@ -299,22 +299,24 @@ def test_native_tool_probe_closes_stream_before_return(tmp_path, monkeypatch):
         service = ChatRunService(CoreRepository(tmp_path / "agent.db"), sink)
         local = replace(profile(), id="manual")
         sessions = Sessions()
-        closed = False
+        closed = 0
+        semantic = SemanticProvider("native")
 
         class Transport(Inner):
             async def stream_events(self, *args, **kwargs):
                 nonlocal closed
                 try:
-                    yield ProviderEvent("tool_call", tool_call=ToolCall("call", "fs.list", {"path": "."}))
+                    async for event in semantic.stream_events(*args, **kwargs):
+                        yield event
                 finally:
-                    closed = True
+                    closed += 1
 
         provider = ManagedLocalProvider(profile(), Transport(), sessions)
         monkeypatch.setattr(service, "_profile", lambda identity: local)
         monkeypatch.setattr(service, "_provider", lambda value: provider)
         try:
             assert await service.probe_tool_capability("manual", "model") == {"tool_mode": "native", "verified": True}
-            assert closed
+            assert closed == 3
             assert not sessions.lock.locked()
         finally:
             await service.shutdown()

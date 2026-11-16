@@ -27,6 +27,25 @@ def workflow(tmp_path):
     return core, run, DocumentWorkflow(core)
 
 
+def test_saved_review_reports_restore_full_body_only_for_current_evidence(tmp_path):
+    import json
+    core, run, docs = workflow(tmp_path)
+    template = docs.register_template(run['id'], template_bytes(), '原件.docx')
+    text = '完整审阅结果。\n' * 2000
+    artifact = docs.create(run['id'],text,'markdown',max_characters=100000)
+    docs.record_review(run['id'],artifact['id'],{'template_id':template['id'],'template_sha256':template['sha256'],
+        'coverage':{'total':2000,'completed':2000},'review_status':'pending_human_review'})
+    with core._connect() as db:
+        manifest = docs.get(run['id'],artifact['id'])['manifest']
+        db.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=?',
+            (json.dumps({**manifest,'rag_generation':7}),artifact['id']))
+    assert docs.saved_review_reports(run['id'],7) == [text]
+    assert docs.saved_review_reports(run['id'],8) == []
+    docs.path_for(run['id'],artifact['id']).write_text('corrupted',encoding='utf-8')
+    with pytest.raises(CoreDataError):
+        docs.saved_review_reports(run['id'],7)
+
+
 @pytest.mark.parametrize('change', ['delete', 'overwrite'])
 def test_completion_checks_actual_published_document_bytes(tmp_path, change):
     _, run, docs = workflow(tmp_path)
@@ -184,12 +203,21 @@ def test_text_only_model_uses_application_owned_document_publication(tmp_path, m
     from test_tool_continuation_retry import fixture, configuration
     original = httpx.AsyncClient
     payloads = []
-    generations, checks = [], []
+    generations, checks, classifications = [], [], []
     def respond(request):
         payloads.append(json.loads(request.content))
         from goal_check_support import goal_check_content
         checked = goal_check_content(payloads[-1])
-        if checked is not None:
+        if any(message.get('role') == 'system' and str(message.get('content', '')).startswith(
+                'Classify task and first attachment read only;') for message in payloads[-1]['messages']):
+            classifications.append(payloads[-1])
+            content = json.dumps({'files': 'write', 'tools': 'available', 'web': 'off',
+                'web_evidence': 'optional', 'reasoning': 'standard', 'task_kinds': ['document_export'],
+                'explanation_code': 'export_welcome_document', 'follow_up': 'none',
+                'rag_requirement': 'not_needed', 'read_attachment_ids': [], 'read_requests': [],
+                'task_scope': 'full', 'retrieval_scope': 'focused', 'document_workflow': 'none',
+                'allow_simulated_data': False, 'clarification': None})
+        elif checked is not None:
             value = json.loads(payloads[-1]['messages'][-1]['content'])
             checks.append(value)
             assert len(value['outputs']) == 1
@@ -228,6 +256,7 @@ def test_text_only_model_uses_application_owned_document_publication(tmp_path, m
             assert run['status'] == 'completed', run.get('error_message')
             assert len(published) == (2 if needs_correction else 1)
             assert len(checks) == len(published)
+            assert len(classifications) == 1
             if destination:
                 assert published[0].name == destination
             assert '欢迎使用' in '\n'.join(p.text for p in Document(published[0]).paragraphs)
@@ -250,3 +279,15 @@ def test_application_filling_selects_table_answer_cell(tmp_path):
     document.save(stream)
     source = service.register_template(run['id'], stream.getvalue(), '表格模板.docx')
     assert service.select_section(run['id'], source['id'], '填写振动试验的试验目的') == 't-0-r0-c1'
+
+def test_template_dedup_preserves_authorized_attachment_identity(tmp_path):
+    _, run, docs = workflow(tmp_path)
+    payload = template_bytes()
+    first = docs.register_template(run['id'], payload, 'same.docx', source_id='attachment-a')
+    second = docs.register_template(run['id'], payload, 'same.docx', source_id='attachment-b')
+    assert first['id'] != second['id']
+    assert docs.register_template(run['id'], payload, 'same.docx', source_id='attachment-a')['id'] == first['id']
+    assert docs.get(run['id'], first['id'])['manifest']['authorized_source_id'] == 'attachment-a'
+    legacy = docs.register_template(run['id'], payload, 'same.docx')
+    assert legacy['id'] not in {first['id'], second['id']}
+    assert docs.register_template(run['id'], payload, 'same.docx')['id'] == legacy['id']

@@ -5,7 +5,7 @@ import json
 from agent.storage import CoreDataError, _utc_now
 
 
-PROBE_VERSION = 1
+PROBE_VERSION = 2
 
 
 class ToolVerification:
@@ -32,6 +32,16 @@ class ToolVerification:
                 ON CONFLICT(identity) DO UPDATE SET status=excluded.status,mode=excluded.mode,
                 error_json=excluded.error_json,updated_at=excluded.updated_at''',
                 (identity, status, mode, json.dumps(error) if error else None, _utc_now()))
+
+    def needs_upgrade(self, identity):
+        if self.get(identity)['status'] in {'verified', 'unsupported', 'probing'}:
+            return False
+        prefix, separator, _ = identity.rpartition(':probe:')
+        if not separator:
+            return False
+        with self.repository._connect() as connection:
+            return connection.execute("SELECT 1 FROM tool_verifications WHERE identity LIKE ? AND identity<>? AND status IN ('verified','unsupported') LIMIT 1",
+                (prefix + ':probe:%', identity)).fetchone() is not None
 
     def for_model(self, digest, template_digest):
         prefix = 'tool-mode:' + digest + ':' + template_digest + ':'

@@ -106,3 +106,28 @@ def test_restore_checks_shared_attachment_content_once(tmp_path):
         'messages': [{'role': 'assistant', '_working_notes': True, 'content': 'derived notes'}]}
     assert service._restored_working_messages(run, saved, ()) == saved['messages']
     assert checked == [attachment['id']]
+
+def test_restore_source_cache_keeps_attachment_authorization_and_versions_distinct():
+    service = ChatRunService.__new__(ChatRunService)
+    attachments = [{'id': 'attachment-a', 'sha256': 'same-hash'},
+                   {'id': 'attachment-b', 'sha256': 'same-hash'}]
+    sources = {
+        'first': {'tool': 'document.read_attachment', 'arguments': {'attachment_id': 'attachment-a'},
+                  'range': {'offset': 0}, 'source_sha256': 'same-hash'},
+        'other': {'tool': 'document.read_attachment', 'arguments': {'attachment_id': 'attachment-b'},
+                  'range': {'offset': 0}, 'source_sha256': 'same-hash'},
+        'stale': {'tool': 'document.read_attachment', 'arguments': {'attachment_id': 'attachment-a'},
+                  'range': {'offset': 1}, 'source_sha256': 'old-hash'},
+    }
+    service.result_store = SimpleNamespace(metadata=lambda _run, result: {'source': sources[result]})
+    service.repository = SimpleNamespace(get_model_run=lambda _: {'user_message_id': 'message'},
+        get_run_conversation=lambda _: {'messages': [{'id': 'message', 'attachments': attachments}]})
+    checked = []
+    service.document_attachments = SimpleNamespace(_original=lambda attachment: checked.append(attachment['id']))
+    validated = set()
+    service._validate_saved_result_source('run', 'first', validated_sources=validated)
+    service._validate_saved_result_source('run', 'other', validated_sources=validated)
+    assert checked == ['attachment-a', 'attachment-b']
+    with pytest.raises(CoreDataError) as error:
+        service._validate_saved_result_source('run', 'stale', validated_sources=validated)
+    assert error.value.code == 'attachment_changed'

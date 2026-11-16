@@ -6,6 +6,8 @@ export type ExecutionOwner = { kind: "intent" | "run" | "task"; id: string };
 export interface TaskSourceScope {
   source_id: string; operation: "read" | "review";
   scope: "full" | "selected" | "metadata" | "excluded"; target_ids: string[]; reason: string;
+  selector?: { kind: "prefix_nonempty"; count: number } | { kind: "selection_pending"; condition: string; count?: number };
+  metadata_keys?: ("template_id" | "total")[];
 }
 export interface TaskGoalRequirements {
   revision: number; request_digest: string; provenance: string;
@@ -24,6 +26,7 @@ export interface BusinessTaskPlan {
   source_scopes?: TaskSourceScope[];
   deliverables?: { path: string }[];
   goal_requirements?: TaskGoalRequirements | null;
+  requirements_declared?: boolean;
 }
 export interface TaskCoverage {
   ready: boolean; total: number; completed: number; gaps: number; remaining: number;

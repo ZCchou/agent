@@ -42,6 +42,14 @@ def recovering_runtime(tmp_path, monkeypatch, failures, crash_requests=(), parti
                 'explanation_code': 'managed_intent', 'follow_up': 'none', 'rag_requirement': 'not_needed',
                 'read_attachment_ids': identifiers[:1], 'read_requests': [], 'task_scope': 'unspecified',
                 'retrieval_scope': 'focused', 'document_workflow': 'none', 'allow_simulated_data': False, 'clarification': None})
+        elif 'answer_kind' in schema.get('properties', {}):
+            identifiers = schema['properties']['source_scopes']['items']['properties']['source_id']['enum']
+            content = json.dumps({'source_scopes': [{'source_id': identifiers[0], 'operation': 'read',
+                'scope': 'full', 'target_ids': [], 'selector': None, 'metadata_keys': [],
+                'reason': 'Summarize the selected attachment'}], 'deliverables': [],
+                'success_criteria': ['Summarize the complete selected attachment'],
+                'evidence_required': False, 'answer_kind': 'synthesis',
+                'first_action': {'tool': 'document.read_attachment', 'attachment_id': identifiers[0], 'limit': 100}})
         elif value.get('phase') == 'goal_verification':
             execution = value.get('execution_plan', {})
             proposal = None if value.get('requirements') else {
@@ -312,7 +320,8 @@ def test_managed_engine_death_during_intent_restarts_same_root_before_run(tmp_pa
             assert run['status'] == 'completed', (run['error_code'], run['error_message'])
             assert state['execution_task_id'] == service.execution_status({'owner_kind': 'run', 'owner_id': run_id})['id']
             requests = json.loads(counter.read_text())
-            assert len(requests) == 4 and requests[0] != requests[1] == requests[2] == requests[3]
+            assert len(requests) == 5
+            assert requests[0] != requests[1] and len(set(requests[1:])) == 1
         finally:
             await service.shutdown()
 

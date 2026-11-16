@@ -125,10 +125,13 @@ class UserInputSources:
                 if identity != run_id or digest != metadata['sha256'] or type(offset) is not int or not 0 <= offset <= metadata['character_count']:
                     raise ValueError()
             except (ValueError, TypeError, UnicodeError) as error:
-                raise CoreDataError('user_input_cursor_invalid', '原始输入读取游标无效。') from error
+                raise CoreDataError('user_input_cursor_invalid', '原始输入读取游标无效。',
+                    {'first_read': {'result_id': 'user-input', 'cursor': None},
+                     'next_read': 'Use only the next_cursor returned by this task.'}) from error
         text = self._text(metadata)
         end = min(len(text), offset + length)
-        return {'result_id': 'user-input', 'sha256': metadata['sha256'], 'source': 'original_user_message',
+        return {'result_id': 'user-input', 'sha256': metadata['sha256'], 'result_sha256': metadata['sha256'],
+                'source_ref': {'kind': 'original_user_message', 'run_id': run_id}, 'source': 'original_user_message',
                 'offset': offset, 'content': text[offset:end], 'total': len(text),
                 'next_cursor': self._cursor(metadata, end) if end < len(text) else None}
 
@@ -145,5 +148,7 @@ class UserInputSources:
             matches.append({'offset': offset, 'content': text[max(0, offset - 100):offset + len(query) + 100],
                             'cursor': self._cursor(metadata, max(0, offset - 100))})
             start = offset + len(query)
-        return {'result_id': 'user-input', 'matches': matches[:limit], 'truncated': len(matches) > limit,
+        return {'result_id': 'user-input', 'result_sha256': metadata['sha256'],
+                'source_ref': {'kind': 'original_user_message', 'run_id': run_id},
+                'matches': matches[:limit], 'truncated': len(matches) > limit,
                 'coverage_required': metadata['coverage_required']}

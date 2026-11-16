@@ -69,7 +69,7 @@ def test_required_review_outcomes_survive_execution_plan_reordering(tmp_path):
     value = requirements()
     value['deliverables'] = []
     plans.capture_requirements(root['id'], value, expected_revision=0)
-    plans.register_source(root['id'], 'source', 'review-source', 'hash', [{'id': 'p-0'}, {'id': 'p-1'}])
+    plans.register_source(root['id'], 'source', 'review-source', 'hash', [{'id': 'p-0'}, {'id': 'p-1'}], operation='review')
     plans.record_results(root['id'], 'review-source', 'hash', [{'target_id': 'p-0', 'status': 'reviewed'}])
     plans.update(root['id'], expected_revision=0, steps=[], success_criteria=[],
                  source_scopes=[scope('read', 'metadata')], deliverables=[])

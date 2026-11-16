@@ -278,7 +278,7 @@ const common = {
         enabledLabel: "Enable global behavior instructions",
         enabled: "Enabled",
         disabled: "Disabled",
-        placeholder: "For example: lead with the conclusion; proactively judge when current information needs web research.",
+        placeholder: "For example: lead with the conclusion; verify professional judgments against local sources and identify missing evidence.",
         characters: "Characters: {{count}} / {{max}}",
         revision: "Revision: {{revision}}",
         boundary: "This only affects response style and collaboration. It cannot grant file, web, or tool access or bypass approval and safety rules.",

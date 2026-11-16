@@ -57,7 +57,7 @@ def install_http(monkeypatch, replies, *, goal_checks=False):
 
 
 async def configure(service, value):
-    response = await handle_async_message({"v": 29, "id": "host-feedback",
+    response = await handle_async_message({"v": 30, "id": "host-feedback",
         "type": "provider.configure", "params": value}, service)
     assert "error" not in response, response
 

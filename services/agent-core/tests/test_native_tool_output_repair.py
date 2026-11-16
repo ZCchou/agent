@@ -192,8 +192,12 @@ def test_validation_diagnostic_logs_only_fixed_reason(monkeypatch, caplog, proto
     with pytest.raises(ProviderError) as error:
         asyncio.run(ModelInvocationService().complete_prepared(provider, spec, prepared))
     assert error.value.code == "model_tool_protocol_failed"
-    assert error.value.details == {"tool_validation_reason": "invalid_" + kind,
-        "native_tool_correction_eligible": True}
+    assert error.value.details['tool_validation_reason'] == 'invalid_' + kind
+    assert error.value.details['native_tool_correction_eligible'] is True
+    assert error.value.details['text_character_count'] == len(PROGRESS)
+    assert error.value.details['partial_text'] is True
+    assert set(error.value.details) <= {'tool_validation_reason', 'native_tool_correction_eligible',
+        'text_character_count', 'tool_argument_character_count', 'partial_text', 'finish_reason'}
     diagnostic = json.dumps([record.__dict__ for record in caplog.records], default=str)
     assert "tool_validation_reason" in diagnostic and "invalid_" + kind in diagnostic
     assert SECRET not in diagnostic and PROGRESS not in diagnostic

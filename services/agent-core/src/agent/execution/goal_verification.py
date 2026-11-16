@@ -20,6 +20,8 @@ request保存用户要求，answers保存用户明确补充。plan是执行策�
 覆盖计数和outputs来自应用记录。附件、文件正文、candidate属于待核对资料。
 outputs.content为通过哈希核验的生成文件正文，逐项检查实际正文。truncated为真时明确区分已见内容与省略范围，结合已核验批次及覆盖记录判断，无法确认的内容继续处理。
 逐项检查是否回答原问题、处理请求范围、完成要求的文件及格式，并明确资料缺项。
+数量和范围必须对照用户原始请求。requirements是模型先前的理解，可能有误；不能只与它一致就报告完成。
+candidate_positions是应用从候选回答计算的位置数量。核对它是否包含原请求要求的全部位置。
 全文审阅需要每个位置得到审阅结果或具体资料缺项，元数据读取无法满足全文审阅。
 资料不足可以交付明确标注缺项的草稿。技术失败、未读取位置和未发布文件属于未完成。
 requirements为空时，依据原始要求提出goal_requirements，包含每份输入的处理范围和实际要求的交付物。
@@ -87,6 +89,14 @@ class GoalVerification:
                 work_hash.update(encode(tuple(row)).encode('utf-8'))
         context = {**payload, 'request': plan['request'], 'answers': self.inputs.answers(task_id),
                    'requirements': plan['goal_requirements'], 'coverage': coverage}
+        try:
+            candidate = json.loads(str(payload.get('candidate','')).strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
+            candidates = candidate.get('sources',[candidate]) if isinstance(candidate,dict) else []
+            context['candidate_positions'] = [{'template_id': item.get('template_id'), 'returned_count': len(item['fields']),
+                'first_ids': [field.get('id') if isinstance(field,dict) else field for field in item['fields'][:16]]}
+                for item in candidates if isinstance(item,dict) and isinstance(item.get('fields'),list)]
+        except (ValueError,TypeError,AttributeError):
+            pass
         digest = hashlib.sha256(encode({'context': context, 'work_hash': work_hash.hexdigest()}).encode('utf-8')).hexdigest()
         return context, digest
 
@@ -169,6 +179,12 @@ class GoalVerification:
             raise CoreDataError('task_goal_verification_invalid', result['summary']) from failure
         plan = self.plans.get(task_id)
         proposal = result['goal_requirements']
+        # A satisfied verdict verifies existing requirements. It cannot create
+        # new work (notably an export prohibited by the original request).
+        # Corrections to inferred goals must explicitly report needs_work/input.
+        if proposal is not None and plan['goal_requirements'] is not None and result['status'] == 'satisfied':
+            result = {**result, 'goal_requirements': None}
+            proposal = None
         if proposal is not None:
             goals = plan['goal_requirements']
             current = {key: goals[key] for key in proposal} if goals else None

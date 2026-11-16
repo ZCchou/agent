@@ -367,7 +367,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
             async def parse(self, path):
                 return {'chunks': [{'text': 'ACTUAL-Z', 'locator': {'page': 3}}], 'warnings': []}
         service.document_attachments.parser = Parser()
-        attachment = runtime_attachment(tmp_path, '597922fb-90a2-41e6-8c48-3532e89563ef', 'ACTUAL-Z', '适航设备模板.docx')
+        attachment = runtime_attachment(tmp_path, '597922fb-90a2-41e6-8c48-3532e89563ef', 'ACTUAL-Z', '适航设备资料.pdf')
         try:
             task = (await service.intent_sessions.handle('start', {'request': {
                 'conversation_id': work['id'], 'content': '提取所选附件中的实际设备型号。' + '背景资料 ' * 3000,

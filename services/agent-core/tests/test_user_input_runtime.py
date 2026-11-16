@@ -14,6 +14,11 @@ from agent.storage import CoreDataError
 from test_input_sources import source_run
 
 
+def working_summary_reply(payload, notes):
+    supplied = json.loads(payload['messages'][-1]['content'])
+    return json.dumps({'notes': notes, **supplied['protected_record_ids']})
+
+
 def runtime(core):
     service = ChatRunService.__new__(ChatRunService)
     service.repository = core
@@ -111,7 +116,7 @@ def test_text_only_input_read_recovers_invalid_request_and_detects_repetition(tm
             content = checked
         elif any(message['role'] == 'system' and 'Summarize completed work, decisions' in str(message['content'])
                  for message in payload['messages']):
-            content = json.dumps({'notes': 'Original requirements remain available as user-input. Continue its latest cursor.'})
+            content = working_summary_reply(payload, 'Original requirements remain available as user-input. Continue its latest cursor.')
         else:
             dispatched.append(payload)
             reads = []
@@ -197,7 +202,7 @@ def test_native_two_page_compaction_summarizes_original_requirements_before_disc
                 note = marker
             else:
                 note = 'Continue reading original source.'
-            delta = {'content': json.dumps({'notes': note})}
+            delta = {'content': working_summary_reply(payload, note)}
         else:
             business.append(payload)
             pages = []
@@ -267,7 +272,7 @@ def test_forced_evidence_long_input_reads_original_before_model_selected_search(
         if checked is not None:
             content = checked
         elif any('Summarize completed work, decisions' in str(message.get('content')) for message in payload['messages']):
-            content = json.dumps({'notes': 'Read the complete original input and then search project evidence for safety requirements.'})
+            content = working_summary_reply(payload, 'Read the complete original input and then search project evidence for safety requirements.')
         else:
             pages = []
             for message in payload['messages']:

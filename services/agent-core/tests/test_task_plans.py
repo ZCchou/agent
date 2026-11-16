@@ -118,7 +118,7 @@ def test_required_source_scope_is_independent_of_review_selection(tmp_path):
         deliverables=[])
     assert plans.completion(root['id'])['ready'] is False
     plans.register_source(root['id'], 'source', 'artifact', 'hash', [
-        {'id': 'p-0', 'text': '第一项'}, {'id': 'p-1', 'text': '第二项'}])
+        {'id': 'p-0', 'text': '第一项'}, {'id': 'p-1', 'text': '第二项'}], operation='review')
     plans.record_results(root['id'], 'artifact', 'hash', [{'target_id': 'p-0', 'status': 'reviewed'}])
     assert plans.completion(root['id'])['remaining'] == 1
     with pytest.raises(CoreDataError):

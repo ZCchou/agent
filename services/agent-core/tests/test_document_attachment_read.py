@@ -192,3 +192,32 @@ def test_read_cursor_binds_filters_source_and_parser(tmp_path):
         with pytest.raises(CoreDataError):
             await service.read(attachment, cursor=first['next_cursor'])
     asyncio.run(scenario())
+
+
+def test_serialized_block_boundaries_preserve_original_trailing_whitespace():
+    from agent.document_attachments import _document_blocks
+    original = 'First paragraph with original whitespace \n\n'
+    last = 'Second paragraph\n'
+    saved = '[SOURCE {"kind":"docx","paragraph":1}]\n' + original + '\n\n' + (
+        '[SOURCE {"kind":"docx","paragraph":2}]\n' + last)
+    blocks = list(_document_blocks(saved))
+    assert [saved[begin:end] for begin, end, _ in blocks] == [original, last]
+
+
+def test_legacy_cursor_from_old_serialized_block_format_is_rejected(tmp_path):
+    import base64
+    import hashlib
+    async def exercise():
+        attachment = source_attachment(tmp_path)
+        service = DocumentAttachments(CoreRepository(tmp_path / 'agent.db'), parser=Parser(), ocr=Ocr())
+        first = await service.read(attachment, limit=1)
+        old_identity = service._read_identity()
+        old_binding = hashlib.sha256(json.dumps([attachment['sha256'], old_identity, None, None],
+            ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+        old_cursor = base64.urlsafe_b64encode(json.dumps([1, old_binding]).encode()).decode()
+        with pytest.raises(CoreDataError) as error:
+            await service.read(attachment, cursor=old_cursor)
+        assert error.value.code == 'document_cursor_invalid'
+        assert (await service.read(attachment, cursor=first['next_cursor'], limit=1))['blocks']
+        await service.close()
+    asyncio.run(exercise())

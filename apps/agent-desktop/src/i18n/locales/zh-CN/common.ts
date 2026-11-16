@@ -278,7 +278,7 @@ const common = {
         enabledLabel: "启用全局行为指令",
         enabled: "已启用",
         disabled: "已停用",
-        placeholder: "例如：先给结论，再给依据；涉及最新信息时主动判断是否需要联网。",
+        placeholder: "例如：先给结论，再给依据；专业判断核对本地资料并说明资料缺口。",
         characters: "字符数：{{count}} / {{max}}",
         revision: "版本：{{revision}}",
         boundary: "此内容只影响回答风格和协作方式，不会授予文件、联网或工具权限，也不能绕过审批和安全规则。",

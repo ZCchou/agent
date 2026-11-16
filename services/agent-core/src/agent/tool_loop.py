@@ -83,7 +83,9 @@ class ToolLoopService:
                     waiter.add_done_callback(cancel_executor)
                     output = await executor_task
                 except CoreDataError as error:
-                    self.resolve(operation["id"], success=False, output=error.message, error_code=error.code)
+                    output = json.dumps({'status': 'error', 'code': error.code,
+                        'message': error.message, 'details': error.details}, ensure_ascii=False) if error.details else error.message
+                    self.resolve(operation["id"], success=False, output=output, error_code=error.code)
                 except Exception:
                     code = "document_operation_failed" if call.name.startswith('document.') else "rag_operation_failed" if async_executor else "skill_unavailable"
                     self.resolve(operation["id"], success=False, output="Local operation failed. Check its state before retrying.", error_code=code)

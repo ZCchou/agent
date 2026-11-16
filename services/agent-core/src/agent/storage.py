@@ -33,7 +33,7 @@ from agent.global_instructions import (
 )
 from agent.web_search.domain import WEB_OPERATION_TRANSITIONS, WebOperationStatus
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 TRASH_RETENTION_DAYS = 30
 CATEGORIES = {"casual", "research", "work", "writing", "coding", "gaming", "other"}
 CONVERSATION_KINDS = {"standard_chat", "project_work"}
@@ -512,6 +512,13 @@ class CoreRepository:
                     raise
                 finally:
                     connection.execute('PRAGMA foreign_keys = ON')
+            if version == 35:
+                version = 36
+            if version == 36:
+                from agent.migrations.v37_scope_closure import migrate as migrate_scope_closure
+                with connection:
+                    migrate_scope_closure(connection)
+                    connection.execute('UPDATE schema_info SET version = 37')
             self._create_indexes(connection)
             self._reconcile_terminal_web_operations(connection)
             self._validate_database(connection)

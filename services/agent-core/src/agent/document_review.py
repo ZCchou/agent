@@ -361,7 +361,9 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
         else:
             remaining.append(field)
     if results:
-        plans.record_results(activity.task_id, template_id, template['sha256'], list(results.values()), fence=fence)
+        plans.record_results(activity.task_id, template_id, template['sha256'], list(results.values()), fence=fence,
+            authorization_source_id=(identity or {}).get('authorization_source_id'),
+            evidence_generation=(identity or {}).get('project_generation'))
     base = {'stage': 'review', 'request': request, 'token_budget': token_allowance,
         'include_facts': True, 'review_phase': 'targets' if include_consistency else 'consistency',
         'template_context': {'name': template['manifest'].get('name', ''),
@@ -460,7 +462,9 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
                 checkpoint_key, checkpoint_identity, payload):
             raise CoreDataError('document_review_stale', '审阅阶段身份已变化，旧批次结果未发布。')
         results.update({result['target_id']: result for result in normalized})
-        plans.record_results(activity.task_id, template_id, template['sha256'], normalized, fence=fence)
+        plans.record_results(activity.task_id, template_id, template['sha256'], normalized, fence=fence,
+            authorization_source_id=(identity or {}).get('authorization_source_id'),
+            evidence_generation=(identity or {}).get('project_generation'))
         batches.append({'index': index, 'target_ids': batch['target_ids'], 'restored': restored,
                         'inherited_from': inherited_from})
         remaining = remaining[len(page):]
@@ -489,7 +493,9 @@ async def review_template(workflow, run_id, template_id, request, generate, evid
                         if source not in original['evidence'])
                     consistency_checks.append({'target_id': checked['id'], 'summary': checked['summary'],
                         'problems': checked['problems'], 'gaps': checked['gaps']})
-                plans.record_results(activity.task_id, template_id, template['sha256'], [results[key] for key in ids], fence=fence)
+                plans.record_results(activity.task_id, template_id, template['sha256'], [results[key] for key in ids], fence=fence,
+                    authorization_source_id=(identity or {}).get('authorization_source_id'),
+                    evidence_generation=(identity or {}).get('project_generation'))
     reviewed = sum(result['status'] == 'reviewed' for result in ordered)
     report = {'template_id': template_id, 'template_sha256': template['sha256'],
         'project_id': template['project_id'], 'identity': review_identity,

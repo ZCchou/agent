@@ -12,10 +12,10 @@ use crate::{
     logging::{events as log_events, AppLogger, LogLevel},
 };
 
-pub(crate) const PROTOCOL_VERSION: u64 = 29;
+pub(crate) const PROTOCOL_VERSION: u64 = 30;
 const EXPECTED_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const EXPECTED_SCHEMA_VERSION: u64 = 36;
-const EXPECTED_BUILD_ID: &str = "schema36-agent-unified-v1";
+const EXPECTED_SCHEMA_VERSION: u64 = 37;
+const EXPECTED_BUILD_ID: &str = "schema37-agent-unified-v1";
 const CORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // Automatic start preparation may make two bounded 30-second intent calls
 // before returning a run. Control RPCs must not inherit that longer wait.
@@ -565,9 +565,9 @@ mod tests {
         let manager = std::sync::Mutex::new(crate::core_process_manager::CoreProcessManager::new());
         manager.lock().unwrap().reset_process_state();
         let owner = manager.lock().unwrap().request_owner();
-        let response = json!({"v": 29, "id": "current", "type": "ping", "result": {
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 29,
-            "schema_version": 36, "build_id": "schema36-agent-unified-v1"
+        let response = json!({"v": 30, "id": "current", "type": "ping", "result": {
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 30,
+            "schema_version": 37, "build_id": "schema37-agent-unified-v1"
         }});
         assert!(super::finish_core_response(
             &manager,
@@ -616,11 +616,12 @@ mod tests {
     #[test]
     fn current_ipc_ping_rejects_each_incompatible_core_identity() {
         let current = json!({
-            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": 26,
-            "schema_version": 33, "build_id": "schema36-agent-unified-v1"
+            "core_version": super::EXPECTED_CORE_VERSION, "protocol_version": super::PROTOCOL_VERSION,
+            "schema_version": super::EXPECTED_SCHEMA_VERSION, "build_id": "schema37-agent-unified-v1"
         });
         for (field, wrong_value) in [
             ("core_version", json!("0.13.0")),
+            ("protocol_version", json!(29)),
             ("schema_version", json!(20)),
             (
                 "build_id",
@@ -634,7 +635,7 @@ mod tests {
             manager.lock().unwrap().set_healthy(true);
             let mut identity = current.clone();
             identity[field] = wrong_value;
-            let response = json!({"v": 26, "id": "current", "type": "ping", "result": identity});
+            let response = json!({"v": super::PROTOCOL_VERSION, "id": "current", "type": "ping", "result": identity});
             assert!(
                 super::finish_core_response(
                     &manager,
@@ -667,8 +668,9 @@ mod tests {
     fn rejects_protocol_type_and_id_mismatches() {
         for response in [
             json!({"v": 1, "id": "req-1", "type": "ping", "result": {}}),
-            json!({"v": 26, "id": "wrong", "type": "ping", "result": {}}),
-            json!({"v": 26, "id": "req-1", "type": "other", "result": {}}),
+            json!({"v": 29, "id": "req-1", "type": "ping", "result": {}}),
+            json!({"v": super::PROTOCOL_VERSION, "id": "wrong", "type": "ping", "result": {}}),
+            json!({"v": super::PROTOCOL_VERSION, "id": "req-1", "type": "other", "result": {}}),
         ] {
             assert!(validate_response(&response, "req-1", "ping").is_err());
         }

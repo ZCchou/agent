@@ -6,6 +6,11 @@ from typing import Any
 
 
 REASONS = {
+    'task_final_answer_invalid': '最终回答的位置引用或原文未通过校验，已保存的读取结果仍可核对',
+    'task_final_context_too_small': '当前窗口不足以核对原始要求、完成证明与必要证据，完整结果已保留',
+    'task_selector_invalid': '任务范围选择器无效，原请求和资料已保留',
+    'task_source_alias_ambiguous': '该产物对应多个授权来源，请使用明确的附件身份继续',
+    'task_inventory_conflict': '同一资料版本的结构清单不一致，需要重新核对原件',
     'task_goal_invalid': '任务目标要求无效，请核对处理范围与交付要求',
     'task_goal_revision_changed': '任务要求已更新，请恢复当前修订',
     'task_goal_change_requires_input': '任务范围变更需要补充确认，已有结果已保留',

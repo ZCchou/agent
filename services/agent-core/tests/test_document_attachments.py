@@ -117,17 +117,28 @@ def test_document_excerpt_expands_matching_heading_into_section_body():
 
 
 def test_normal_chat_entry_extracts_document_before_model_dispatch(tmp_path, monkeypatch):
+    import io
+    from docx import Document
     from agent.runtime import ChatRunService
     from agent.context_engine.service import ContextEngineService
     monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
     core = CoreRepository(tmp_path / "agent.db")
-    attachment = source_attachment(tmp_path)
+    document = Document()
+    document.add_paragraph('Title')
+    document.add_paragraph('Equipment requirements')
+    stream = io.BytesIO()
+    document.save(stream)
+    attachment = source_attachment(tmp_path, stream.getvalue())
     async def scenario():
         events = []
         async def sink(event):
             events.append(event)
         service = ChatRunService(core, sink)
-        service.document_attachments.parser = Parser()
+        class CompleteParser:
+            async def parse(self, path):
+                return {'chunks': [{'text': paragraph.text, 'locator': {'kind': 'docx', 'paragraph': index}}
+                    for index, paragraph in enumerate(Document(path).paragraphs, start=1)], 'warnings': ['Verify diagrams']}
+        service.document_attachments.parser = CompleteParser()
         async def select_read(**kwargs):
             return {'files': 'read', 'tools': 'available', 'web': 'off', 'web_evidence': 'optional',
                 'reasoning': 'standard', 'task_kinds': ['attachment_extract'],
@@ -202,7 +213,7 @@ def test_schema26_upgrade_preserves_existing_attachment_records(tmp_path):
     assert stored['sha256'] == attachment['sha256']
     assert stored['storage_key'] == attachment['storage_key']
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 36
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 37
         assert "'document.source'" in connection.execute("SELECT sql FROM sqlite_master WHERE name='attachment_artifacts'").fetchone()[0]
 
 

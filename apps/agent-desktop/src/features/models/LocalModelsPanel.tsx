@@ -130,7 +130,7 @@ export function LocalModelsPanel({ onChanged, onAuxiliary }: { onChanged(): Prom
       <LocalModelJobs jobs={jobs} busy={busy} onCancel={id => void act(() => localModelRepository.cancel(id))} />
     </Card>
     <Card><h2>辅助模型</h2><p>嵌入与重排模型沿用知识库中的本地模型配置。</p><Button onClick={onAuxiliary}>管理辅助模型</Button></Card>
-    <Card><h2 id="local-model-runtime">设备与运行时</h2><p>新导入模型默认自动选择，优先 GPU。已有模型按保存的设备配置加载。检测会校验资源并探测可用设备。</p><p>本地任务采用“运行与等待”中保存的策略。智能等待会持续检查进展，需要处理时可在任务卡中继续等待、恢复或取消。</p>
+    <Card><h2 id="local-model-runtime">设备与运行时</h2><p>新导入模型默认自动选择，优先 GPU。已有模型按保存的设备配置加载。检测会校验资源并探测可用设备。</p><p>本地任务在后台持续执行并监控进展，可在任务卡中查看当前阶段或取消。明确失败后可重新尝试。</p>
       <Button disabled={probing} onClick={() => void probeResources()}>{probing ? "正在校验资源与探测设备…" : "检测设备与运行时"}</Button>
       {capabilities && <pre>{JSON.stringify(capabilities, null, 2)}</pre>}
       <p role="status">状态 {runtime.state} · 实际后端 {runtime.backend || "未加载"} · GPU 层数 {runtime.gpu_layers_used ?? 0} · 实际上下文 {runtime.context_length ?? 0}</p>

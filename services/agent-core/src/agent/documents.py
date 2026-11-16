@@ -120,7 +120,9 @@ class DocumentWorkflow:
             raise CoreDataError('document_artifact_changed', '文档内容已变化，请重新生成。')
         return path
 
-    def register_template(self, run_id, payload, name):
+    def register_template(self, run_id, payload, name, *, source_id=None):
+        if source_id is not None and (not isinstance(source_id, str) or not 1 <= len(source_id) <= 1024):
+            raise CoreDataError('document_template_invalid', '文档授权来源身份无效。')
         if not name.lower().endswith('.docx') or len(payload) > MAX_DOCUMENT_BYTES:
             raise CoreDataError('document_template_invalid', '首期回填支持 20 MiB 以内的 DOCX 模板。')
         load_docx(payload)
@@ -130,11 +132,15 @@ class DocumentWorkflow:
                                           (run_id, digest(payload))).fetchall()
         for item in existing:
             artifact = self.get(run_id, item['id'])
-            if artifact['manifest'].get('name') == name:
+            if (artifact['manifest'].get('name') == name
+                    and artifact['manifest'].get('authorized_source_id') == source_id):
                 self.path_for(run_id, artifact['id'])
                 return {**artifact, 'template_id': artifact['id']}
         standards = sorted(set(re.findall(r'DO[-－ ]?160[FG]', '\n'.join(target.text for _, target, _ in targets(document)), re.I)))
-        result = self._save(run_id, payload, 'template', {'name': name, 'referenced_standards': standards})
+        manifest = {'name': name, 'referenced_standards': standards}
+        if source_id is not None:
+            manifest['authorized_source_id'] = source_id
+        result = self._save(run_id, payload, 'template', manifest)
         return {**result, 'template_id': result['id']}
 
     def inspect(self, run_id, template_id, offset=0, limit=100, max_characters=None):
@@ -164,6 +170,30 @@ class DocumentWorkflow:
         with self.repository._connect() as connection:
             connection.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=? AND run_id=?',
                                (json.dumps(manifest, ensure_ascii=False), artifact_id, run_id))
+
+    def saved_review_reports(self, run_id, generation):
+        """Return complete verified report bodies, outside the model context."""
+        with self.repository._connect() as connection:
+            rows = connection.execute('SELECT id,manifest_json FROM document_artifacts WHERE run_id=? ORDER BY rowid', (run_id,)).fetchall()
+        reports, seen = [], set()
+        for row in rows:
+            manifest = json.loads(row['manifest_json'])
+            review = manifest.get('review_report')
+            if not review or manifest.get('rag_generation') != generation:
+                continue
+            source = self.get(run_id, review['template_id'])
+            self.path_for(run_id, source['id'])
+            if source['sha256'] != review['template_sha256']:
+                raise CoreDataError('task_source_changed', '审阅报告的原件版本已变化。')
+            content = self.verification_content(run_id, row['id'], max_characters=20 * 1024 * 1024)
+            if content['truncated']:
+                raise CoreDataError('document_review_invalid', '审阅报告正文不完整，已保留现有结果。')
+            text = '\n'.join(item['text'] for item in content['items'])
+            identity = digest(text.encode('utf-8'))
+            if identity not in seen:
+                reports.append(text)
+                seen.add(identity)
+        return reports
 
     def inspect_structure(self, run_id, template_id, offset=0, limit=100):
         template = self.get(run_id, template_id)

@@ -61,6 +61,7 @@ def test_local_measurement_recompiles_before_dispatch_with_final_fingerprint(mon
 
         service = SimpleNamespace(local_models=SimpleNamespace(_runtime=SimpleNamespace(alive=True),
             runtime_identity=lambda _: identity, get_profile=lambda _: profile, observe_activity=session),
+            repository=SimpleNamespace(),
             _provider=lambda _: provider, _validate_context_dispatch_authority=lambda *args, **kwargs: None,
             _compile_model_request=compile_request,
             execution_repository=SimpleNamespace(mark_invocation_dispatched=lambda *args: dispatched.append(args)),
@@ -70,6 +71,7 @@ def test_local_measurement_recompiles_before_dispatch_with_final_fingerprint(mon
             _model_diagnostic=lambda _: None, _managed_transport_failure=lambda _: False)
         spec = SimpleNamespace(managed_runtime=identity, model_id='model', spec_id='spec', round_no=1)
         monkeypatch.setattr('agent.runtime.monitored_events', monitored)
+        monkeypatch.setattr('agent.runtime.record_invocation_diagnostics', lambda *args, **kwargs: None)
         monkeypatch.setattr('agent.runtime.ModelInvocationService.provider_session', session)
 
         async def collect():
