@@ -17,36 +17,39 @@ function batchId() {
   return globalThis.crypto?.randomUUID?.() ?? `drop-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function ensureNativeDropListener() {
+async function ensureNativeDropListener() {
   if (nativeSetup) return;
   nativeSetup = true;
-  void getCurrentWebview().onDragDropEvent(({ payload }) => {
-    const targetId = activeDropTarget;
-    if (!targetId) return;
-    const event = payload as NativeAttachmentDropEvent;
-    if (event.type === "over") return;
-    const id = event.type === "drop" ? batchId() : null;
-    const state = nativeDropState(targetId, event, id);
-    for (const listener of dragStateListeners) listener(state);
-    if (event.type !== "drop") return;
-    void invoke<AttachmentImportBatchResult>("import_dropped_attachments", { paths: event.paths })
-      .then((result) => {
-        const dropped: AttachmentDropImportedEvent = {
-          target_id: targetId, batch_id: id as string, result, error_code: null,
-        };
-        for (const listener of droppedListeners) listener(dropped);
-      })
-      .catch((value) => {
-        const dropped: AttachmentDropImportedEvent = {
-          target_id: targetId, batch_id: id as string, result: null,
-          error_code: value instanceof Error ? value.message : String(value),
-        };
-        for (const listener of droppedListeners) listener(dropped);
-      });
-  }).then((unlisten) => {
+  try {
+    const unlisten = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+      const targetId = activeDropTarget;
+      if (!targetId) return;
+      const event = payload as NativeAttachmentDropEvent;
+      if (event.type === "over") return;
+      const id = event.type === "drop" ? batchId() : null;
+      const state = nativeDropState(targetId, event, id);
+      for (const listener of dragStateListeners) listener(state);
+      if (event.type !== "drop") return;
+      void invoke<AttachmentImportBatchResult>("import_dropped_attachments", { paths: event.paths })
+        .then((result) => {
+          const dropped: AttachmentDropImportedEvent = {
+            target_id: targetId, batch_id: id as string, result, error_code: null,
+          };
+          for (const listener of droppedListeners) listener(dropped);
+        })
+        .catch((value) => {
+          const dropped: AttachmentDropImportedEvent = {
+            target_id: targetId, batch_id: id as string, result: null,
+            error_code: value instanceof Error ? value.message : String(value),
+          };
+          for (const listener of droppedListeners) listener(dropped);
+        });
+    });
     if (dragStateListeners.size || droppedListeners.size) nativeUnlisten = unlisten;
     else { nativeSetup = false; unlisten(); }
-  }).catch(() => { nativeSetup = false; });
+  } catch {
+    nativeSetup = false;
+  }
 }
 
 function releaseNativeDropListener() {
@@ -84,7 +87,7 @@ export class TauriAttachmentRepository implements AttachmentRepository {
   }
   subscribeDragState(listener: (event: AttachmentDragStateEvent) => void): Promise<() => void> {
     dragStateListeners.add(listener);
-    ensureNativeDropListener();
+    void ensureNativeDropListener();
     return Promise.resolve(() => {
       dragStateListeners.delete(listener);
       releaseNativeDropListener();
@@ -92,7 +95,7 @@ export class TauriAttachmentRepository implements AttachmentRepository {
   }
   subscribeDropped(listener: (event: AttachmentDropImportedEvent) => void): Promise<() => void> {
     droppedListeners.add(listener);
-    ensureNativeDropListener();
+    void ensureNativeDropListener();
     return Promise.resolve(() => {
       droppedListeners.delete(listener);
       releaseNativeDropListener();

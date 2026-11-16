@@ -13,17 +13,13 @@ import agentLogo
 import { useTranslation } from "react-i18next";
 import { useState } from "react";
 
-const appWindow =
-  getCurrentWindow();
-
-
 export function TitleBar() {
   const { t } = useTranslation("common");
   const [failed, setFailed] = useState(false);
   async function handleMinimize() {
     setFailed(false);
     try {
-      await appWindow.minimize();
+      await getCurrentWindow().minimize();
     } catch (error) {
       setFailed(true);
       console.error(
@@ -37,7 +33,7 @@ export function TitleBar() {
   async function handleToggleMaximize() {
     setFailed(false);
     try {
-      await appWindow.toggleMaximize();
+      await getCurrentWindow().toggleMaximize();
     } catch (error) {
       setFailed(true);
       console.error(
@@ -51,7 +47,7 @@ export function TitleBar() {
   async function handleClose() {
     setFailed(false);
     try {
-      await appWindow.close();
+      await getCurrentWindow().close();
     } catch (error) {
       setFailed(true);
       console.error(
