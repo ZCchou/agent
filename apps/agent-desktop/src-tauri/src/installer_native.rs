@@ -59,6 +59,8 @@ struct Journal {
     started: u64,
     previous: Option<Manifest>,
     next: Manifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staged_files: Option<BTreeSet<String>>,
 }
 #[derive(Serialize, Deserialize)]
 struct Intent {
@@ -319,8 +321,91 @@ fn valid_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
+// Pins are phase-local. Denying directory delete sharing prevents an already
+// checked ancestor from being replaced by a junction until the scope ends.
+#[cfg(windows)]
+thread_local! {
+    static PARENT_PINS: std::cell::RefCell<Option<BTreeMap<PathBuf, File>>> = const { std::cell::RefCell::new(None) };
+}
+struct CheckedParents;
+impl CheckedParents {
+    fn new() -> Self {
+        #[cfg(windows)]
+        PARENT_PINS.with(|pins| {
+            let mut pins = pins.borrow_mut();
+            assert!(pins.is_none(), "nested directory pin scope");
+            *pins = Some(BTreeMap::new());
+        });
+        Self
+    }
+}
+impl Drop for CheckedParents {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        PARENT_PINS.with(|pins| *pins.borrow_mut() = None);
+    }
+}
+fn parent_is_pinned(path: &Path) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        PARENT_PINS.with(|pins| {
+            let pins = pins.borrow();
+            if let Some(file) = pins.as_ref().and_then(|p| p.get(path)) {
+                // Attribute-only writers do not participate in Windows share
+                // checks and can set a junction in-place. Recheck the live
+                // handle on EVERY use; only pathname reopening is cached.
+                let metadata = file.metadata()?;
+                if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+                    return Err("reparse directory refused".into());
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+fn pin_parent(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        PARENT_PINS.with(|pins| -> Result<()> {
+            let mut pins = pins.borrow_mut();
+            if let Some(pins) = pins.as_mut() {
+                // GENERIC_READ (including directory list access), FILE_SHARE_READ, BACKUP_SEMANTICS|
+                // OPEN_REPARSE_POINT. No delete sharing: path identity stays pinned.
+                let directory = OpenOptions::new()
+                    .access_mode(0x80000000)
+                    .share_mode(1)
+                    .custom_flags(0x02200000)
+                    .open(path)?;
+                let metadata = directory.metadata()?;
+                if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+                    return Err("reparse directory refused".into());
+                }
+                pins.insert(path.to_owned(), directory);
+            }
+            Ok(())
+        })?;
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
 fn plain(path: &Path) -> Result<()> {
-    for ancestor in path.ancestors() {
+    let ancestors: Vec<_> = path.ancestors().collect();
+    for ancestor in ancestors.into_iter().rev() {
+        let parent = ancestor != path;
+        if parent && parent_is_pinned(ancestor)? {
+            continue;
+        }
         match fs::symlink_metadata(ancestor) {
             Ok(m) => {
                 #[cfg(windows)]
@@ -332,6 +417,9 @@ fn plain(path: &Path) -> Result<()> {
                 }
                 if m.file_type().is_symlink() {
                     return Err("linked path refused".into());
+                }
+                if parent && m.is_dir() {
+                    pin_parent(ancestor)?;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -403,8 +491,27 @@ fn read_json<T: serde::de::DeserializeOwned>(p: &Path) -> Result<T> {
     )?)
 }
 fn open_regular(path: &Path) -> Result<File> {
+    open_regular_shared(path, 7)
+}
+fn open_regular_shared(path: &Path, sharing: u32) -> Result<File> {
     plain(path)?;
-    let file = File::open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(sharing).custom_flags(0x00200000); // open the leaf itself, never follow a reparse point
+    }
+    #[cfg(not(windows))]
+    let _ = sharing;
+    let file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err("reparse file refused".into());
+        }
+    }
     if !file.metadata()?.is_file() {
         return Err("expected regular file".into());
     }
@@ -431,12 +538,15 @@ fn open_regular(path: &Path) -> Result<File> {
     Ok(file)
 }
 fn hash(path: &Path, progress: Option<&Progress>, allow_archive_links: bool) -> Result<Identity> {
-    plain(path)?;
-    let mut f = if allow_archive_links {
+    let f = if allow_archive_links {
+        plain(path)?;
         File::open(path)?
     } else {
         open_regular(path)?
     };
+    hash_stream(f, progress)
+}
+fn hash_stream(mut f: impl Read, progress: Option<&Progress>) -> Result<Identity> {
     let mut h = Sha256::new();
     let mut total = 0;
     let mut buffer = vec![0; 1024 * 1024];
@@ -740,8 +850,8 @@ fn empty_cleanup_inventory() -> CleanupInventory {
         directories: BTreeSet::new(),
     }
 }
-fn cleanup_entry(plan: &mut CleanupInventory, name: String, identity: Identity) -> Result<()> {
-    valid_name(&name)?;
+fn cleanup_parents(plan: &mut CleanupInventory, name: &str) -> Result<()> {
+    valid_name(name)?;
     let mut parent = Path::new(&name).parent();
     while let Some(path) = parent {
         if path.as_os_str().is_empty() {
@@ -751,6 +861,10 @@ fn cleanup_entry(plan: &mut CleanupInventory, name: String, identity: Identity) 
             .insert(path.to_string_lossy().replace('\\', "/"));
         parent = path.parent();
     }
+    Ok(())
+}
+fn cleanup_entry(plan: &mut CleanupInventory, name: String, identity: Identity) -> Result<()> {
+    cleanup_parents(plan, &name)?;
     plan.files.insert(name, identity);
     Ok(())
 }
@@ -780,8 +894,26 @@ fn native_cleanup_inventory(root: &Path) -> Result<CleanupInventory> {
         }
         plan.id = journal.id;
         plan.directories.extend(["stage".into(), "backup".into()]);
-        for (name, identity) in &journal.next.files {
-            cleanup_entry(&mut plan, format!("stage/{name}"), identity.clone())?;
+        let committed = safe(root, "committed")?.exists();
+        let staged = journal
+            .staged_files
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| journal.next.files.keys().cloned().collect());
+        for name in staged {
+            let identity = journal
+                .next
+                .files
+                .get(&name)
+                .ok_or("staged path is not owned")?;
+            let staged_name = format!("stage/{name}");
+            if committed {
+                // A committed transaction has already moved every staged file.
+                // Record only its empty directory skeleton; unknown files survive.
+                cleanup_parents(&mut plan, &staged_name)?;
+            } else {
+                cleanup_entry(&mut plan, staged_name, identity.clone())?;
+            }
         }
         let operations = safe(root, "operations.jsonl")?;
         if operations.exists() {
@@ -1449,18 +1581,21 @@ pub fn main_entry() -> Result<()> {
         manifest.files.values().map(|r| r.bytes).sum(),
         1,
     );
-    for (name, record) in &manifest.files {
-        progress.current(name);
-        let path = safe(&root, name)?;
-        if path.exists() && !old_files.contains_key(name) {
-            return Err(format!("unowned destination preserved: {name}").into());
+    {
+        let _parents = CheckedParents::new();
+        for (name, record) in &manifest.files {
+            progress.current(name);
+            let path = safe(&root, name)?;
+            if path.exists() && !old_files.contains_key(name) {
+                return Err(format!("unowned destination preserved: {name}").into());
+            }
+            if path.exists() && equal(&hash(&path, Some(&progress), false)?, record) {
+                reuse.insert(name.clone());
+            } else {
+                changed.insert(name.clone());
+            }
+            progress.file();
         }
-        if path.exists() && equal(&hash(&path, Some(&progress), false)?, record) {
-            reuse.insert(name.clone());
-        } else {
-            changed.insert(name.clone());
-        }
-        progress.file();
     }
     let deleted: BTreeSet<_> = old_files
         .keys()
@@ -1492,6 +1627,7 @@ pub fn main_entry() -> Result<()> {
         started: process_started(std::process::id()).ok_or("cannot identify installer process")?,
         previous,
         next: manifest.clone(),
+        staged_files: Some(changed.clone()),
     };
     let fault_name = args.get("--fault").map(String::as_str).unwrap_or("");
     fault(fault_name, "before-prepare-journal");
@@ -1502,6 +1638,7 @@ pub fn main_entry() -> Result<()> {
     fault(fault_name, "after-prepare-rename");
     fs::remove_file(&preparation_record)?;
     let install_result = (|| -> Result<()> {
+        let parents = CheckedParents::new();
         let stage = txn.join("stage");
         fs::create_dir(&stage)?;
         progress.phase(
@@ -1553,13 +1690,18 @@ pub fn main_entry() -> Result<()> {
             }
         }
         assert_idle(&root)?;
+        let verify_reuse = !changed.is_empty() || !deleted.is_empty();
         progress.phase(
             "reuse-verification",
-            reuse.len(),
-            reuse.iter().map(|n| manifest.files[n].bytes).sum(),
+            if verify_reuse { reuse.len() } else { 0 },
+            if verify_reuse {
+                reuse.iter().map(|n| manifest.files[n].bytes).sum()
+            } else {
+                0
+            },
             60,
         );
-        for name in &reuse {
+        for name in reuse.iter().filter(|_| verify_reuse) {
             progress.current(name);
             if !equal(
                 &hash(&safe(&root, name)?, Some(&progress), false)?,
@@ -1569,38 +1711,66 @@ pub fn main_entry() -> Result<()> {
             }
             progress.file();
         }
+        // Directory pins deny namespace writes on Windows MoveFileEx. Release
+        // them before publication; all mutation paths use the full checks.
+        drop(parents);
         let mutations: Vec<_> = changed.union(&deleted).cloned().collect();
         progress.phase("publication", mutations.len(), 0, 75);
         let mut log = OpenOptions::new()
             .create_new(true)
             .append(true)
             .open(txn.join("operations.jsonl"))?;
-        for (index, name) in mutations.iter().enumerate() {
-            progress.current(name);
-            let active = safe(&root, name)?;
-            let old = if active.exists() {
-                Some(hash(&active, None, false)?)
-            } else {
-                None
-            };
-            let op = Intent {
-                name: name.clone(),
-                old,
-            };
-            serde_json::to_writer(&mut log, &op)?;
-            log.write_all(b"\n")?;
+        // Every intent in a bounded batch is durable before the first rename.
+        // Recovery handles both executed and not-yet-executed intents.
+        for (batch_index, batch) in mutations.chunks(128).enumerate() {
+            let mut intents = Vec::with_capacity(batch.len());
+            let mut snapshots = Vec::with_capacity(batch.len());
+            for name in batch {
+                let active = safe(&root, name)?;
+                // Deny writes and deletion while this batch waits. Release only
+                // the current file immediately before its backup rename.
+                let mut snapshot = if active.exists() {
+                    Some(open_regular_shared(&active, 1)?)
+                } else {
+                    None
+                };
+                let old = match snapshot.as_mut() {
+                    Some(file) => Some(hash_stream(file, None)?),
+                    None => None,
+                };
+                snapshots.push(snapshot);
+                intents.push(Intent {
+                    name: name.clone(),
+                    old,
+                });
+            }
+            fault(fault_name, &format!("before-journal-batch:{batch_index}"));
+            for op in &intents {
+                serde_json::to_writer(&mut log, op)?;
+                log.write_all(b"\n")?;
+            }
             log.sync_all()?;
-            fault(fault_name, &format!("before-backup:{index}"));
-            if active.exists() {
-                rename(&active, &safe(&txn.join("backup"), name)?, false)?;
+            fault(fault_name, &format!("after-journal-batch:{batch_index}"));
+            for (offset, name) in batch.iter().enumerate() {
+                let index = batch_index * 128 + offset;
+                progress.current(name);
+                let active = safe(&root, name)?;
+                fault(fault_name, &format!("before-backup:{index}"));
+                drop(snapshots[offset].take());
+                if active.exists() != intents[offset].old.is_some() {
+                    return Err("destination changed during publication".into());
+                }
+                if active.exists() {
+                    rename(&active, &safe(&txn.join("backup"), name)?, false)?;
+                }
+                fault(fault_name, &format!("after-backup:{index}"));
+                fault(fault_name, &format!("before-publish:{index}"));
+                if changed.contains(name) {
+                    rename(&safe(&stage, name)?, &active, false)?;
+                }
+                fault(fault_name, &format!("after-publish:{index}"));
+                progress.file();
             }
-            fault(fault_name, &format!("after-backup:{index}"));
-            fault(fault_name, &format!("before-publish:{index}"));
-            if changed.contains(name) {
-                rename(&safe(&stage, name)?, &active, false)?;
-            }
-            fault(fault_name, &format!("after-publish:{index}"));
-            progress.file();
         }
         drop(log);
         progress.phase("prerequisites/health", 0, 0, 90);
@@ -1670,4 +1840,125 @@ pub fn main_entry() -> Result<()> {
         100,
     );
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod throughput_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_parent_checks_detect_attribute_only_reparse_changes() {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        let root =
+            std::env::temp_dir().join(format!("agent-reparse-pins-{}", uuid::Uuid::new_v4()));
+        let parent = root.join("parent");
+        let outside = root.join("outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        {
+            let _scope = CheckedParents::new();
+            plain(&parent.join("missing")).unwrap();
+            let writer = OpenOptions::new()
+                .access_mode(0x100)
+                .share_mode(7)
+                .custom_flags(0x02200000)
+                .open(&parent)
+                .unwrap();
+            let substitute: Vec<u8> = format!(r"\??\{}", outside.display())
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let mut data = Vec::new();
+            for value in [
+                0u16,
+                substitute.len() as u16,
+                (substitute.len() + 2) as u16,
+                0,
+            ] {
+                data.extend(value.to_le_bytes());
+            }
+            data.extend(&substitute);
+            data.extend([0, 0, 0, 0]);
+            let mut buffer = Vec::new();
+            buffer.extend(0xa0000003u32.to_le_bytes());
+            buffer.extend((data.len() as u16).to_le_bytes());
+            buffer.extend(0u16.to_le_bytes());
+            buffer.extend(data);
+            let mut returned = 0;
+            let success = unsafe {
+                windows_sys::Win32::System::IO::DeviceIoControl(
+                    writer.as_raw_handle() as _,
+                    0x900a4,
+                    buffer.as_ptr() as _,
+                    buffer.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(success, 0, "{}", std::io::Error::last_os_error());
+            assert!(
+                plain(&parent.join("missing")).is_err(),
+                "cached handles must not mask an in-place junction"
+            );
+        }
+        fs::remove_dir(parent).unwrap();
+        fs::remove_dir(outside).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn checked_parents_pin_directory_identity_and_release_at_phase_end() {
+        let root = std::env::temp_dir().join(format!("agent-parent-pins-{}", uuid::Uuid::new_v4()));
+        let parent = root.join("nested");
+        fs::create_dir_all(&parent).unwrap();
+        let leaf = parent.join("file");
+        fs::write(&leaf, b"first").unwrap();
+        {
+            let _scope = CheckedParents::new();
+            let first = hash(&leaf, None, false).unwrap();
+            assert!(parent_is_pinned(&parent).unwrap());
+            assert!(fs::rename(&parent, root.join("moved")).is_err());
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                assert!(
+                    OpenOptions::new()
+                        .write(true)
+                        .custom_flags(0x02200000)
+                        .open(&parent)
+                        .is_err(),
+                    "generic-write directory opens must be denied"
+                );
+            }
+            fs::write(&leaf, b"changed").unwrap();
+            assert!(!equal(&first, &hash(&leaf, None, false).unwrap()));
+        }
+        assert!(!parent_is_pinned(&parent).unwrap());
+        fs::rename(&parent, root.join("moved")).unwrap();
+        fs::remove_file(root.join("moved/file")).unwrap();
+        fs::remove_dir(root.join("moved")).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn batch_snapshots_block_writes_and_replacement_until_released() {
+        let root = std::env::temp_dir().join(format!("agent-backup-pins-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("old");
+        fs::write(&path, b"old").unwrap();
+        let mut snapshot = open_regular_shared(&path, 1).unwrap();
+        let original = hash_stream(&mut snapshot, None).unwrap();
+        assert!(fs::write(&path, b"changed").is_err());
+        assert!(fs::rename(&path, root.join("replacement")).is_err());
+        drop(snapshot);
+        assert!(equal(&original, &hash(&path, None, false).unwrap()));
+        fs::rename(&path, root.join("backup")).unwrap();
+        fs::remove_file(root.join("backup")).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 }

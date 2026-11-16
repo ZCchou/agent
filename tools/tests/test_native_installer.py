@@ -532,3 +532,87 @@ def test_reinstall_supersedes_interrupted_uninstall_inventory(tmp_path):
     ok(run(root, new))
     assert not (root / '.airworthiness-uninstall.json').exists()
     assert (root / 'agent-core.exe').read_bytes() == b'new'
+
+
+def test_noop_keeps_single_hash_scan_and_still_runs_postflight(tmp_path):
+    root = tmp_path / 'installed'
+    manifest = package(tmp_path, {'rag-runtime/a': b'same', 'agent-core.exe': b'same'})
+    ok(run(root, manifest))
+    script = tmp_path / 'health.ps1'
+    script.write_text('param($InstallDirectory, $ManifestPath, $HealthDirectory)\n'
+        '[IO.File]::WriteAllText((Join-Path $InstallDirectory "health-ran"), "yes")\nexit 0\n')
+    result = run(root, manifest, extra=['--postflight', str(script)])
+    ok(result)
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+    reuse = [e for e in events if e['phase'] == 'reuse-verification']
+    assert reuse and all(e['files_total'] == 0 and e['bytes_total'] == 0 for e in reuse)
+    assert (root / 'health-ran').read_text() == 'yes'
+    assert (root / 'rag-runtime/a').read_bytes() == b'same'
+
+
+def test_sparse_journal_records_only_staged_paths(tmp_path):
+    root = tmp_path / 'installed'
+    old = package(tmp_path, {'rag-runtime/same': b'same', 'agent-core.exe': b'old'}, 'old')
+    ok(run(root, old))
+    new = package(tmp_path, {'rag-runtime/same': b'same', 'agent-core.exe': b'new'})
+    result = run(root, new, extra=['--fault', 'after-commit'])
+    assert result.returncode == 97
+    txn = root / '.managed-runtime/native-transaction'
+    journal = json.loads((txn / 'journal.json').read_text())
+    assert journal['staged_files'] == ['agent-core.exe']
+    (txn / 'stage/personal').write_text('keep')
+    ok(run(root, action='recover'))
+    preserved = list((root / '.managed-runtime').glob('preserved-native-*'))
+    assert any((p / 'stage/personal').read_text() == 'keep' for p in preserved)
+    assert (root / 'agent-core.exe').read_bytes() == b'new'
+
+
+def single_volume_package(tmp_path, files, label):
+    folder = tmp_path / label
+    folder.mkdir()
+    archive = folder / 'part.zip'
+    with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as stream:
+        for name, data in files.items():
+            stream.writestr(name, data)
+    records = {name: {**identity(data), 'volume': 'part.zip'} for name, data in files.items()}
+    manifest = folder / 'manifest.json'
+    manifest.write_text(json.dumps({'schema_version': 2, 'application_id': APP,
+        'release_id': label, 'files': records,
+        'archives': [{'name': 'part.zip', **identity(archive.read_bytes())}]}))
+    return manifest
+
+
+@pytest.mark.parametrize('fault', ['before-journal-batch:0', 'after-journal-batch:0',
+    'after-publish:127', 'after-journal-batch:1', 'after-publish:129'])
+def test_batched_intents_recover_executed_and_unexecuted_files(tmp_path, fault):
+    root = tmp_path / 'installed'
+    old_files = {f'rag-runtime/items/{i:03}.txt': b'old' for i in range(130)}
+    old = single_volume_package(tmp_path, old_files, 'old-batch')
+    ok(run(root, old))
+    new_files = {name: b'new' for name in old_files}
+    new_files['rag-runtime/new-file'] = b'created'
+    new = single_volume_package(tmp_path, new_files, 'new-batch')
+    result = run(root, new, extra=['--fault', fault])
+    assert result.returncode == 97, result.stderr
+    ok(run(root, action='recover'))
+    for name in old_files:
+        assert (root / name).read_bytes() == b'old'
+    assert not (root / 'rag-runtime/new-file').exists()
+
+
+@pytest.mark.parametrize('committed', [False, True])
+def test_legacy_journal_without_staged_paths_still_recovers(tmp_path, committed):
+    root = tmp_path / 'installed'
+    old = package(tmp_path, {'agent-core.exe': b'old', 'rag-runtime/a': b'old'}, 'old-legacy-journal')
+    ok(run(root, old))
+    new = package(tmp_path, {'agent-core.exe': b'new', 'rag-runtime/a': b'new'}, 'new-legacy-journal')
+    result = run(root, new, extra=['--fault', 'after-commit' if committed else 'before-commit'])
+    assert result.returncode == 97
+    journal_path = root / '.managed-runtime/native-transaction/journal.json'
+    journal = json.loads(journal_path.read_text())
+    journal.pop('staged_files')
+    journal_path.write_text(json.dumps(journal))
+    ok(run(root, action='recover'))
+    expected = b'new' if committed else b'old'
+    assert (root / 'agent-core.exe').read_bytes() == expected
+    assert (root / 'rag-runtime/a').read_bytes() == expected
