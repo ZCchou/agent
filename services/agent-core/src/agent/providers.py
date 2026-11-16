@@ -992,6 +992,9 @@ class OpenAICompatibleProvider(ModelProvider):
                             "tool_validation_reason": (
                                 "invalid_json" if isinstance(error, json.JSONDecodeError) else "invalid_schema"
                             ),
+                            **({'tool_argument_constraint': 'template_identity'}
+                               if isinstance(error, CoreDataError)
+                               and (error.details or {}).get('tool_argument_constraint') == 'template_identity' else {}),
                             # Early fragment failures and ambiguous batches
                             # cannot certify a safe model correction.
                             "native_tool_correction_eligible": (

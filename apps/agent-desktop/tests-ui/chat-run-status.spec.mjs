@@ -38,6 +38,11 @@ test("a failure event preserves its explanation when run refresh fails", async (
   await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible();
   await page.evaluate(() => window.__emitFailure("run.response_recovering", { error_code: "internal_error" }));
   await expect(page.locator(".chat-run-message__status")).toContainText("explaining the execution issue");
+  await page.evaluate(() => window.__emitFailure("run.response_recovering", {
+    error_code: "document_template_changed", message: "The template changed while processing.", explanation: true,
+  }));
+  await expect(page.locator(".chat-error")).toContainText(/template/i);
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible();
   await page.evaluate(() => window.__emitFailure("run.failed", {
     error_code: "internal_error", message: "The execution encountered an error.",
     fallback_content: "Partial model output.\n\nSystem execution explanation: the internal tool failed; completion is unverified.",

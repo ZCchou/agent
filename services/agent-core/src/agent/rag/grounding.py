@@ -210,6 +210,9 @@ class RagGrounding:
         return json.dumps(output, ensure_ascii=False)
 
     def answer_schema(self, run_id: str, *, read_attachment_ids=()) -> dict:
+        admitted = self.runs[run_id]['admitted']
+        if not admitted and not read_attachment_ids:
+            raise CoreDataError('rag_evidence_missing', '当前阶段尚未取得可引用证据，请完成资料读取和检索后再生成专业结论。')
         citation = {"type": "object", "additionalProperties": False,
                     "required": ["id", "quote_id"], "properties": {
                         "id": {"type": "string", "enum": list(self.runs[run_id]["admitted"])},
@@ -235,7 +238,7 @@ class RagGrounding:
                 'properties': {'read_requests': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': request}}}
         # Keep the root an object for strict endpoints that reject root-level unions.
         return {'type': 'object', 'additionalProperties': False, 'required': ['response'],
-                'properties': {'response': {'anyOf': [answer, read]}}}
+                'properties': {'response': {'anyOf': [answer, read] if admitted else [read]}}}
 
     def finalize(self, run_id: str, content: str, *, check_subject=True) -> str:
         state = self.runs[run_id]

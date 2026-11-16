@@ -6,6 +6,27 @@ from agent.storage import CoreDataError
 
 
 TASK_TOOLS = ('tools.discover', 'task.update_plan', 'task.request_input')
+
+
+def refresh_discovery_context(messages):
+    """Replace completed capability directories while retaining other tool pairs."""
+    superseded = {message['tool_call_id'] for message in messages
+                  if message.get('role') == 'tool' and message.get('name') == 'tools.discover'}
+    retained = []
+    for message in messages:
+        if message.get('role') == 'tool' and message.get('tool_call_id') in superseded:
+            continue
+        if message.get('role') == 'assistant' and message.get('tool_calls'):
+            remaining = [call for call in message['tool_calls'] if call.get('id') not in superseded]
+            message = {**message, 'tool_calls': remaining}
+            if not remaining:
+                message.pop('tool_calls')
+                if not message.get('content'):
+                    continue
+        retained.append(message)
+    messages[:] = retained
+
+
 TASK_DEFINITIONS = [
     definition(TASK_TOOLS[0], 'Discover the currently authorized local tools. Omit names to list capabilities; select names to enable their schemas for the next turn.', {
         'names': {'type': 'array', 'maxItems': 32, 'items': {'type': 'string'}}}, []),

@@ -69,8 +69,10 @@ def definition(name, description, properties, required):
         'parameters': {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}}}
 
 DOCUMENT_DEFINITIONS = [
-    definition(DOCUMENT_TOOLS[0], 'Inspect an authorized DOCX attachment. Reuse returned template_id and stable target IDs. Page through fields before filling.', {
-        'attachment_id': {'type': 'string'}, 'template_id': {'type': 'string'}, 'path': {'type': 'string', 'maxLength': 1024},
+    definition(DOCUMENT_TOOLS[0], 'Inspect an authorized DOCX attachment. Supply exactly one of attachment_id, template_id, or path and omit the other two. Reuse returned template_id and stable target IDs. Page through fields before filling.', {
+        'attachment_id': {'type': 'string', 'description': 'ID of the uploaded attachment from the current request. Use this for the first inspection of an uploaded file.'},
+        'template_id': {'type': 'string', 'description': 'Template ID returned by a previous inspection. Omit it before the first inspection.'},
+        'path': {'type': 'string', 'maxLength': 1024, 'description': 'An existing project-relative DOCX file path, never an attachment ID or template ID. Omit this for uploaded attachments.'},
         'offset': {'type': 'integer', 'minimum': 0}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
     definition(DOCUMENT_TOOLS[1], 'Fill explicit paragraph or table-cell targets in a verified template. Supply current evidence IDs and quote IDs for professional content. Missing information remains a draft.', {
         'template_id': {'type': 'string'},
@@ -94,6 +96,11 @@ DOCUMENT_DEFINITIONS = [
         'format': {'type': 'string', 'enum': ['markdown', 'docx', 'txt']}}, ['template_id']),
 ]
 
+# The model-visible schema must express the same source choice as the executor.
+DOCUMENT_DEFINITIONS[0]['function']['parameters']['oneOf'] = [
+    {'required': [name]} for name in ('attachment_id', 'template_id', 'path')
+]
+
 
 def validate_document_call(name, arguments):
     schema = next(item['function']['parameters'] for item in DOCUMENT_DEFINITIONS if item['function']['name'] == name)
@@ -115,7 +122,8 @@ def validate_document_call(name, arguments):
             raise CoreDataError('invalid_tool_call', '文档读取范围无效。')
     elif name == DOCUMENT_TOOLS[0]:
         if sum(bool(arguments.get(key)) for key in ['attachment_id', 'template_id', 'path']) != 1:
-            raise CoreDataError('invalid_tool_call', '请选择一个模板附件或模板标识。')
+            raise CoreDataError('invalid_tool_call', '请选择一个模板附件、模板标识或项目路径，并省略另外两个参数。',
+                                {'tool_argument_constraint': 'template_identity'})
         if type(arguments.get('offset', 0)) is not int or arguments.get('offset', 0) < 0 \
                 or type(arguments.get('limit', 100)) is not int or not 1 <= arguments.get('limit', 100) <= 100:
             raise CoreDataError('invalid_tool_call', '模板分页范围无效。')

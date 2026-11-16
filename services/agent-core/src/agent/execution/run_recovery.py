@@ -1,6 +1,7 @@
 """Content-only recovery policy; never execute effects or expose exception bodies."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -127,6 +128,23 @@ def image_unread_notice(code: str | None = None) -> str:
 def safe_code(error: BaseException) -> str:
     code = getattr(error, "code", "internal_error")
     return code if code in REASONS else "internal_error"
+
+
+def failure_explanation_messages(goal: str, code: str, operations: list[dict[str, Any]], *, goal_limit: int) -> list[dict[str, str]]:
+    return [
+        {'role': 'system', 'content': (
+            '请用用户使用的语言解释本次任务的实际处理情况。任务尚未完成。'
+            '只说明已确认的失败原因、已完成或不确定的操作，以及补齐条件后如何继续。'
+            '不要重新执行操作，不要起草适航专业结论或编造条款、引用、文件保存结果。'
+            '诊断记录未说明原因时明确表示原因尚未确定。用简短自然语言回复。')},
+        {'role': 'user', 'content': json.dumps({
+            'original_request': goal[:goal_limit], 'request_truncated': len(goal) > goal_limit,
+            'task_status': 'incomplete', 'error_code': code, 'confirmed_reason': REASONS[code],
+            'operation_summary': outcome_summary(operations),
+            'recent_operations': [{key: operation.get(key) for key in ('tool_name', 'status', 'error_code')}
+                                  for operation in operations[-10:]],
+            'omitted_operation_count': max(0, len(operations) - 10)}, ensure_ascii=False)},
+    ]
 
 
 def recovery_allowed(error: BaseException, *, partial: str, operations: list[dict[str, Any]]) -> bool:

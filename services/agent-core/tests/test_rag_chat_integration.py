@@ -16,7 +16,9 @@ def test_automatic_greeting_skips_all_retrieval_and_force_mode_checks_project(tm
     def respond(request):
         payload = json.loads(request.content)
         payloads.append(payload)
-        chunk = {"choices": [{"delta": {"content": "你好！"}, "finish_reason": "stop"}]}
+        explanation = any('confirmed_reason' in str(message.get('content', '')) for message in payload['messages'])
+        content = '当前项目尚未启用资料库，请先启用资料库。' if explanation else '你好！'
+        chunk = {"choices": [{"delta": {"content": content}, "finish_reason": "stop"}]}
         return httpx.Response(200, text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def exercise():
@@ -42,10 +44,12 @@ def test_automatic_greeting_skips_all_retrieval_and_force_mode_checks_project(tm
             assert not any(message['role'] == 'assistant' for message in final_messages)
             assert not payloads[-1].get('tools')
             before = len(core.get_conversation(conversation['id'])['messages'])
-            with pytest.raises(CoreDataError) as error:
-                await service.start({'conversation_id': conversation['id'], 'content': '你好', 'idempotency_key': 'forced', 'rag_mode': 'required'})
-            assert error.value.code == 'rag_library_required'
-            assert len(core.get_conversation(conversation['id'])['messages']) == before
+            forced = await service.start({'conversation_id': conversation['id'], 'content': '你好', 'idempotency_key': 'forced', 'rag_mode': 'required'})
+            await service.tasks[forced['run']['id']]
+            blocked = core.get_model_run(forced['run']['id'])
+            assert blocked['status'] == 'failed' and blocked['error_code'] == 'rag_library_required'
+            assert '资料库' in blocked['draft']['content']
+            assert len(core.get_conversation(conversation['id'])['messages']) == before + 1
         finally:
             await service.shutdown()
     asyncio.run(exercise())
@@ -74,6 +78,7 @@ async def fixture(*args, **kwargs):
 @pytest.mark.parametrize("select_quote", [False, True])
 def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monkeypatch, mode, corrupt_quote, repair_first, select_quote):
     requests = []
+    diagnostic_requests = []
     transports = []
     history_only = False
     original = httpx.AsyncClient
@@ -83,6 +88,12 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
         if history_only:
             chunk = {"choices": [{"delta": {"content": "继续核查历史资料。"}, "finish_reason": "stop"}]}
             return httpx.Response(200, text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
+        if any('confirmed_reason' in message.get('content', '') for message in payload['messages']):
+            diagnostic_requests.append(payload)
+            assert not payload.get('tools') and not payload.get('response_format')
+            assert payload['max_tokens'] <= 512
+            chunk = {'choices': [{'delta': {'content': '原文摘录校验未通过，请检查证据后重试。'}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n')
         requests.append(payload)
         from goal_check_support import goal_check_content
         checked = goal_check_content(payload)
@@ -177,6 +188,9 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
             assert "rag-evidence:rag-" in run["assistant_message"]["content"]
             assert "草案" in run["assistant_message"]["content"]
         assert all("claims" not in event["data"].get("delta", "") for event in events if event["event_type"] == "run.chunk")
+        assert len(diagnostic_requests) == int(corrupt_quote)
+        if corrupt_quote:
+            assert '原文摘录校验未通过' in run['draft']['content']
         from goal_check_support import goal_check_content
         answers = [payload for payload in requests if goal_check_content(payload) is None]
         assert len(answers) == (1 if mode == "text_only" else 3) + int(corrupt_quote or repair_first)

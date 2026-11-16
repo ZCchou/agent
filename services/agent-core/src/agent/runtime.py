@@ -18,7 +18,7 @@ from typing import Any
 
 from agent.context_engine.domain import CompactionTarget, ContextEngineError
 from agent.context_engine.compaction_lifecycle import AUTOMATIC_RECOVERY_CODES, error_code, log_failure
-from agent.context_engine.policy import estimate_tokens, resolve_budget
+from agent.context_engine.policy import DEFAULT_POLICY, estimate_tokens, resolve_budget
 from agent.context_engine.service import ContextEngineService
 from agent.execution.compiler import (
     InvocationCompiler, bind_profile_to_target, canonical_adapter_id,
@@ -50,7 +50,8 @@ from agent.execution.follow_up import (
 from agent.execution.rule_intent import RuleIntentResolver
 from agent.execution.retry import should_retry_transient_generation
 from agent.execution.run_recovery import (
-    IMAGE_REFUSAL_CODES, closing_messages, failure_notice, image_unread_notice, recovery_allowed, safe_code,
+    IMAGE_REFUSAL_CODES, REASONS, closing_messages, failure_explanation_messages,
+    failure_notice, image_unread_notice, recovery_allowed, safe_code,
 )
 from agent.execution.runtime_capabilities import RuntimeCapabilityService, render_snapshot, replace_snapshot
 from agent.execution.web_intent import (
@@ -513,7 +514,7 @@ class ChatRunService:
         provider.profile, provider.inner = fresh.profile, fresh.inner
 
     async def _recovering_local_events(self, run, attempt_id, provider, step, spec, prepared, messages,
-                                         *, update_spec, safe_to_retry, stage='model_output'):
+                                         *, update_spec, safe_to_retry, stage='model_output', check_evidence=True):
         """Reconstruct one drained, output-free invocation on the same model."""
         managed = isinstance(provider, ManagedLocalProvider) and provider.profile.id.startswith('managed:')
         captured = (dict(spec.managed_runtime) or self.local_models.runtime_identity(provider.profile.id)) if managed else {}
@@ -523,7 +524,7 @@ class ChatRunService:
             nonlocal spec, prepared, physical_calls
             if physical_calls:
                 self.repository.get_run_conversation(run['id'])
-                if run['id'] in self.rag_grounding.runs:
+                if check_evidence and run['id'] in self.rag_grounding.runs:
                     self.rag_grounding.validate(run['id'])
                 if managed:
                     await self._restore_managed_provider(provider, captured)
@@ -550,15 +551,15 @@ class ChatRunService:
                 activity.resource(active=None, model_id=spec.model_id, device=captured['backend'],
                                   context_length=captured['context_length'])
             try:
-                self._validate_context_dispatch_authority(run, provider.profile, step)
+                self._validate_context_dispatch_authority(run, provider.profile, step, check_evidence=check_evidence)
                 async with ModelInvocationService.provider_session(provider) as ready:
-                    self._validate_context_dispatch_authority(run, ready.profile, step)
+                    self._validate_context_dispatch_authority(run, ready.profile, step, check_evidence=check_evidence)
                     self.execution_repository.mark_invocation_dispatched(spec.spec_id, prepared.request_fingerprint)
                     dispatched = True
                     update_spec(spec, prepared, True)
                     await self._emit(run['id'], 'run.invocation_dispatched', {
                         **self._invocation_outcome_data(spec), 'round_no': spec.round_no})
-                    self._validate_context_dispatch_authority(run, ready.profile, step)
+                    self._validate_context_dispatch_authority(run, ready.profile, step, check_evidence=check_evidence)
                     async with self.local_models.observe_activity(provider.profile.id):
                         stream = self.model_invocation.stream_prepared(ready, spec, prepared).__aiter__()
                         async with closing_provider_stream(stream):
@@ -1250,8 +1251,6 @@ class ChatRunService:
             raise CoreDataError(
                 "invalid_params", "content, attachments and attachment rejections are invalid."
             )
-        if self.skills.requires_rag(content) and not rag_enabled:
-            raise CoreDataError("rag_library_required", "该技能需要先为当前项目绑定资料库。")
         if edited_message is not None:
             if params.get("attachment_references"):
                 raise CoreDataError("invalid_message_edit", "An edit retains its original attachments; historical references must be selected after sending.")
@@ -1296,8 +1295,6 @@ class ChatRunService:
             rag_decision['continued_run_id'] = previous_run['id']
         if continued:
             rag_decision.update(query_context=continued['request'], task_type=continued['task_type'], continued_run_id=previous_run['id'])
-        if rag_decision['reason'] in {'user_required', 'skill_required'} and not rag_enabled:
-            raise CoreDataError('rag_library_required', '当前任务需要项目资料。请先启用资料库，或关闭强制 RAG 后重新提出普通问题。')
         selection_value = params.get("selection") if isinstance(params.get("selection"), dict) else {}
         legacy_fixed_request = bool(
             not selection_value and params.get("provider_profile_id") and params.get("model_id")
@@ -1720,8 +1717,8 @@ class ChatRunService:
             elif advisor_error_code:
                 resolved_intent_metadata["advisor_error_code"] = advisor_error_code
                 resolved_intent_metadata["source"] = "fallback"
-        if rag_decision['required'] and not rag_enabled:
-            raise CoreDataError('rag_library_required', '当前任务需要项目资料。请先在项目中启用就绪资料库。')
+        # Persist blocked requests too. Execution checks the actual RAG scope,
+        # allowing the selected local model to explain missing prerequisites.
         resolved_intent_metadata['rag_decision'] = dict(rag_decision)
         log_event(self.logger or logging.getLogger(__name__), logging.INFO,
             'rag_decision', 'Request evidence scope resolved', task_id=current_task_id.get(),
@@ -3231,6 +3228,17 @@ class ChatRunService:
             else:
                 code, message = "internal_error", "The run encountered an internal error."
                 log_failure(error, logger=self.logger)
+            explanation = ''
+            try:
+                if not getattr(error, 'closing_error_code', None):
+                    explanation, attempt_id, closing_code = await self._explain_execution_failure(
+                        run_id, code, execution_plan, execution_step, attempt_id)
+                    if closing_code:
+                        error.closing_error_code = closing_code
+            except asyncio.CancelledError:
+                raise
+            except Exception as explanation_error:
+                error.closing_error_code = safe_code(explanation_error)
             if execution_step is not None:
                 try:
                     self.execution_repository.transition_step(
@@ -3248,6 +3256,8 @@ class ChatRunService:
             fallback_content = str(content or (saved.get("draft") or {}).get("content") or "")
             if run_id in self.rag_grounding.runs:
                 fallback_content = ""
+            if explanation:
+                fallback_content += ('\n\n' if fallback_content else '') + explanation
             try:
                 self.tool_loop.interrupt_run(run_id)
                 operations = self.tool_loop.repository.list_for_run(run_id)
@@ -3286,6 +3296,66 @@ class ChatRunService:
         finally:
             self.local_models.release_run(run_id)
             self.run_tasks.pop(run_id, None)
+
+    async def _explain_execution_failure(self, run_id, code, plan, step, attempt_id):
+        eligible = code.startswith(('rag_', 'document_', 'ocr_', 'tool_', 'task_', 'attachment_')) or code in {
+            'provider_context_limit_exceeded', 'invalid_tool_call', 'model_tool_protocol_failed',
+            'model_tool_contract_failed', 'unsupported_tool', 'execution_recovery_exhausted'}
+        if not eligible or code not in REASONS or plan is None:
+            return '', attempt_id, None
+        current_plan = self.execution_repository.get_execution_plan(plan['id'])
+        current_steps = current_plan['steps']
+        step = next((item for item in current_steps if item['id'] == step['id']), None) if step else next(
+            (item for item in current_steps if item['step_type'] == 'final_response'), None)
+        if step is None:
+            return '', attempt_id, None
+        run = self.repository.get_model_run(run_id)
+        profile = self._profile_for_step(self._profile(run['provider_profile_id']), step)
+        if not profile.is_local:
+            return '', attempt_id, None
+        provider = self._provider(profile)
+        if isinstance(provider, ManagedLocalProvider) and (self.local_models._runtime is None or not self.local_models._runtime.alive):
+            return '', attempt_id, None
+        self._validate_context_dispatch_authority(run, profile, step, check_evidence=False)
+        self.tool_loop.interrupt_run(run_id)
+        operations = self.tool_loop.repository.list_for_run(run_id)
+        conversation = self.repository.get_run_conversation(run_id)
+        goal = next(item['content'] for item in conversation['messages'] if item['id'] == run['user_message_id'])
+        capabilities = (profile.model_capabilities or {}).get(step['model_id'], {})
+        window = capabilities.get('context_length') or 8192
+        output_tokens = resolve_output_budget('final_response', model_limit=capabilities.get('max_output_tokens'),
+            protocol_limit=max(512, min(768, window // 8)), context_window=window).initial_tokens
+        messages = failure_explanation_messages(goal, code, operations, goal_limit=min(4000, window // 3))
+        if attempt_id is not None:
+            self.repository.finish_attempt(attempt_id, code)
+        if step['status'] in {'queued', 'interrupted'}:
+            self.execution_repository.transition_step(step['id'], {'queued', 'interrupted'}, 'running')
+            step = {**step, 'status': 'running'}
+        attempt = self.repository.begin_run_attempt(run_id, step['id'])
+        run = self.repository.transition_model_run(run_id,
+            {'queued', 'building_context', 'generating', 'waiting_tool', 'waiting_recovery'}, 'generating')
+        await self._compaction_event(run_id, 'run.response_recovering', {
+            'error_code': code, 'message': REASONS[code], 'explanation': True})
+        step_status, step_code = 'failed', code
+        try:
+            round_no = max((item['round_no'] for item in current_plan['invocations']), default=0) + 1
+            reply, usage, _ = await self._invoke_planned_step(run, plan, step, attempt, provider, messages,
+                round_no=round_no, max_output_tokens=output_tokens,
+                apply_rag_contract=False, diagnostic_only=True)
+            self.repository.update_attempt_usage(attempt['id'], usage)
+            await self._compaction_event(run_id, 'run.chunk', {'delta': reply})
+            return reply, attempt['id'], None
+        except asyncio.CancelledError:
+            root = self.execution_monitor.get_task(current_task_id.get())
+            step_status = 'interrupted' if root['status'] == 'interrupted' else 'cancelled'
+            step_code = root.get('error_code') or ('core_interrupted' if step_status == 'interrupted' else 'cancelled_by_user')
+            self.execution_repository.transition_plan(plan['id'], {'executing', 'synthesizing'}, step_status)
+            raise
+        except Exception as explanation_error:
+            return '', attempt['id'], safe_code(explanation_error)
+        finally:
+            self.repository.finish_attempt(attempt['id'], step_code)
+            self.execution_repository.transition_step(step['id'], {'running'}, step_status, step_code)
 
     async def _prepare_document_attachments(self, run, conversation):
         from agent.document_attachments import is_document
@@ -3469,7 +3539,7 @@ class ChatRunService:
 
     def _validate_context_dispatch_authority(
         self, run: dict[str, Any], profile: ProviderProfile | None,
-        invocation_target: dict[str, Any] | None,
+        invocation_target: dict[str, Any] | None, *, check_evidence: bool = True,
     ) -> None:
         """Recheck mutable authority without substituting a newly configured route."""
         task = asyncio.current_task()
@@ -3491,7 +3561,8 @@ class ChatRunService:
                 require_local_profile(profile)
             if current_run.get("web_search_route") not in {None, "none"}:
                 raise CoreDataError("rag_network_forbidden", "资料问答运行禁止联网检索。")
-            self.rag_grounding.validate(run["id"])
+            if check_evidence:
+                self.rag_grounding.validate(run["id"])
         self._validate_planned_model(conversation, target)
         self._validate_planned_web_permission(conversation, current_run)
         if profile is not None:
@@ -4285,6 +4356,7 @@ class ChatRunService:
         artifact_ids: tuple[str, ...] = (),
         apply_rag_contract: bool = True,
         response_schema: dict[str, Any] | None = None,
+        diagnostic_only: bool = False,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
         local_recovery = monitored_local(provider)
         managed_request = isinstance(provider, ManagedLocalProvider)
@@ -4295,7 +4367,8 @@ class ChatRunService:
                 provider = session_provider
             if managed_request:
                 await self._emit(run["id"], "run.state_changed", {"status": run["status"], "phase": "waitingOutput"})
-            self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
+            self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step,
+                                                     check_evidence=not diagnostic_only)
             spec = self._create_model_invocation_spec(
                 run, plan, step, round_no=round_no, attempt_no=attempt["attempt_number"],
                 allowed_tools=(), max_output_tokens=max_output_tokens,
@@ -4319,7 +4392,8 @@ class ChatRunService:
             try:
                 # Event delivery yields to settings/cancel handlers. Check again
                 # immediately before entering the captured provider adapter.
-                self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step)
+                self._validate_context_dispatch_authority(run, getattr(provider, "profile", None), step,
+                                                         check_evidence=not diagnostic_only)
                 if local_recovery:
                     def update_spec(replacement, request, dispatched):
                         nonlocal spec, prepared, managed_dispatched
@@ -4328,7 +4402,7 @@ class ChatRunService:
                     result = await self.model_invocation.complete_prepared(provider, spec, prepared,
                         stream_factory=lambda: self._recovering_local_events(run, attempt['id'], provider,
                             step, spec, prepared, messages, update_spec=update_spec,
-                            safe_to_retry=True))
+                            safe_to_retry=True, check_evidence=not diagnostic_only))
                 else:
                     async with self.local_models.observe_activity(provider.profile.id):
                         result = await self.model_invocation.complete_prepared(provider, spec, prepared)
@@ -5197,6 +5271,22 @@ class ChatRunService:
                             spec = replace(spec, allowed_tool_names=tuple(sorted(allowed_tools)),
                                 tool_schema_hash=ToolContractRegistry.schema_hash(allowed_tools))
                             replace_snapshot(messages, render_snapshot(**snapshot_options, allowed_tools=spec.allowed_tool_names))
+                    if type(window) is int:
+                        try:
+                            self.invocation_compiler.compile_model(spec, request_messages, context_window=window)
+                        except CoreDataError as capacity_error:
+                            if capacity_error.code != 'provider_context_limit_exceeded':
+                                raise
+                            details = capacity_error.details or {}
+                            request_tokens, input_limit = details.get('request_tokens'), details.get('input_limit')
+                            if type(request_tokens) is not int or type(input_limit) is not int:
+                                raise
+                            excess = request_tokens - input_limit
+                            output_tokens = spec.max_output_tokens - excess - 128
+                            if output_tokens >= DEFAULT_POLICY.minimum_output_reserve:
+                                spec = replace(spec, max_output_tokens=output_tokens)
+                                snapshot_options['max_output_tokens'] = output_tokens
+                                replace_snapshot(messages, render_snapshot(**snapshot_options, allowed_tools=spec.allowed_tool_names))
                     self.execution_repository.save_invocation_spec(spec)
                     prepared = self._compile_model_request(run_id, spec, request_messages)
                     if getattr(prepared, 'input_budget', None) is None and (provider_round > 0 or response_only or skill_context_changed):
@@ -5511,6 +5601,9 @@ class ChatRunService:
                         "did not match the supplied schema. Return normal text or exactly one valid "
                         "tool call. Use '.' for the workspace root, relative paths for files, and "
                         "only fields declared by the selected tool."
+                        + (" For document.inspect_template supply exactly one of attachment_id, template_id, or path "
+                           "and omit the other two. Start with the supplied attachment_id when inspecting an uploaded file."
+                           if error.details.get('tool_argument_constraint') == 'template_identity' else '')
                     ),
                 })
                 continue
@@ -5684,21 +5777,21 @@ class ChatRunService:
                         run_id=run_id, attempt_id=attempt_id,
                         sequence=tool_sequence, call=call,
                         budget_attempt_ids=budget_attempt_ids,
-                        local_executor=(lambda call=call: self._planning_tool(run_id, call, discoverable_tools, fence=planning_fence)) if call.name in {'tools.discover', 'task.update_plan'} else (lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in SKILL_TOOLS else (lambda call=call: self._document_tool(run_id, call, max_characters=max(256, self._skill_context_allowance(run_id, messages=messages, max_output_tokens=max_output_tokens)))) if call.name in DOCUMENT_TOOLS[:2] and 'path' not in call.arguments else None,
+                        local_executor=(lambda call=call: self._planning_tool(run_id, call, discoverable_tools, fence=planning_fence)) if call.name in {'tools.discover', 'task.update_plan'} else (lambda call=call: self.skills.execute(call.name, call.arguments, self._skill_user_content(run_id), max_characters=max(64, self._tool_result_allowance(spec, messages, call)))) if call.name in SKILL_TOOLS else (lambda call=call: self._document_tool(run_id, call, max_characters=max(256, self._tool_result_allowance(spec, messages, call)))) if call.name in DOCUMENT_TOOLS[:2] and 'path' not in call.arguments else None,
                         async_executor=(lambda call=call: self._rag_tool(run, call,
-                            max_characters=max(256, self._skill_context_allowance(run_id, messages=messages,
-                                max_output_tokens=max_output_tokens)))) if call.name in {"rag.search", "rag.read"}
+                            max_characters=max(256, self._tool_result_allowance(spec, messages, call)))) if call.name in {"rag.search", "rag.read"}
                             else (lambda call=call: self._review_targets_tool(run, attempt_id, call.arguments)) if call.name == 'document.review_targets'
                             else (lambda call=call: self._request_task_input(run_id, call.arguments)) if call.name == 'task.request_input'
                             else (lambda call=call: self._read_document_attachment(run_id, call.arguments,
-                                max_characters=max(256, self._skill_context_allowance(run_id, messages=messages,
-                                    max_output_tokens=max_output_tokens)))) if call.name == 'document.read_attachment' else None,
+                                max_characters=max(256, self._tool_result_allowance(spec, messages, call)))) if call.name == 'document.read_attachment' else None,
                     )
                 tool_output = resolution.output
                 if call.name == 'tools.discover' and resolution.success:
                     enabled = json.loads(tool_output)['enabled']
-                    discovered_tools = set(enabled)
+                    discovered_tools.update(enabled)
                     allowed_tools = tuple(sorted(set(allowed_tools) | set(enabled)))
+                    from agent.execution.task_tools import refresh_discovery_context
+                    refresh_discovery_context(messages)
                 if call.name == 'fs.read' and resolution.success:
                     try:
                         read = json.loads(tool_output)
@@ -6566,6 +6659,24 @@ class ChatRunService:
         self.rag_grounding.finalize(run_id, content)
         claims = self.rag_grounding.runs[run_id]['validated_claims']
         return self.rag_grounding.document_text(run_id, claims)
+
+    def _tool_result_allowance(self, spec, messages, call):
+        profile = self._profile(spec.provider_or_backend_id)
+        window = (profile.model_capabilities or {}).get(spec.model_id, {}).get('context_length') or DEFAULT_POLICY.fallback_context_window
+        placeholder = {'role': 'tool', 'tool_call_id': call.provider_call_id, 'name': call.name, 'content': ''}
+        preview = replace(spec, max_output_tokens=DEFAULT_POLICY.minimum_output_reserve, spec_hash='')
+        try:
+            prepared = self.invocation_compiler.compile_model(preview, [*messages, placeholder], context_window=window)
+        except CoreDataError as error:
+            if error.code != 'provider_context_limit_exceeded':
+                raise
+            return 0
+        if prepared.input_budget is None:
+            return min(16000, window // 8)
+        # Result JSON is itself encoded into a message string. Reserve space
+        # for escaping and the refreshed capability observation on the next turn.
+        tokens = prepared.input_budget['remaining_input_tokens'] - 128
+        return max(0, min(16000, tokens * 3 // 2))
 
     def _skill_context_allowance(self, run_id: str, *, messages: list[dict[str, Any]] | None = None, max_output_tokens: int | None = None) -> int:
         run = self.repository.get_model_run(run_id)

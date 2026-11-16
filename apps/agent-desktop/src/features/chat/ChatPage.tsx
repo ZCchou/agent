@@ -385,6 +385,13 @@ export function ChatPage() {
         }));
       } else if (event.event_type === "run.response_recovering") {
         setRunActivityLabel(tChat("status.recovering"));
+        if (event.data.explanation === true && typeof event.data.error_code === "string") {
+          const code = event.data.error_code;
+          const message = typeof event.data.message === "string" ? event.data.message : code;
+          const reason = tChat(runErrorTranslationKey(code, message), { defaultValue: message });
+          setError(true);
+          setErrorDetail(code.startsWith("rag_") ? `${code}: ${reason}` : reason);
+        }
       } else if (event.event_type === "run.intent_follow_up_pending") {
         setPendingFollowUp({
           actionType: String(event.data.action_type ?? "web_search"),
@@ -414,7 +421,7 @@ export function ChatPage() {
       } else if (event.event_type === "run.failed" || event.event_type === "run.cancelled" || event.event_type === "run.interrupted") {
         const refreshRevision = ++terminalRefreshRevision.current;
         setActiveRun((current) => current ? applyRunFailure(current, event) : current);
-        setError(event.event_type !== "run.cancelled"); setSending(false); setRunActivityLabel(null);
+        setError(event.event_type !== "run.cancelled"); setErrorDetail(null); setSending(false); setRunActivityLabel(null);
         stoppingRef.current = false; setStopping(false);
         void modelRunRepository.get(event.run_id).then((run) => {
           if (runIdRef.current !== event.run_id || terminalRefreshRevision.current !== refreshRevision) return;

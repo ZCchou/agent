@@ -171,7 +171,8 @@ def test_professional_answer_must_obtain_evidence_after_model_confirms_obligatio
         ({'content': json.dumps({'status': 'needs_work', 'summary': '专业判断需要条款依据',
             'unmet_requirements': ['取得项目条款依据'], 'questions': [], 'goal_requirements': {
                 'source_scopes': [], 'deliverables': [], 'success_criteria': ['以条款支持试验结论']},
-            'evidence_required': True})}, 'stop')])
+            'evidence_required': True})}, 'stop'),
+        ({'content': '当前项目尚未启用资料库，请启用后继续核查条款。'}, 'stop')])
     async def scenario():
         async def sink(event):
             pass
@@ -184,7 +185,9 @@ def test_professional_answer_must_obtain_evidence_after_model_confirms_obligatio
             await service.tasks[response['run']['id']]
             run = core.get_model_run(response['run']['id'])
             assert run['status'] == 'failed' and run['error_code'] == 'rag_library_required'
-            assert len(requests) == 2
+            assert len(requests) == 3
+            assert '当前项目尚未启用资料库' in run['draft']['content']
+            assert not requests[-1][1].get('tools') and not requests[-1][1].get('response_format')
         finally:
             await service.shutdown()
     asyncio.run(scenario())

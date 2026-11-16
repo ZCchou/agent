@@ -157,9 +157,10 @@ def test_uncertain_and_failed_classification_are_visible_and_conservative():
 
 
 def test_offline_fixed_model_semantic_intent_runs_before_library_check(tmp_path, monkeypatch):
-    from test_tool_continuation_retry import configuration, fixture
+    from test_tool_continuation_retry import configuration, fixture, install_http
     from agent.storage import CoreDataError
 
+    requests = install_http(monkeypatch, [({'content': '本次任务需要项目资料库，请先启用资料库。'}, 'stop')])
     async def scenario():
         async def sink(event):
             pass
@@ -177,12 +178,15 @@ def test_offline_fixed_model_semantic_intent_runs_before_library_check(tmp_path,
                     'reasoning': 'standard'}, None
         monkeypatch.setattr(service, '_preflight_intent_advisor', advisor)
         try:
-            with pytest.raises(CoreDataError) as error:
-                await service.start({'conversation_id': chat['id'],
-                    'content': '这个设备安装在发动机旁，需要验证什么', 'idempotency_key': 'semantic'})
-            assert error.value.code == 'rag_library_required'
+            started = await service.start({'conversation_id': chat['id'],
+                'content': '这个设备安装在发动机旁，需要验证什么', 'idempotency_key': 'semantic'})
+            await service.tasks[started['run']['id']]
+            blocked = core.get_model_run(started['run']['id'])
+            assert blocked['status'] == 'failed' and blocked['error_code'] == 'rag_library_required'
+            assert '资料库' in blocked['draft']['content']
             assert len(calls) == 1
-            assert not any(m['role'] == 'user' for m in core.get_conversation(chat['id'])['messages'])
+            assert len(requests) == 1
+            assert len([m for m in core.get_conversation(chat['id'])['messages'] if m['role'] == 'user']) == 1
         finally:
             await service.shutdown()
     asyncio.run(scenario())

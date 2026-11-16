@@ -12,7 +12,7 @@ def test_ping_returns_valid_envelope() -> None:
     assert result["id"] == "req-001"
     assert result["type"] == "ping"
     assert result["result"] == {
-        "pid": os.getpid(), "core_version": "0.17.0-preview.3", "protocol_version": 28,
+        "pid": os.getpid(), "core_version": "0.17.0-preview.4", "protocol_version": 28,
         "schema_version": 35, "build_id": "schema35-agent-unified-v1",
     }
 
