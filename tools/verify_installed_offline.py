@@ -25,11 +25,11 @@ def main():
     if data.exists():
         raise ValueError('Use a new smoke-test data directory')
     data.mkdir(parents=True)
-    text = 'Offline installed parser smoke.\n' * 20
-    digest = hashlib.sha256(text.encode()).hexdigest()
+    payload = b'Offline installed parser smoke.\n' * 20
+    digest = hashlib.sha256(payload).hexdigest()
     original = data / 'originals' / digest[:2] / (digest + '.txt')
     original.parent.mkdir(parents=True)
-    original.write_text(text, encoding='utf-8')
+    original.write_bytes(payload)
     request_id = uuid.uuid4().hex
     stage = data / 'parser-staging' / ('parser-' + request_id)
     stage.mkdir(parents=True)
@@ -44,7 +44,8 @@ def main():
                              timeout=125, cwd=root, env=environment)
     status = json.loads(process.stdout)
     if process.returncode or status.get('status') != 'complete' or status.get('request_id') != request_id:
-        raise ValueError('Installed frozen parser mode failed')
+        raise ValueError(f"Installed frozen parser mode failed with exit {process.returncode} "
+                         f"and worker status {status.get('code', status.get('status'))}")
     lines = [json.loads(line) for line in result.read_text(encoding='utf-8').splitlines()]
     if lines[-1].get('type') != 'end' or not any(line.get('type') == 'chunk' for line in lines):
         raise ValueError('Installed parser produced an incomplete result')
