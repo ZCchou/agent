@@ -466,10 +466,7 @@ pub async fn install_app_update(
             .map_err(|_| "app_update_core_unavailable")?
             .shutdown_for_update()
             .map_err(|_| "app_update_core_unavailable")?;
-        let root = app
-            .path()
-            .app_data_dir()
-            .map_err(|_| "app_update_install_failed")?;
+        let root = crate::profile_paths::data_dir(&app).map_err(|_| "app_update_install_failed")?;
         let payload = std::mem::take(&mut bytes);
         let signature = update.signature.clone();
         let version = update.version.clone();

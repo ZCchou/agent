@@ -26,6 +26,7 @@ mod local_model_commands;
 mod logging;
 mod offline;
 mod profile_migration;
+mod profile_paths;
 mod profile_recovery;
 // Host uses identity/signature helpers, while the updater binary uses the
 // transaction functions from this shared module.
@@ -86,7 +87,7 @@ pub fn run() {
                 app.handle().exit(0);
                 return Ok(());
             }
-            let app_data_dir = app.path().app_data_dir()?;
+            let app_data_dir = crate::profile_paths::data_dir(app.handle())?;
             profile_migration::initialize(app.handle()).map_err(std::io::Error::other)?;
             let grants_path = app_data_dir.join("work-tool-grants.json");
             let work_tools = if profile_migration::blocks_core() {
@@ -144,7 +145,7 @@ pub fn run() {
 
             let debug_enabled = cfg!(debug_assertions);
 
-            let logger = match app.path().app_log_dir() {
+            let logger = match crate::profile_paths::log_dir(app.handle()) {
                 Ok(log_dir) => {
                     match fs::create_dir_all(&log_dir) {
                         Ok(()) => {

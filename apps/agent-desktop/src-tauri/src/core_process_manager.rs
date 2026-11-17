@@ -331,9 +331,7 @@ impl CoreProcessManager {
 
         command = command.env("AGENT_LOG_LEVEL", log_level);
 
-        let data_dir = app
-            .path()
-            .app_data_dir()
+        let data_dir = crate::profile_paths::data_dir(app)
             .map_err(|error| format!("Failed to resolve application data directory: {error}"))?;
         command = command.env("AGENT_DATA_DIR", data_dir.as_os_str());
 

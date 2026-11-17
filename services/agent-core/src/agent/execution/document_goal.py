@@ -84,6 +84,8 @@ def normalize_goal(value, attachments):
         raise CoreDataError('task_goal_invalid','首次读取计划无效。')
     if type(value['evidence_required']) is not bool or value['answer_kind'] not in {'extract','synthesis','review','modify'}:
         raise CoreDataError('task_goal_invalid','目标操作无效。')
+    if value['answer_kind'] == 'review' and not any(scope['operation'] == 'review' and scope['scope'] != 'excluded' for scope in result['source_scopes']):
+        raise CoreDataError('task_goal_invalid','专业审阅目标必须登记 review 操作，不能仅登记 read 读取义务。')
     if value['answer_kind'] == 'extract' and any(scope['operation'] != 'read' for scope in result['source_scopes']):
         raise CoreDataError('task_goal_invalid','原文提取与专业审阅必须分别声明，不能使用纯提取收尾审阅任务。')
     return result

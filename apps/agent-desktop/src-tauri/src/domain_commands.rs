@@ -756,10 +756,7 @@ pub async fn execution_request(
 
 #[tauri::command]
 pub async fn open_log_directory(app: AppHandle) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_log_dir()
-        .map_err(|error| error.to_string())?;
+    let path = crate::profile_paths::log_dir(&app).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|error| error.to_string())
 }
@@ -772,9 +769,7 @@ pub async fn export_execution_diagnostics(
 ) -> Result<String, String> {
     let report = request_core(&app, &manager, "execution.request",
         json!({"action":"diagnostics","params":task_id.map_or_else(|| json!({}), |id| json!({"task_id":id}))})).await?;
-    let directory = app
-        .path()
-        .app_log_dir()
+    let directory = crate::profile_paths::log_dir(&app)
         .map_err(|error| error.to_string())?
         .join("diagnostics");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;

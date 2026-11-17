@@ -428,9 +428,7 @@ async fn handle(
         if hash != before || source.hash(20 * 1024 * 1024)? != before {
             return Err("document_template_changed: Template changed while reading".into());
         }
-        let store = app
-            .path()
-            .app_data_dir()
+        let store = crate::profile_paths::data_dir(app)
             .map_err(|_| "document_storage_unavailable: Application storage unavailable")?
             .join("document-artifacts")
             .canonicalize()

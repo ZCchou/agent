@@ -245,6 +245,10 @@ export function ChatPage() {
       setMessages([]);
       setBudgetBusy(false);
       setActiveRun(null);
+      setError(false);
+      setErrorDetail(null);
+      setFailedContent(null);
+      setFailedEditMessage(null);
       setSending(false);
       stoppingRef.current = false;
       setStopping(false);

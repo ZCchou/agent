@@ -218,7 +218,12 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
         'N 来自本次用户要求，不是首次读取的 limit。不要借用任何协议示例的范围或数量。'
         'first_action 使用已授权 attachment_id；Word 位置和数量先用 document.inspect_template。'
         '不要求输出文件时 deliverables=[]。success_criteria 用简短中文复述用户要求。'
-        '这是一项规划任务，不要因为尚未读取内容而拒绝给出读取计划。'},
+        '这是一项规划任务，不要因为尚未读取内容而拒绝给出读取计划。'
+        '用户请求审阅时，operation=review；首次动作读取结构不代表最终操作是read。'
+        '章节范围未知时用scope=selected、target_ids=[]、selector={kind:selection_pending,condition:用户指定的章节条件}。'
+        '没有明确位置数量时requested_count=null；用户明确要求前N个非空位置时保留requested_count=N。'
+        '一个章节不是一个非空位置。first_action.limit只是首次读取页大小，不是处理范围。'
+        '要求输出文件时填写deliverables的format，路径未知用null，不省略交付物。'},
         {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
     for correction in range(3):
         round_no+=1
@@ -234,7 +239,10 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
             messages.extend([{'role':'assistant','content':text}, {'role':'user','content':
                 'The goal JSON was invalid: ' + str(error) +
                 '. Correct it against the original request. For prefix_nonempty use scope selected and target_ids []; '
-                'otherwise use selector null. No requested file means deliverables []. Do not invent positions.'}])
+                'for an unresolved chapter use selection_pending with the requested chapter condition; '
+                'preserve any explicit requested position count, otherwise use requested_count null; '
+                'otherwise use selector null. Review requests require operation review. No requested file means deliverables []. Do not invent positions.'}])
+
     root=service.execution_monitor.get_task(root['id'])
     captured=service.task_plans.capture_requirements(root['id'],requirements,
         expected_revision=prior_goals['revision'] if prior_goals else 0,

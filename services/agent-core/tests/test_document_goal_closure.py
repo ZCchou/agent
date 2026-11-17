@@ -166,3 +166,11 @@ def test_unknown_chapter_selection_keeps_the_user_cardinality_for_resolution():
     goal['source_scopes'][0].update(scope='selected',selector={'kind':'selection_pending','condition':'第二章的前三项'},requested_count=3)
     requirement = normalize_goal(goal,[{'id':'source'}])['source_scopes'][0]
     assert requirement['selector'] == {'kind':'selection_pending','condition':'第二章的前三项','count':3}
+
+
+def test_review_answer_cannot_declare_only_read_obligations():
+    value = example_goal('source')
+    value.update(answer_kind='review', evidence_required=True)
+    with pytest.raises(CoreDataError) as error:
+        normalize_goal(value, [{'id':'source'}])
+    assert error.value.code == 'task_goal_invalid'
