@@ -27,14 +27,45 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit $LASTEXITCODE" }
 }
-function Update-OfflineApplicationManifest([string]$TauriRoot, [string]$CoreSha256, [string]$Destination) {
+function Update-OfflineApplicationManifest([string]$TauriRoot, [string]$CoreSha256, [string]$Destination, [switch]$Verify) {
     $applicationFiles = [ordered]@{}
     foreach ($name in @('agent-desktop.exe', 'agent-core.exe')) {
         $path = Join-Path $TauriRoot ('target/release/' + $name)
-        $applicationFiles[$name] = [ordered]@{ bytes = (Get-Item -LiteralPath $path).Length
-            sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+        $length = (Get-Item -LiteralPath $path).Length
+        if ($name -eq 'agent-desktop.exe') {
+            # tauri-bundler writes the NSIS marker before invoking makensis.
+            # It can restore the staging EXE after bundling, so hash the
+            # bytes that are actually packaged even if the marker is restored.
+            $binary = [IO.File]::ReadAllBytes($path)
+            $identity = [Text.Encoding]::GetEncoding(28591).GetString($binary)
+            $marker = '__TAURI_BUNDLE_TYPE_VAR_UNK'
+            $offset = $identity.IndexOf($marker, [StringComparison]::Ordinal)
+            if ($offset -ge 0) {
+                if ($identity.LastIndexOf($marker, [StringComparison]::Ordinal) -ne $offset) {
+                    throw 'Ambiguous Tauri bundle type marker in the Host executable'
+                }
+                $nsis = [Text.Encoding]::ASCII.GetBytes('__TAURI_BUNDLE_TYPE_VAR_NSS')
+                [Buffer]::BlockCopy($nsis, 0, $binary, $offset, $nsis.Length)
+            }
+            $hasher = [Security.Cryptography.SHA256]::Create()
+            try { $hash = ([BitConverter]::ToString($hasher.ComputeHash($binary))).Replace('-', '').ToLowerInvariant() }
+            finally { $hasher.Dispose() }
+        } else {
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        $applicationFiles[$name] = [ordered]@{ bytes = $length; sha256 = $hash }
     }
     if ($applicationFiles['agent-core.exe'].sha256 -ne $CoreSha256) { throw 'Built sidecar differs from the frozen Core' }
+    if ($Verify) {
+        $expected = (Get-Content -LiteralPath $Destination -Raw | ConvertFrom-Json).files
+        foreach ($name in $applicationFiles.Keys) {
+            if ($expected.$name.bytes -ne $applicationFiles[$name].bytes -or
+                $expected.$name.sha256 -cne $applicationFiles[$name].sha256) {
+                throw 'Bundling changed application identity after the installer manifest was anchored'
+            }
+        }
+        return
+    }
     [ordered]@{ schema_version = 1; files = $applicationFiles } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Destination -Encoding UTF8
 }
 $initialCommit = (& git -C $repository rev-parse HEAD).Trim()
@@ -157,20 +188,6 @@ try {
     $bundleLog = Join-Path $output $(if ($prepared.external_payload) { 'build/nsis-external-attempt.log' } else { 'build/nsis-embedded-attempt.log' })
     & npm.cmd @bundleArguments 2>&1 | Tee-Object -FilePath $bundleLog | Out-Host
     $bundleExit = $LASTEXITCODE
-    # Tauri patches the Host bundle-type marker in place before invoking NSIS.
-    # Rebind the installer to those actual bytes, including when bundling fails.
-    Update-OfflineApplicationManifest $tauri $prepared.core_sha256 $applicationManifest
-    $bundledApplicationHash = (Get-FileHash -LiteralPath $applicationManifest -Algorithm SHA256).Hash.ToLowerInvariant()
-    $applicationChanged = $bundledApplicationHash -ne $prepared.application_manifest_sha256
-    Invoke-Checked $Python $hookArguments
-    $prepared.application_manifest_sha256 = $bundledApplicationHash
-    $prepared.hook_sha256 = (Get-FileHash -LiteralPath (Join-Path $output 'build/offline-hooks.nsh') -Algorithm SHA256).Hash.ToLowerInvariant()
-    $prepared | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $preparedPath -Encoding UTF8
-    if ($bundleExit -eq 0 -and $applicationChanged) {
-        $bundleLog = Join-Path $output 'build/nsis-identity-rebind.log'
-        & npm.cmd @bundleArguments 2>&1 | Tee-Object -FilePath $bundleLog | Out-Host
-        $bundleExit = $LASTEXITCODE
-    }
     if ($bundleExit -ne 0 -and -not $prepared.external_payload) {
         # Keep the actual compiler failure, then rebuild the same app as a
         # small installer consuming the complete adjacent verified payload.
@@ -190,14 +207,7 @@ try {
         $bundleExit = $LASTEXITCODE
     }
     if ($bundleExit -ne 0) { throw "NSIS bundle failed with exit $bundleExit. Build logs were retained." }
-    $expectedApplication = Get-Content -LiteralPath $applicationManifest -Raw | ConvertFrom-Json
-    foreach ($name in @('agent-desktop.exe', 'agent-core.exe')) {
-        $path = Join-Path $tauri ('target/release/' + $name)
-        if ((Get-Item -LiteralPath $path).Length -ne $expectedApplication.files.$name.bytes -or
-            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedApplication.files.$name.sha256) {
-            throw 'Bundling changed application identity after the installer manifest was anchored'
-        }
-    }
+    Update-OfflineApplicationManifest $tauri $prepared.core_sha256 $applicationManifest -Verify
 } finally {
     Pop-Location
     $env:TEMP = $previousTemp
@@ -217,13 +227,14 @@ $signature = Get-AuthenticodeSignature -LiteralPath $installer
 $dirty = @(& git -C $repository status --porcelain=v1 --untracked-files=all).Count -gt 0
 $protocolSource = Get-Content -LiteralPath (Join-Path $repository 'services/agent-core/src/agent/protocol.py') -Raw
 $storageSource = Get-Content -LiteralPath (Join-Path $repository 'services/agent-core/src/agent/storage.py') -Raw
+$applicationIdentity = (Get-Content -LiteralPath $applicationManifest -Raw | ConvertFrom-Json).files
 $appSignatures = @{}
 foreach ($name in @('agent-desktop.exe', 'agent-core.exe')) {
     $path = Join-Path $tauri ('target/release/' + $name)
     $appSignatures[$name] = @{
         status = [string](Get-AuthenticodeSignature -LiteralPath $path).Status
-        sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        bytes = (Get-Item -LiteralPath $path).Length
+        sha256 = $applicationIdentity.$name.sha256
+        bytes = $applicationIdentity.$name.bytes
     }
 }
 $release = [ordered]@{
