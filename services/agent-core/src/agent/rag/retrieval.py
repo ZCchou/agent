@@ -5,6 +5,7 @@ import math
 import json
 import re
 import struct
+import unicodedata
 
 from agent.storage import CoreDataError
 from agent.rag.documents import CLAUSE
@@ -13,6 +14,56 @@ from agent.rag.documents import CLAUSE
 def explicit_subject(query: str) -> str | None:
     match = re.search(r'(?:关于|有关)\s*(.{2,60}?)\s*(?:的)?(?:相关)?(?:内容|条款|规定|要求|资料|知识)(?=[\s。？！?!，,]|$)', query)
     return match.group(1).strip().removesuffix('的').strip() if match else None
+
+
+_CLAUSE_NUMBER = r'([A-Z]*(?:-?\d+)?(?:\.\d+)+(?:\([A-Z0-9]+\))*)(?![A-Z0-9]|\.\d|\([A-Z0-9]+\))'
+_STANDARD_FAMILY = r'MIL\s*-\s*STD|DO|CCAR|CS|FAR|ISO|IEC|SAE'
+_STANDARD_SUFFIX = r'\s*[-‐‑–—]?\s*(\d+[A-Z]?)(?![A-Z0-9])'
+_NAMED_STANDARD = re.compile(r'(?<![A-Z0-9])(' + _STANDARD_FAMILY + ')' + _STANDARD_SUFFIX, re.I)
+_CLAUSE_REFERENCE = re.compile(
+    r'(?:第\s*|§\s*|\b(?:section|subclause|clause|article)\s+)' + _CLAUSE_NUMBER, re.I,
+)
+_STANDARD_CLAUSE_REFERENCE = re.compile(_NAMED_STANDARD.pattern + r'\s+' + _CLAUSE_NUMBER, re.I)
+
+
+def explicit_clause_numbers(query):
+    normalized = unicodedata.normalize('NFKC', query)
+    matches = [match.group(1).upper() for match in _CLAUSE_REFERENCE.finditer(normalized)]
+    matches.extend(match.group(3).upper() for match in _STANDARD_CLAUSE_REFERENCE.finditer(normalized))
+    return tuple(dict.fromkeys(matches))
+
+
+def _standard_ids(text):
+    return {re.sub(r'[\s-]+', '', match.group(1)).upper() + match.group(2).upper()
+            for match in _NAMED_STANDARD.finditer(unicodedata.normalize('NFKC', text))}
+
+
+def exact_clause_candidates(connection, index_id, query, version_ids=None, *, count=40):
+    """Restrict explicit clause search to confirmed chunks of the requested source."""
+    clauses = explicit_clause_numbers(query)
+    named = _standard_ids(query)
+    sql = """SELECT c.id, c.clause_number, v.title, v.document_number, v.original_name, v.revision
+        FROM rag_index_chunks ic JOIN rag_chunks c ON c.id=ic.chunk_id
+        JOIN rag_versions v ON v.id=c.version_id
+        WHERE ic.index_id=? AND v.status='confirmed'
+        AND upper(c.clause_number) IN (SELECT value FROM json_each(?))"""
+    params = [index_id, json.dumps(clauses)]
+    if version_ids is not None:
+        sql += ' AND c.version_id IN (SELECT value FROM json_each(?))'
+        params.append(json.dumps(list(dict.fromkeys(version_ids))))
+    rows = connection.execute(sql + ' ORDER BY c.ordinal,c.id', params)
+    ids = []
+    for row in rows:
+        standards = _standard_ids(' '.join(row[key] or '' for key in ('title', 'document_number', 'original_name')))
+        revision = unicodedata.normalize('NFKC', row['revision'] or '').strip().upper()
+        if re.fullmatch('[A-Z]', revision):
+            standards.update({value + revision for value in standards if value[-1].isdigit()})
+        if named and not named.intersection(standards):
+            continue
+        ids.append(row['id'])
+        if len(ids) == count:
+            break
+    return ids, reciprocal_rank_fusion([ids])
 
 
 def matches_subject(text: str, subject: str) -> bool:
@@ -92,6 +143,8 @@ def load_vector_extension(connection):
 
 def candidates(connection, index_id, query_vector, query, version_ids=None, count=40):
     """Cosine is computed over every authorized indexed chunk before top-k."""
+    if explicit_clause_numbers(query):
+        return exact_clause_candidates(connection, index_id, query, version_ids, count=count)
     load_vector_extension(connection)
     params = [query_vector, index_id]
     version_filter = ''

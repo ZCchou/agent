@@ -51,6 +51,21 @@ def test_vector_candidates_search_full_authorized_set_without_keyword_prefilter(
         assert ids == [chunks[0]['id']]
         ids, _ = candidates(connection, 'index', vector_blob([1, 0]), '完全不同的同义表达', version_ids=[version] * 40000, count=1)
         assert ids == [chunks[0]['id']]
+        connection.execute("UPDATE rag_chunks SET clause_number='8.2.1.3' WHERE id=?", (chunks[2]['id'],))
+        ids, _ = candidates(connection, 'index', vector_blob([1, 0]),
+                            '请确认第8.2.1.3条的试验类型并给出物理页和原文', count=1)
+        assert ids == [chunks[2]['id']]
+        ids, _ = candidates(connection, 'index', vector_blob([1, 0]),
+                            '请确认第8.2.1.4条的试验类型', count=1)
+        assert ids == []
+        connection.execute("UPDATE rag_versions SET title='DO-160F' WHERE id=?", (version,))
+        assert candidates(connection, 'index', None, 'DO-160F clause 8.2.1.3')[0] == [chunks[2]['id']]
+        assert candidates(connection, 'index', None, 'DO-160E clause 8.2.1.3')[0] == []
+        assert candidates(connection, 'index', None, '请查DO-160E第8.2.1.3条')[0] == []
+        connection.execute("UPDATE rag_versions SET title='RTCA DO-160', revision='F' WHERE id=?", (version,))
+        assert candidates(connection, 'index', None, 'DO-160F clause 8.2.1.3.')[0] == [chunks[2]['id']]
+        assert candidates(connection, 'index', None, 'DO-160F 8.2.1.3原文')[0] == [chunks[2]['id']]
+        assert candidates(connection, 'index', None, 'DO-160F clause 8.2.1.3', version_ids=[])[0] == []
 
 
 def test_100000_chunk_vector_scan_and_enforced_library_capacity(tmp_path):

@@ -376,3 +376,38 @@ def test_planner_specialist_and_final_share_selected_sources(tmp_path, monkeypat
         assert child_plan["resolved_intent"]["effective_attachment_ids"] == selected
         assert [model for model, _ in captured] == ["vision", "general", "vision", "general"]
     asyncio.run(scenario())
+
+
+
+def test_task_goal_can_use_only_sealed_current_reference_ids(tmp_path, monkeypatch):
+    repo, old = seed(tmp_path, monkeypatch)
+
+    async def scenario():
+        async def sink(event):
+            pass
+        service = ChatRunService(repo, sink)
+        try:
+            result = await service.start(dict(conversation_id=old['conversation_id'], content='Read selected source',
+                idempotency_key='referenced-goal', provider_profile_id='builtin-demo', model_id='demo',
+                attachment_references=[{'attachment_id': 'a0'}]))
+            await service.tasks[result['run']['id']]
+            run_id = result['run']['id']
+            selected, = repo.get_run_conversation(run_id)['messages'][0]['attachments']
+            with repo._connect() as conn:
+                task_id = conn.execute('SELECT id FROM execution_wait_tasks WHERE run_id=?', (run_id,)).fetchone()[0]
+                plan_id = repo.get_model_run(run_id)['execution_plan_id']
+                goal = {'source_scopes': [{'source_id': selected['id'], 'scope': 'full', 'operation': 'read',
+                                           'target_ids': [], 'reason': 'read'}],
+                        'deliverables': [], 'success_criteria': ['Read requested source']}
+                service.task_plans.goals.capture(conn, task_id, goal, expected_revision=0)
+                other = {**goal, 'source_scopes': [{**goal['source_scopes'][0], 'source_id': 'a1'}]}
+                with pytest.raises(CoreDataError, match='未授权'):
+                    service.task_plans.goals.capture(conn, task_id, other, expected_revision=1)
+                conn.execute("UPDATE execution_plans SET resolution_hash='tampered' WHERE id=?", (plan_id,))
+                with pytest.raises(CoreDataError) as failure:
+                    service.task_plans.goals.capture(conn, task_id, goal, expected_revision=1)
+                assert failure.value.code == 'attachment_reference_selection_changed'
+        finally:
+            await service.shutdown()
+
+    asyncio.run(scenario())

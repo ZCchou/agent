@@ -252,3 +252,55 @@ def intent_payload(content, attachments, recent_messages, conversation_kind, *, 
             value['recent_conversation'].pop(0)
             break
     return render()
+
+_ATTACHMENT_OPERATION = re.compile(
+    r'提取|摘录|抄录|转录|摘要|概括|总结|改写|翻译|校对|错别字|格式转换|列出.{0,12}(?:非空|字段|标题)'
+    r'|\b(?:extract|transcribe|summari[sz]e|translate|proofread|convert|reformat)\b', re.I)
+_PROJECT_SOURCE = re.compile(r'资料库|知识库|项目证据|project (?:evidence|library)|knowledge base', re.I)
+_SOURCE_NEGATION = re.compile(
+    r'(?:不要|无需|不必|禁止|不需要|不使用|不查|不依赖)[^，。；、,.;]{0,20}$'
+    r'|\b(?:do not|don.t|without|no need to)\b[^,.;]{0,35}$', re.I)
+_LOCAL_SOURCE = re.compile(
+    r'(?:仅|只|仅限)(?:能|可以|需|使用|根据|依据|基于|参考|读取|处理|提取|审阅|校对|对照|\s){0,5}(?:本|这份|当前|所附|提供的)?(?:附件|模板|原文)'
+    r'|\b(?:only|solely)\b[^;.!?]{0,45}\b(?:attach(?:ed|ment)|provided document)\b', re.I)
+_EXTERNAL_CHECK = re.compile(
+    r'(?:依据|按照|根据|对照|参照|按)[^，。；、,.;]{0,50}(?:条款|法规|标准|规章|DO\s*[-－]?\s*160|CCAR|RTCA)'
+    r'|\b(?:against|according to)\b[^,.;]{0,65}(?:standard|regulation|DO\s*-?\s*160|CCAR|RTCA)', re.I)
+
+
+def project_evidence_policy(decision, request, *, has_attachments, confirmed=False):
+    """Decide the role of project evidence from the request and trusted settings."""
+    reason = decision.get('reason')
+    hint_reason = (decision.get('rule_hint') or {}).get('reason')
+    if decision.get('requested_mode') == 'required' or 'user_required' in {reason, hint_reason}:
+        return 'required'
+
+    def requested(pattern):
+        return any(not _SOURCE_NEGATION.search(request[max(0, match.start()-40):match.start()])
+                   for match in pattern.finditer(request))
+
+    from agent.rag.retrieval import explicit_clause_numbers
+
+    local_only = bool(_LOCAL_SOURCE.search(request)) and has_attachments
+    project_mentioned = bool(_PROJECT_SOURCE.search(request))
+    explicit_project = requested(_PROJECT_SOURCE)
+    if local_only or (project_mentioned and not explicit_project):
+        return 'attachment_only' if has_attachments else 'none'
+    if 'skill_required' in {reason, hint_reason}:
+        return 'required'
+    attachment_task = has_attachments and bool(_ATTACHMENT_OPERATION.search(request))
+    external_requirement = bool(explicit_clause_numbers(request)) or requested(_EXTERNAL_CHECK)
+    if explicit_project or external_requirement:
+        return 'mixed' if attachment_task else 'required'
+    if attachment_task:
+        return 'attachment_only'
+    if 'evidence_continuation' in {reason, hint_reason} and (
+        decision.get('reuse_evidence') or decision.get('continued_run_id')
+        or CONTINUATION.fullmatch(request.strip()) or FOLLOWUP.fullmatch(request.strip())
+    ):
+        return 'required'
+    if reason == 'semantic_evidence' and not has_attachments:
+        return 'required'
+    if reason in {'business_evidence', 'semantic_evidence'} or hint_reason == 'business_evidence':
+        return 'required' if confirmed and not has_attachments else 'optional'
+    return 'none'

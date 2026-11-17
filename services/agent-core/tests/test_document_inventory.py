@@ -63,7 +63,8 @@ def test_inventory_includes_word_content_control_paragraphs():
     content.append(paragraph)
     control.append(content)
     document.element.body.insert(0, control)
+    document.add_paragraph('后续普通正文')
     payload = io.BytesIO()
     document.save(payload)
     result = inventory(payload.getvalue())
-    assert [item['text'] for item in result['fields']] == ['内容控件内的设备要求']
+    assert [item['text'] for item in result['fields']] == ['内容控件内的设备要求', '后续普通正文']

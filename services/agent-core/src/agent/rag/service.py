@@ -18,7 +18,7 @@ from agent.infrastructure.logging import log_event
 from agent.document_parser import ParserService
 from agent.rag.documents import MAX_FILE_BYTES, MAX_TEXT_CHARS, SUPPORTED_SUFFIXES, SPLITTING_VERSION, has_readable_text
 from agent.rag.repository import RagRepository, identifier, required_text
-from agent.rag.retrieval import candidates, load_vector_extension, vector_blob, explicit_subject, matches_subject, reference_material
+from agent.rag.retrieval import candidates, load_vector_extension, vector_blob, explicit_subject, matches_subject, reference_material, explicit_clause_numbers, exact_clause_candidates
 from agent.storage import CoreDataError, _utc_now
 from agent.execution.execution_wait import ExecutionMonitor, current_activity, current_task_id, current_monitor, Diagnostic
 
@@ -651,31 +651,38 @@ class RagService:
                 self.repository.library(connection, index['library_id'])
                 if not connection.execute('SELECT 1 FROM rag_indexes WHERE id=?', (index['id'],)).fetchone():
                     raise CoreDataError('rag_generation_changed', 'The retrieval index changed. Search again.')
-        subject = explicit_subject(query)
+        exact = bool(explicit_clause_numbers(query))
+        subject = None if exact else explicit_subject(query)
         retrieval_query = subject or query
         retrieved = []
         index_by_chunk = {}
         for index in indexes:
             self._model(index['embedding_model_id'], 'embedding', index['embedding_digest'])
             self._model(index['reranker_model_id'], 'reranker', index['reranker_digest'])
-            if progress:
-                await progress("embedding")
-            stage_started = time.perf_counter()
-            embed_options = {'query': True}
-            if progress:
-                parameters = inspect.signature(self.models.embed).parameters
-                if 'progress' in parameters or any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values()):
-                    embed_options['progress'] = progress
-            query_vectors = await self.models.embed(index['embedding_model_id'], [retrieval_query], **embed_options)
-            log_event(logging.getLogger(__name__), logging.INFO, "rag_stage_completed", "RAG stage completed",
-                      stage="embedding", duration_ms=round((time.perf_counter()-stage_started)*1000), count=1)
-            if len(query_vectors) != 1:
-                raise CoreDataError('rag_invalid_embedding', 'The query embedding batch is invalid.')
-            if progress:
-                await progress("retrieving")
-            blob = vector_blob(query_vectors[0], index['dimension'])
+            if not exact:
+                if progress:
+                    await progress("embedding")
+                stage_started = time.perf_counter()
+                embed_options = {'query': True}
+                if progress:
+                    parameters = inspect.signature(self.models.embed).parameters
+                    if 'progress' in parameters or any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values()):
+                        embed_options['progress'] = progress
+                query_vectors = await self.models.embed(index['embedding_model_id'], [retrieval_query], **embed_options)
+                log_event(logging.getLogger(__name__), logging.INFO, "rag_stage_completed", "RAG stage completed",
+                          stage="embedding", duration_ms=round((time.perf_counter()-stage_started)*1000), count=1)
+                if len(query_vectors) != 1:
+                    raise CoreDataError('rag_invalid_embedding', 'The query embedding batch is invalid.')
+                if progress:
+                    await progress("retrieving")
+                blob = vector_blob(query_vectors[0], index['dimension'])
             with closing(self.repository.connect()) as connection:
-                ids, scores = candidates(connection, index['id'], blob, retrieval_query, version_ids, count=candidate_count)
+                if exact:
+                    ids, scores = exact_clause_candidates(connection, index['id'], query, version_ids,
+                                                          count=candidate_count)
+                else:
+                    ids, scores = candidates(connection, index['id'], blob, retrieval_query, version_ids,
+                                             count=candidate_count)
                 if not ids:
                     continue
                 placeholders = ','.join('?' for _ in ids)

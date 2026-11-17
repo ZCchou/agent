@@ -1,6 +1,7 @@
 """Model-planned first reads and proof-driven, tool-free document finalization."""
 import asyncio
 import json
+import re
 from copy import deepcopy
 from hashlib import sha256
 from agent.context_engine.policy import estimate_tokens, resolve_budget
@@ -199,49 +200,57 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
     root=service.execution_monitor.start_task(run_id=run['id'])
     existing=service.task_plans.get(root['id'])
     prior_goals = existing.get('goal_requirements') if existing else None
-    with service.repository._connect() as db:
-        saved_goal = db.execute('SELECT request_digest FROM task_goal_execution WHERE task_id=?', (root['id'],)).fetchone()
     request_digest = service.task_plans.goals.request_digest(root['id'])
-    if saved_goal and saved_goal[0] == request_digest:
+    with service.repository._connect() as db:
+        first_read = db.execute('''SELECT 1 FROM task_goal_execution g
+            JOIN tool_operations o ON o.id=json_extract(g.payload_json, '$._first_result_id')
+            WHERE g.task_id=? AND g.request_digest=? AND o.run_id=? AND o.status='completed' ''',
+            (root['id'], request_digest, run['id'])).fetchone()
+    if first_read:
         return round_no
     attachments=[a for a in current.get('attachments',[]) if any(x.get('kind')=='document.source' for x in a.get('artifacts',[]))]
     if not attachments:return round_no
     await service._emit(run['id'],'run.state_changed',{'status':'generating','phase':'goal_planning'})
-    payload={'request':current['content'],'rag_mode':run.get('rag_decision',{}).get('requested_mode','auto'),
-             'attachments':[{k:a[k] for k in ('id','name','media_type','byte_size') if k in a} for a in attachments]}
-    if prior_goals and prior_goals['provenance'] == 'user_clarification':
-        payload['confirmed_requirements'] = prior_goals
-    messages=[{'role':'system','content':INSTRUCTION +
-        '\n返回结构：source_scopes 每份来源每种 operation 只登记一条，元数据与正文范围合并。'
-        'requested_count 独立填写用户原话要求处理的数量；没有固定数量时为 null。'
-        '如果要求前 N 个非空位置，scope=selected，target_ids=[]，selector={kind:prefix_nonempty,count:N}，requested_count=N。'
-        'N 来自本次用户要求，不是首次读取的 limit。不要借用任何协议示例的范围或数量。'
-        'first_action 使用已授权 attachment_id；Word 位置和数量先用 document.inspect_template。'
-        '不要求输出文件时 deliverables=[]。success_criteria 用简短中文复述用户要求。'
-        '这是一项规划任务，不要因为尚未读取内容而拒绝给出读取计划。'
-        '用户请求审阅时，operation=review；首次动作读取结构不代表最终操作是read。'
-        '章节范围未知时用scope=selected、target_ids=[]、selector={kind:selection_pending,condition:用户指定的章节条件}。'
-        '没有明确位置数量时requested_count=null；用户明确要求前N个非空位置时保留requested_count=N。'
-        '一个章节不是一个非空位置。first_action.limit只是首次读取页大小，不是处理范围。'
-        '要求输出文件时填写deliverables的format，路径未知用null，不省略交付物。'},
-        {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
-    for correction in range(3):
-        round_no+=1
-        text,_,_=await service._invoke_planned_step(run,plan,step,{'id':attempt_id,'attempt_number':attempt_number},
-            provider,messages,max_output_tokens=1024,response_format='json_object',response_schema=goal_schema(attachments),
-            round_no=round_no,apply_rag_contract=False)
-        try:
-            draft=json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
-            requirements=normalize_goal(draft,attachments)
-            break
-        except (ValueError,TypeError,KeyError,CoreDataError) as error:
-            if correction==2:raise CoreDataError('task_goal_invalid','目标范围未能确定，已保留原请求和附件。') from error
-            messages.extend([{'role':'assistant','content':text}, {'role':'user','content':
-                'The goal JSON was invalid: ' + str(error) +
-                '. Correct it against the original request. For prefix_nonempty use scope selected and target_ids []; '
-                'for an unresolved chapter use selection_pending with the requested chapter condition; '
-                'preserve any explicit requested position count, otherwise use requested_count null; '
-                'otherwise use selector null. Review requests require operation review. No requested file means deliverables []. Do not invent positions.'}])
+    draft = full_extraction_plan(run, current, attachments) if not prior_goals else None
+    application_plan = draft is not None
+    if application_plan:
+        requirements = normalize_goal(draft, attachments)
+    else:
+        payload={'request':current['content'],'rag_mode':run.get('rag_decision',{}).get('requested_mode','auto'),
+                 'attachments':[{k:a[k] for k in ('id','name','media_type','byte_size') if k in a} for a in attachments]}
+        if prior_goals and prior_goals['provenance'] == 'user_clarification':
+            payload['confirmed_requirements'] = prior_goals
+        messages=[{'role':'system','content':INSTRUCTION +
+            '\n返回结构：source_scopes 每份来源每种 operation 只登记一条，元数据与正文范围合并。'
+            'requested_count 独立填写用户原话要求处理的数量；没有固定数量时为 null。'
+            '如果要求前 N 个非空位置，scope=selected，target_ids=[]，selector={kind:prefix_nonempty,count:N}，requested_count=N。'
+            'N 来自本次用户要求，不是首次读取的 limit。不要借用任何协议示例的范围或数量。'
+            'first_action 使用已授权 attachment_id；Word 位置和数量先用 document.inspect_template。'
+            '不要求输出文件时 deliverables=[]。success_criteria 用简短中文复述用户要求。'
+            '这是一项规划任务，不要因为尚未读取内容而拒绝给出读取计划。'
+            '用户请求审阅时，operation=review；首次动作读取结构不代表最终操作是read。'
+            '章节范围未知时用scope=selected、target_ids=[]、selector={kind:selection_pending,condition:用户指定的章节条件}。'
+            '没有明确位置数量时requested_count=null；用户明确要求前N个非空位置时保留requested_count=N。'
+            '一个章节不是一个非空位置。first_action.limit只是首次读取页大小，不是处理范围。'
+            '要求输出文件时填写deliverables的format，路径未知用null，不省略交付物。'},
+            {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
+        for correction in range(3):
+            round_no+=1
+            text,_,_=await service._invoke_planned_step(run,plan,step,{'id':attempt_id,'attempt_number':attempt_number},
+                provider,messages,max_output_tokens=1024,response_format='json_object',response_schema=goal_schema(attachments),
+                round_no=round_no,apply_rag_contract=False)
+            try:
+                draft=json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
+                requirements=normalize_goal(draft,attachments)
+                break
+            except (ValueError,TypeError,KeyError,CoreDataError) as error:
+                if correction==2:raise CoreDataError('task_goal_invalid','目标范围未能确定，已保留原请求和附件。') from error
+                messages.extend([{'role':'assistant','content':text}, {'role':'user','content':
+                    'The goal JSON was invalid: ' + str(error) +
+                    '. Correct it against the original request. For prefix_nonempty use scope selected and target_ids []; '
+                    'for an unresolved chapter use selection_pending with the requested chapter condition; '
+                    'preserve any explicit requested position count, otherwise use requested_count null; '
+                    'otherwise use selector null. Review requests require operation review. No requested file means deliverables []. Do not invent positions.'}])
 
     root=service.execution_monitor.get_task(root['id'])
     captured=service.task_plans.capture_requirements(root['id'],requirements,
@@ -252,16 +261,17 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
     with service.repository._connect() as db:
         db.execute('INSERT OR REPLACE INTO task_goal_execution VALUES (?,?,?,?)',
             (root['id'],captured['revision'],captured['request_digest'],json.dumps(draft,ensure_ascii=False)))
-    if draft['evidence_required'] or any(s['operation']=='review' for s in requirements['source_scopes']):
-        run['rag_decision']={**run.get('rag_decision',{}),'required':True,'reason':'model_goal_evidence'}
-        await service.rag_grounding.prepare(run,service.repository.get_run_conversation(run['id']))
+    if draft['evidence_required'] or any(scope['operation'] == 'review' for scope in requirements['source_scopes']):
+        conversation = service.repository.get_run_conversation(run['id'])
+        await service._prepare_requested_project_evidence(run, conversation, 'document_planning')
     first=draft['first_action']
     call=ToolCall('goal-first-read-'+str(captured['revision']),first['tool'],{'attachment_id':first['attachment_id'],'limit':first['limit']})
     operations=service.tool_loop.repository.list_for_run(run['id'])
     sequence=max((o['sequence'] for o in operations),default=0)+1
     operation,resolution=await service.tool_loop.request(run_id=run['id'],attempt_id=attempt_id,sequence=sequence,call=call,
         budget_attempt_ids=budget_ids,
-        local_executor=(lambda:service._document_tool(run['id'],call,max_characters=12000)) if call.name=='document.inspect_template' else None,
+        local_executor=(lambda:service._document_tool(run['id'], call, max_characters=12000,
+            **({'complete_inventory': True} if application_plan else {}))) if call.name=='document.inspect_template' else None,
         async_executor=(lambda:service._read_document_attachment(run['id'],call.arguments,max_characters=12000)) if call.name=='document.read_attachment' else None)
     service.repository.record_tool_event(run['id'],operation['id'],call.name,operation['status'],len(resolution.output.encode()),resolution.error_code)
     service.result_store.save(operation['id'], resolution.output, success=resolution.success)
@@ -275,6 +285,78 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
         raise CoreDataError(resolution.error_code or 'document_read_failed','首次读取失败，已保留目标和任务状态。')
     return round_no
 
+
+
+def full_extraction_plan(run, current, attachments):
+    """Recognize single-document full nonempty extraction with a requested DOCX."""
+    from agent.rag.routing import decide_evidence, project_evidence_policy
+
+    request = current['content']
+    scope_policy = project_evidence_policy(run.get('rag_decision') or {}, request,
+                                           has_attachments=bool(current.get('attachments')))
+    if scope_policy != 'attachment_only' or len(attachments) != 1 or len(current['attachments']) != 1:
+        return None
+    if not attachments[0]['name'].lower().endswith('.docx') or 'source_start' in attachments[0] or 'source_end' in attachments[0]:
+        return None
+    if not re.search(r'非空|\bnon[- ]?empty\b', request, re.I) or not re.search(r'提取|摘录|\bextract\b', request, re.I):
+        return None
+    if re.search(r'如何|怎么|这一|这一项|指定|请勿|无需|不要|不必|不保存|不导出|校对|改写|翻译|总结|审查|审阅|核对|填写|回填'
+                 r'|\b(?:without|do not|proofread|rewrite|translate|summarize|review)\b', request, re.I):
+        return None
+    if decide_evidence(request)['operation_hint'] != 'export':
+        return None
+    if not re.search(r'\b(?:docx|word)\b|新的?文档|新建文档', request, re.I):
+        return None
+    if re.search(r'\b(?:pdf|xlsx?|excel|pptx?|csv|html|odt|rtf)\b'
+                 r'|第\s*[\d一二三四五六七八九十百零两]+\s*(?:章|节|页|段|条|项|部分)'
+                 r'|\b(?:chapter|section|page|paragraph)\s+\d+|“[^”]{1,160}”', request, re.I):
+        return None
+
+    if re.search(r'(?:前|后|最后)\s*[\d零一二三四五六七八九十两百]+\s*[条项处个页段]|\b(?:first|last)\s+\d+|markdown|\.md\b|\btxt\b', request, re.I):
+        return None
+    if not re.search(r'非空的?内容有哪些|(?:所有|全部|每个).{0,6}非空|提取.{0,28}(?:文档|模板|附件).{0,8}非空|\ball\b.{0,20}\bnon[- ]?empty\b', request, re.I):
+        return None
+    draft = example_goal(attachments[0]['id'])
+    draft['answer_kind'] = 'extract'
+    draft['source_scopes'][0]['reason'] = '提取本轮唯一授权 DOCX 的全部非空位置。'
+    draft['success_criteria'] = ['按原顺序提取全部非空内容并保存为新的 DOCX 文档。']
+    draft['deliverables'] = [{'format': 'docx', 'path': None}]
+    draft['first_action']['limit'] = 100
+    return draft
+
+
+async def export_complete_extraction(service, run, attempt_id, task_id, goals, current):
+    """Publish verbatim source material only after complete local read proofs."""
+    from agent.execution.source_inventory import SourceInventory
+
+    if run['id'] in service.rag_grounding.runs or not full_extraction_plan(run, current, current.get('attachments', [])):
+        return None
+    outputs, scopes = goals['deliverables'], goals['source_scopes']
+    if len(outputs) != 1 or (outputs[0].get('format') or '').lower() != 'docx' or outputs[0].get('path'):
+        return None
+    if len(scopes) != 1 or scopes[0]['operation'] != 'read' or scopes[0]['scope'] != 'full':
+        return None
+    if any(item['tool_name'] == 'document.export' and item['status'] == 'completed'
+           for item in service.tool_loop.repository.list_for_run(run['id'])):
+        return None
+    inventory = SourceInventory(service.repository)
+    coverage = inventory.coverage(task_id, scopes[0])
+    visual_gaps = inventory.visual_gaps(task_id, scopes[0]) if not coverage['ready'] else []
+    if not coverage['ready'] and (not visual_gaps or coverage['remaining'] != len(visual_gaps)):
+        return None
+    validate_sources(service, run, task_id, goals)
+    material = inventory.material(task_id, scopes[0])
+    fields = material['fields']
+    body = '\n'.join(field['text'] for field in fields) if fields else '未发现非空文本。'
+    summary = f'已按原文顺序导出 {len(fields)} 个非空文字位置。'
+    if visual_gaps:
+        gap_note = f'另有 {len(visual_gaps)} 个图形、公式或嵌入对象未提取，需要 OCR 或人工查看。'
+        summary += gap_note
+        body += '\n\n' + gap_note + '\n' + '\n'.join(visual_gaps)
+    result = await service._application_document_export(run, attempt_id, body, exact_extraction=True)
+    validate_sources(service, run, task_id, goals)
+    run['_verified_visual_gap_count'] = len(visual_gaps)
+    return summary + '\n\n' + result.removeprefix(body).strip()
 
 async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
     root=service.execution_monitor.start_task(run_id=run['id'])
@@ -311,6 +393,16 @@ async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
             if not unchanged_contract:
                 draft['answer_kind'] = ('review' if any(scope['operation']=='review' for scope in goals['source_scopes'])
                     else 'modify' if goals['deliverables'] else 'synthesis')
+    if draft['answer_kind'] == 'extract' and goals['deliverables']:
+        current = next(m for m in service.repository.get_run_conversation(run['id'])['messages']
+                       if m['id'] == run['user_message_id'])
+        exported = await export_complete_extraction(service, run, attempt_id, root['id'], goals, current)
+        if exported is not None:
+            completion = service.task_plans.completion(root['id'])
+            if not completion['ready'] and completion['remaining'] != run.get('_verified_visual_gap_count', 0):
+                raise CoreDataError('document_publish_unverified', '提取文档尚未通过交付核对。')
+            run['_verified_local_extraction'] = True
+            return exported
     if not service.task_plans.completion(root['id'])['ready']:return None
     signature = proof_signature(service, root['id'])
     if run.get('_finalization_blocked') == signature:
@@ -351,7 +443,21 @@ async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
             text,_,_=await service._invoke_planned_step(run,plan,step,{'id':attempt_id,'attempt_number':attempt_number},
                 provider,messages,max_output_tokens=2048,round_no=round_no,
                 apply_rag_contract=draft['answer_kind'] != 'extract' and run['id'] in service.rag_grounding.runs)
-            if draft['answer_kind']=='extract':text=resolve_final_extraction(text,packet)
+            if draft['answer_kind'] == 'extract':
+                try:
+                    text = resolve_final_extraction(text, packet)
+                except CoreDataError as error:
+                    if error.code != 'task_final_answer_invalid':
+                        raise
+                    # The completion proofs already determine the exact result.
+                    # Discard the malformed model answer and use only verified originals.
+                    sources = [
+                        {'template_id': source['template_id'], 'total': source['total'],
+                         'fields': [{'id': field['id'], 'text': field['text']} for field in source['fields']]}
+                        for source in packet['sources']
+                    ]
+                    originals = sources[0] if len(sources) == 1 else {'sources': sources}
+                    text = resolve_extraction(json.dumps(originals, ensure_ascii=False), packet)
             new_root=service.execution_monitor.get_task(root['id']);new_goals=service.task_plans.goals.get(root['id'])
             active=service.repository.get_model_run(run['id'])['status']
             if active not in {'generating','waiting_tool'} or (new_root['revision'],new_goals['revision'],new_goals['request_digest'])!=fence:

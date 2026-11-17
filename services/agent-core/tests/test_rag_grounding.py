@@ -501,3 +501,46 @@ def test_parent_read_context_is_admitted_only_after_hash_validation(valid_hash):
     with pytest.raises(CoreDataError) as error:
         g.finalize('run-1', selected)
     assert error.value.code == 'rag_quote_invalid'
+
+
+
+def test_tool_search_cannot_replace_explicit_original_clause():
+    from agent.rag.grounding import RagGrounding
+    from agent.storage import CoreDataError
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    query = '请查DO-160F第8.2.1.3条'
+    svc = SimpleNamespace(assert_generation=lambda *args: None, search=AsyncMock(return_value={'evidence': []}))
+    grounding = RagGrounding(svc)
+    grounding.runs['run'] = {'query': query, 'project_id': 'project', 'generation': 1,
+                             'budget': 8000, 'used_tokens': 0}
+    with pytest.raises(CoreDataError):
+        asyncio.run(grounding.execute('run', 'rag.search', {'query': '请查DO-160E第7.3.3条'}, 2000))
+    assert svc.search.await_args.args[:2] == ('project', query)
+
+
+
+def test_exact_clause_can_close_without_exposing_repeat_tools():
+    import hashlib
+    from types import SimpleNamespace
+    from agent.rag.grounding import RagGrounding
+
+    text = 'Exact source text.'
+    parent = 'Verified parent text.'
+    service = SimpleNamespace(assert_generation=lambda *args: None)
+    service.read_evidence = lambda *args, **kwargs: {
+        'parent_context': {'text': parent, 'text_hash': hashlib.sha256(parent.encode()).hexdigest(),
+                           'has_more': False}}
+    grounding = RagGrounding(service)
+    grounding.runs['run'] = {'query': 'DO-160F clause 8.2.1.3', 'project_id': 'project', 'generation': 1,
+                            'budget': 6000, 'used_tokens': 0, 'admitted': {'id': text}, 'quote_options': {},
+                            'evidence': {'id': {'id': 'id', 'text': text, 'clause_number': '8.2.1.3',
+                                                'locator': {'context_required': True}}}}
+    messages = grounding.prepare_exact_clause_answer('run')
+    assert parent in messages[0]['content']
+    assert parent in grounding.runs['run']['admitted']['id']
+    service.read_evidence = lambda *args, **kwargs: {
+        'parent_context': {'text': parent, 'text_hash': hashlib.sha256(parent.encode()).hexdigest(),
+                           'has_more': True}}
+    assert grounding.prepare_exact_clause_answer('run') is None

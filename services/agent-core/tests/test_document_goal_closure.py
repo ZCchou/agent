@@ -174,3 +174,100 @@ def test_review_answer_cannot_declare_only_read_obligations():
     with pytest.raises(CoreDataError) as error:
         normalize_goal(value, [{'id':'source'}])
     assert error.value.code == 'task_goal_invalid'
+
+
+
+def test_exact_extraction_survives_bad_model_position_reference(tmp_path, monkeypatch):
+    svc, root, calls, _, expected = closure_fixture(tmp_path, monkeypatch)
+
+    async def bad_reference(*args, **kwargs):
+        calls.append(kwargs)
+        return '{"template_id":"wrong","total":0,"fields":[]}', None, {}
+
+    svc._invoke_planned_step = bad_reference
+    actual = asyncio.run(finalize(svc, {'id': 'run', 'user_message_id': 'message'},
+        'attempt', 1, object(), {}, {'id': 'step'}))
+    assert json.loads(actual) == expected
+
+
+
+def test_full_nonempty_extract_exports_verified_source_without_model(tmp_path, monkeypatch):
+    svc, root, calls, _, _ = closure_fixture(tmp_path, monkeypatch)
+    from agent.execution.document_goal_runtime import export_complete_extraction
+
+    goals = svc.task_plans.goals.get(root['id'])
+    scope = {**goals['source_scopes'][0], 'scope': 'full', 'target_ids': []}
+    scope.pop('selector', None)
+    goals = {**goals, 'source_scopes': [scope], 'deliverables': [{'format': 'docx', 'path': None}]}
+    store = SourceInventory(svc.repository)
+    store.record_read(root['id'], 'source', 'hash',
+        [{'id': 'p-3', 'text': '未请求项', 'original_content': '未请求项'}])
+    current = {'id': 'message', 'content': '提取这个模板的非空内容并保存为新的 DOCX 文档。',
+               'attachments': [{'id': 'source', 'name': 'fixture.docx', 'sha256': 'hash'}]}
+    monkeypatch.setattr(svc.repository, 'get_run_conversation', lambda _: {'messages': [current]})
+    exported = []
+    async def publish(run, attempt, text, **kwargs):
+        exported.append((text, kwargs))
+        return '[打开文件](<提取.docx>)'
+    svc._application_document_export = publish
+    run = {'id': 'run', 'user_message_id': 'message'}
+    out = asyncio.run(export_complete_extraction(svc, run, 'attempt', root['id'], goals, current))
+    assert '4 个非空文字位置' in out and '[打开文件](<提取.docx>)' in out
+    assert exported[0][0].splitlines() == ['标题', '第一项', '第二项', '未请求项']
+    assert not calls
+    assert asyncio.run(export_complete_extraction(svc, run, 'attempt', root['id'], goals,
+        {**current, 'content': '提取非空内容并按照 DO-160F 核对条款，再保存为 DOCX。'})) is None
+
+
+
+def test_builds_full_extraction_plan_from_explicit_attachment_request():
+    from agent.execution.document_goal_runtime import full_extraction_plan
+    current = {'content': '这个模板里，非空的内容有哪些，提取出来保存为新的 DOCX 文档。',
+               'attachments': [{'id': 'source', 'name': '试验模板.docx'}]}
+    draft = full_extraction_plan({}, current, current['attachments'])
+    goal = normalize_goal(draft, current['attachments'])
+    assert goal['source_scopes'][0]['scope'] == 'full'
+    assert goal['deliverables'] == [{'format': 'docx', 'path': None}]
+    for request in ['提取前三项非空原文，保存为新的 DOCX。',
+                    '提取附件第三章的全部非空内容并保存为 DOCX。',
+                    '提取全部非空内容并保存为 PDF 文件。',
+                    '提取附件里的全部非空内容并保存为 Excel 文件。',
+                    '提取非空内容，并按项目资料库核对，保存为新的 DOCX。',
+                    '提取设备编号这一非空字段并保存为新的 DOCX。',
+                    '想了解如何提取非空内容并导出为新的 DOCX。']:
+        assert full_extraction_plan({}, {**current, 'content': request}, current['attachments']) is None
+    assert full_extraction_plan({'rag_decision': {'requested_mode': 'required'}},
+                                current, current['attachments']) is None
+
+
+
+def test_extraction_exports_verified_text_with_only_known_visual_gaps(tmp_path, monkeypatch):
+    svc, root, _, _, _ = closure_fixture(tmp_path, monkeypatch)
+    from agent.execution.document_goal_runtime import export_complete_extraction
+
+    current = {'id': 'message', 'content': '提取这个模板的全部非空内容并保存为新的 DOCX 文档。',
+               'attachments': [{'id': 'source', 'name': 'fixture.docx', 'sha256': 'hash'}]}
+    monkeypatch.setattr(svc.repository, 'get_run_conversation', lambda _: {'messages': [current]})
+    store = SourceInventory(svc.repository)
+    fields = [{'id': f'p-{i}', 'text': text, 'original_content': text}
+              for i, text in enumerate(['标题', '第一项', '第二项', '未请求项'])]
+    visual = {'id': 'word/document.xml#object-0', 'text': '', 'field_type': 'unreadable',
+              'extraction_status': 'requires_ocr_or_visual_review', 'position': {'xml_position': 'object-0'}}
+    store.register(root['id'], 'source', 'template', 'hash', [*fields, visual], complete=True)
+    goals = svc.task_plans.goals.get(root['id'])
+    scope = {**goals['source_scopes'][0], 'scope': 'full', 'target_ids': []}
+    scope.pop('selector', None)
+    goals = {**goals, 'source_scopes': [scope], 'deliverables': [{'format': 'docx', 'path': None}]}
+    exported = []
+    async def publish(run, attempt, text, **kwargs):
+        exported.append(text)
+        return text + '\n\n[打开文件](<提取.docx>)'
+    svc._application_document_export = publish
+    run = {'id': 'run', 'user_message_id': 'message'}
+    assert asyncio.run(export_complete_extraction(svc, run, 'attempt', root['id'], goals, current)) is None
+    assert not exported
+    store.record_read(root['id'], 'source', 'hash', fields[-1:])
+    reply = asyncio.run(export_complete_extraction(svc, run, 'attempt', root['id'], goals, current))
+    assert '1 个图形' in reply and '[打开文件]' in reply
+    assert exported[0].splitlines()[:4] == ['标题', '第一项', '第二项', '未请求项']
+    assert 'word/document.xml#object-0' in exported[0]

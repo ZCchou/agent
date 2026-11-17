@@ -34,7 +34,8 @@ class SourceInventory:
         with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE');TaskPlans._active(db,task_id,fence)
             request = db.execute('SELECT request_json FROM task_plan_revisions WHERE task_id=? ORDER BY revision LIMIT 1', (task_id,)).fetchone()
-            authorized = {item['id'] for item in json.loads(request[0]).get('attachments', [])} if request else set()
+            from agent.context_engine.attachment_references import task_attachment_ids
+            authorized = task_attachment_ids(db, task_id, json.loads(request[0])) if request else set()
             if source_id in authorized:
                 canonical = source_id
             else:
@@ -141,6 +142,19 @@ class SourceInventory:
         result={'ready':completed==len(ids) and not missing_positions,'completed':completed,'remaining':len(ids)-completed+missing_positions}
         if missing_positions:result['reason']='selected_positions_missing'
         return result
+
+    def visual_gaps(self, task_id, scope):
+        resolved = self.resolve(task_id, scope)
+        if not resolved.get('resolved'):
+            return []
+        selected = set(resolved['target_ids'])
+        with self.repository._connect() as db:
+            rows = db.execute('''SELECT target_id,content_json FROM task_inventory_positions
+                WHERE task_id=? AND source_id=? AND source_hash=? ORDER BY ordinal''',
+                (task_id, resolved['canonical_source_id'], resolved['source_hash'])).fetchall()
+        return [identity for identity, raw in rows if identity in selected
+                and (field := json.loads(raw)).get('field_type') == 'unreadable'
+                and field.get('extraction_status') == 'requires_ocr_or_visual_review']
 
     def material(self, task_id, scope):
         resolved=self.resolve(task_id,scope)

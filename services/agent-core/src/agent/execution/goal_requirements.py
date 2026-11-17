@@ -121,7 +121,8 @@ class GoalRequirements:
         if request is None:
             raise CoreDataError('task_goal_invalid', '任务原始要求尚未保存。')
         original = json.loads(request[0])
-        allowed = {item['id'] for item in original.get('attachments', [])}
+        from agent.context_engine.attachment_references import task_attachment_ids
+        allowed = task_attachment_ids(connection, task_id, original)
         allowed.update(row[0] for row in connection.execute('SELECT source_id FROM task_sources WHERE task_id=?', (task_id,)))
         allowed.update(row[0] for row in connection.execute('SELECT alias FROM task_source_aliases WHERE task_id=?', (task_id,)))
         if any(scope['source_id'] not in allowed for scope in value['source_scopes']):

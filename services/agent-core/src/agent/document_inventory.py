@@ -34,21 +34,27 @@ def inventory(payload):
     from agent.document_parser.office import _xml
     document = load_docx(payload)
     fields, sections = document_structure(document, targets)
+    body = document.element.body
+    positions = {element: index for index, element in enumerate(body.iter())}
+
     represented = set()
-    for _, target, kind in targets(document):
+    order = {}
+    for identity, target, kind in targets(document):
         if kind == 'paragraph':
             represented.add(target._p)
+            element = target._p
         else:
             represented.update(paragraph._p for paragraph in target.paragraphs)
-    for index, paragraph in enumerate(document.element.iter(W + 'p')):
+            element = target._tc
+        order[identity] = positions[element]
+    for index, paragraph in enumerate(body.iter(W + 'p')):
         if paragraph not in represented:
             text = _paragraph_text(paragraph)
             if text.strip():
-                fields.append(_field('word/document.xml', f'p-{index}', text, field_type(text)))
-    positions = {element: index for index, element in enumerate(document.element.body)}
-    order = {f'p-{index}': positions[paragraph._p] for index, paragraph in enumerate(document.paragraphs)}
-    order.update({f't-{index}': positions[table._tbl] for index, table in enumerate(document.tables)})
-    fields.sort(key=lambda item: order.get(item['id'].split('-r', 1)[0], len(order)))
+                field = _field('word/document.xml', f'p-{index}', text, field_type(text))
+                fields.append(field)
+                order[field['id']] = positions[paragraph]
+    fields.sort(key=lambda item: order.get(item['id'], len(positions)))
     for field in fields:
         field['writable'] = field['kind'] in {'paragraph', 'table_cell'}
         field['extraction_status'] = 'text_extracted'

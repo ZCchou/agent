@@ -71,6 +71,7 @@ from agent.providers import (
     create_provider, validate_profile, validate_provider_completion,
 )
 from agent.provider_tool_adapter import PROJECT_LINK_INSTRUCTION, parse_structured_output, structured_messages
+from agent.rag.routing import project_evidence_policy
 from agent.storage import CoreDataError, CoreRepository, _utc_now
 from agent.repositories.execution_repository import ExecutionRepository
 from agent.tool_loop import ToolLoopService
@@ -2578,9 +2579,11 @@ class ChatRunService:
                     await self._emit(run_id, 'run.document_processing', {
                         **observation, 'phase': phase_name,
                     })
-            if (run.get('rag_decision') or {}).get('required'):
+            source_policy = project_evidence_policy(decision, current_user['content'],
+                has_attachments=bool(current_user.get('attachments')))
+            if source_policy == 'required' or decision.get('required'):
                 await run_stage('retrieval', lambda activity:
-                    self.rag_grounding.prepare(run, current_conversation, progress=rag_progress),
+                    self._prepare_requested_project_evidence(run, current_conversation, 'initial_routing', progress=rag_progress),
                     safe_to_retry=True, diagnose=getattr(self.rag.models, 'diagnose', lambda activity: Diagnostic()),
                     recoverable=lambda error: getattr(error, 'code', None) == 'rag_worker_crash')
             await rag_progress("assembling_context")
@@ -2855,12 +2858,24 @@ class ChatRunService:
                                 execution_plan["degraded_capabilities"],
                             ),
                         })
+                    clause_messages = None
+                    if (not current_user.get('attachments') and not application_document
+                            and not decision.get('operation_hint') and not self.skills.requires_rag(current_user['content'])
+                            and run_id in self.rag_grounding.runs):
+                        clause_messages = self.rag_grounding.prepare_exact_clause_answer(run_id)
+                    if clause_messages:
+                        # Supply only current user text and the verified source, retaining system instructions.
+                        generation_messages = [item for item in generation_messages if item['role'] == 'system']
+                        generation_messages.append({'role': 'user', 'content': current_user['content']})
+                        generation_messages.extend(clause_messages)
+                        tools_enabled = False
                     content = await self._generate_with_tools(
                         run, attempt_id, provider, generation_messages, tools_enabled, tool_mode,
                         execution_plan=execution_plan, execution_step=execution_step,
                         attempt_number=attempt["attempt_number"],
                         initial_invocation_round=1 if presearch_message is not None else 0,
-                        allowed_tools=tuple(allowed_tools),
+                        allowed_tools=() if clause_messages else tuple(allowed_tools),
+                        response_only=bool(clause_messages),
                         max_output_tokens=resolve_output_budget(
                             "final_response", model_limit=capabilities.get("max_output_tokens"),
                             context_window=capabilities.get("context_length"),
@@ -2971,6 +2986,13 @@ class ChatRunService:
                 ), "")
                 content = self._safe_ungrounded_fallback(content, current_user_text)
                 await self._emit(run_id, "run.chunk", {"delta": content})
+            if project_evidence_policy(decision, current_user['content'],
+                    has_attachments=bool(current_user.get('attachments'))) == 'mixed':
+                project_id = conversation.get('project_id')
+                if not project_id or not self.rag.project_state(project_id).get('enabled'):
+                    notice = '\n\n资料库核对未完成：当前项目没有启用资料库。'
+                    content += notice
+                    await self._emit(run_id, 'run.chunk', {'delta': notice})
             public_sources = [
                 source
                 for operation in self.repository.list_web_operations(run_id)
@@ -3004,6 +3026,8 @@ class ChatRunService:
                         execution_plan, execution_step, attempt["attempt_number"],
                         force_final=tools_enabled,
                     )
+                    if clause_messages:
+                        run['_verified_exact_answer_hash'] = sha256(content.encode()).hexdigest()
             content = await self._application_document_export(run, attempt_id, content)
             content = await self._finish_task_goal(run, attempt_id, content, provider, execution_plan,
                 execution_step, attempt, generation_messages, tuple(allowed_tools), tool_mode, application_document)
@@ -6061,7 +6085,9 @@ class ChatRunService:
                         call = ToolCall(call.provider_call_id, call.name, {'artifact_id': artifact['id'], 'path': call.arguments['path']})
                     if call.name == "skills.load" and self.skills.requires_rag("$" + call.arguments["name"]) \
                             and run_id not in self.rag_grounding.runs:
-                        raise CoreDataError("rag_library_required", "该技能需要当前项目的资料库证据。")
+                        messages.append({'role': 'tool', 'tool_call_id': call.provider_call_id,
+                            'content': '该技能需要项目资料库证据。请继续处理已授权附件，或说明证据缺口。'})
+                        continue
                     operation, resolution = await self.tool_loop.request(
                         run_id=run_id, attempt_id=attempt_id,
                         sequence=tool_sequence, call=call,
@@ -6178,10 +6204,10 @@ class ChatRunService:
                 invocation_round = max(invocation_round, latest_round)
             provider_round += 1
 
-    async def _application_document_export(self, run, attempt_id, content):
+    async def _application_document_export(self, run, attempt_id, content, *, exact_extraction=False):
         """Explicit document requests can use Host publication with text-only models."""
         run_id = run['id']
-        if (run.get('rag_decision') or {}).get('task_type') != 'document_export':
+        if not exact_extraction and (run.get('rag_decision') or {}).get('task_type') != 'document_export':
             return content
         operations = self.tool_loop.repository.list_for_run(run_id)
         if not run.get('_goal_revise_export') and any(item['tool_name'] == 'document.export' and item['status'] == 'completed' for item in operations):
@@ -6204,6 +6230,8 @@ class ChatRunService:
             templates = hinted  # Explicit historical target choice remains a hint, not a tool restriction.
         filling = not (run.get('rag_decision') or {}).get('template_review') and bool(re.search(r'填写|回填|填好', request)
             or templates and (run.get('rag_decision') or {}).get('task_scope') in {'full', 'section'})
+        if exact_extraction:
+            format, filling = 'docx', False
         if format == 'docx' and filling:
             if len(templates) > 1:
                 decision = self.repository.get_model_run(run_id).get('rag_decision') or {}
@@ -6245,11 +6273,20 @@ class ChatRunService:
         publication = await self._application_document_operation(run, attempt_id, call)
         self.rag_grounding.validate(run_id)
         self.documents.record_publication(run_id, artifact['id'], publication)
+        if exact_extraction:
+            self.documents.verify_publication(run_id, artifact['id'])
         return content + '\n\n[打开文件](<' + output_path + '>)\n\n[打开所在目录](project-dir:.)'
 
     async def _finish_task_goal(self, run, attempt_id, content, provider, plan, step, attempt,
                                 messages, allowed_tools, tool_mode, application_document):
         run_id = run['id']
+        if run.get('_verified_local_extraction'):
+            return content
+        if run.get('_verified_exact_answer_hash'):
+            from hashlib import sha256
+            if run['_verified_exact_answer_hash'] == sha256(content.encode()).hexdigest():
+                self.rag_grounding.validate(run_id)
+                return content
         root = self.execution_monitor.start_task(run_id=run_id)
         business = self.task_plans.get(root['id'])
         conversation = self.repository.get_run_conversation(run_id)
@@ -6372,10 +6409,10 @@ class ChatRunService:
             for artifact in artifacts:
                 self.documents.verify_publication(run_id, artifact['id'])
             if checked.get('evidence_required') and run_id not in self.rag_grounding.runs:
-                run['rag_decision'] = {**run.get('rag_decision', {}), 'required': True, 'reason': 'model_verified'}
-                self.repository.record_rag_decision(run_id, run['rag_decision'])
-                await run_stage('retrieval', lambda activity: self.rag_grounding.prepare(run, conversation))
-                checked = {**checked, 'status': 'needs_work', 'unmet_requirements': ['使用rag.search和rag.read取得并核对项目证据后继续专业回答。']}
+                prepared = await run_stage('retrieval', lambda activity:
+                    self._prepare_requested_project_evidence(run, conversation, 'goal_verification'))
+                if prepared:
+                    checked = {**checked, 'status': 'needs_work', 'unmet_requirements': ['使用rag.search和rag.read取得并核对项目证据后继续专业回答。']}
             if checked['status'] == 'satisfied':
                 return content
             if checked['status'] == 'failed':
@@ -6588,10 +6625,9 @@ class ChatRunService:
     async def _review_targets_tool(self, run, attempt_id, arguments):
         conversation = self.repository.get_run_conversation(run['id'])
         message = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
-        if run['id'] not in self.rag_grounding.runs:
-            deferred = {**run, '_template_review_task': True,
-                        'rag_decision': {**run.get('rag_decision', {}), 'required': True}}
-            await self.rag_grounding.prepare(deferred, conversation)
+        if not await self._prepare_requested_project_evidence(run, conversation, 'review_tool', deferred=True):
+            return json.dumps({'code': 'rag_scope_unavailable',
+                'message': '项目证据审阅不可用。附件内校对可继续使用文档读取工具。'}, ensure_ascii=False)
         result = await self._review_template_planned(run, attempt_id, None, message['content'],
             template_id=arguments['template_id'], target_ids=arguments.get('target_ids'), return_result=True)
         artifact = self.documents.create(run['id'], result['markdown'], arguments.get('format', 'markdown'),
@@ -6889,6 +6925,28 @@ class ChatRunService:
                 available.update(('rag.search', 'rag.read'))
         return available - {'web.search', 'web.open'}
 
+    async def _prepare_requested_project_evidence(self, run, conversation, stage, *, deferred=False, progress=None):
+        current = next(item for item in conversation['messages'] if item['id'] == run['user_message_id'])
+        scope = project_evidence_policy(run.get('rag_decision') or {},
+            current['content'], has_attachments=bool(current.get('attachments')), confirmed=stage == 'goal_verification')
+        project_id = conversation.get('project_id')
+        available = bool(project_id and self.rag.project_state(project_id).get('enabled'))
+        allowed = scope == 'required' or (scope in {'mixed', 'optional'} and available)
+        log_event(self.logger or logging.getLogger(__name__), logging.INFO, 'project_evidence_decision',
+            'Project evidence request evaluated', run_id=run['id'], trigger_stage=stage,
+            evidence_scope=scope, project_evidence_available=available, retrieval_allowed=allowed)
+        if not allowed:
+            return False
+        if run['id'] not in self.rag_grounding.runs:
+            decision = {**(run.get('rag_decision') or {}), 'required': True}
+            candidate = {**run, 'rag_decision': decision,
+                '_defer_retrieval': deferred or run.get('_defer_retrieval')}
+            if progress is None:
+                await self.rag_grounding.prepare(candidate, conversation)
+            else:
+                await self.rag_grounding.prepare(candidate, conversation, progress=progress)
+        return True
+
     async def _rag_tool(self, run, call, max_characters):
         if call.name == 'rag.search' and self.user_input_sources._manifest(run['id']).is_file():
             root = self.execution_monitor.start_task(run_id=run['id'])
@@ -6897,13 +6955,10 @@ class ChatRunService:
                                               (root['id'],)).fetchone()
             if not coverage or coverage['outcome'] != 'done':
                 raise CoreDataError('user_input_read_required', '请先通过 tools.read_result 完整读取 user-input 原始要求，再选择项目证据检索词。')
-        if run['id'] not in self.rag_grounding.runs:
-            conversation = self.repository.get_run_conversation(run['id'])
-            run['rag_decision'] = {**run.get('rag_decision', {}), 'required': True, 'reason': 'model_selected'}
-            self.repository.record_rag_decision(run['id'], run['rag_decision'])
-            deferred = {**run, '_defer_retrieval': True,
-                        'rag_decision': {**run.get('rag_decision', {}), 'required': True}}
-            await self.rag_grounding.prepare(deferred, conversation)
+        conversation = self.repository.get_run_conversation(run['id'])
+        if not await self._prepare_requested_project_evidence(run, conversation, 'retrieval_tool', deferred=True):
+            return json.dumps({'evidence': [], 'code': 'rag_scope_unavailable',
+                'message': '当前任务范围或项目配置不支持本次资料库检索。请继续处理已授权来源。'}, ensure_ascii=False)
         try:
             return await self.rag_grounding.execute(run['id'], call.name, call.arguments, max_characters)
         except CoreDataError as error:
@@ -7173,7 +7228,7 @@ class ChatRunService:
         from agent.execution.document_goal_runtime import finalize
         return await finalize(self, *args)
 
-    def _document_tool(self, run_id, call, max_characters=16000):
+    def _document_tool(self, run_id, call, max_characters=16000, *, complete_inventory=False):
         arguments = call.arguments
         self.rag_grounding.validate(run_id)
         if call.name == 'document.inspect_template':
@@ -7197,7 +7252,8 @@ class ChatRunService:
             inventory = SourceInventory(self.repository)
             inventory.register(root['id'], arguments.get('attachment_id', template_id), template_id, artifact['sha256'],
                 inventory_fields, complete=True, fence=(root['revision'], root['attempt']))
-            inventory.record_read(root['id'], arguments.get('attachment_id', template_id), artifact['sha256'], result['fields'], fence=(root['revision'], root['attempt']))
+            inventory.record_read(root['id'], arguments.get('attachment_id', template_id), artifact['sha256'],
+                inventory_fields if complete_inventory else result['fields'], fence=(root['revision'], root['attempt']))
         else:
             self._validate_document_source(run_id, arguments['template_id'])
             result = self.documents.fill(run_id, arguments['template_id'], arguments['fields'],

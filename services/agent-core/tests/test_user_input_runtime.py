@@ -340,6 +340,8 @@ def test_forced_evidence_long_input_reads_original_before_model_selected_search(
 def test_native_evidence_search_requires_complete_original_input_coverage(tmp_path):
     core, run = source_run(tmp_path, 'Original requirements ' * 500)
     service = runtime(core)
+    service.logger = None
+    run['rag_decision'] = {'requested_mode': 'required'}
     service.user_input_sources.save(run['id'])
     queries = []
     async def execute(_run, _name, arguments, _limit):

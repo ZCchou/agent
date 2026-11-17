@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from agent.storage import CoreDataError
 from agent.context_engine.policy import estimate_tokens
 from agent.rag.followup import followup_context
-from agent.rag.retrieval import explicit_subject, matches_subject, reference_material
+from agent.rag.retrieval import explicit_subject, matches_subject, reference_material, explicit_clause_numbers
 from agent.rag.support import assess_support, review_issues
 
 
@@ -129,6 +129,11 @@ class RagGrounding:
             result = await self.service.search(project_id, query, run_id=run["id"],
                 **({"retrieval_scope": decision['retrieval_scope']} if decision.get('retrieval_scope') else {}),
                 **({"progress": progress} if progress else {}))
+        if explicit_clause_numbers(query) and prior_ids:
+            # The current request's exact clause applies even when prior evidence is available.
+            result = await self.service.search(project_id, query, run_id=run["id"],
+                **({"retrieval_scope": decision['retrieval_scope']} if decision.get('retrieval_scope') else {}))
+            aliases = {}
         if not result["evidence"] and not deferred:
             raise CoreDataError("rag_evidence_missing", "当前资料库未检索到可用于回答的证据。")
         self.runs[run["id"]] = {"project_id": project_id, "generation": result["generation"],
@@ -159,6 +164,35 @@ class RagGrounding:
         if state:
             self.service.assert_generation(state["project_id"], state["generation"])
 
+    def prepare_exact_clause_answer(self, run_id):
+        state = self.runs.get(run_id)
+        if not state or not explicit_clause_numbers(state.get('query', '')) or not state['admitted']:
+            return None
+        self.validate(run_id)
+        selected, verified_text = [], {}
+        for key, text in state['admitted'].items():
+            item = state['evidence'][key]
+            if item.get('locator', {}).get('context_required'):
+                result = self.service.read_evidence(state['project_id'], key, offset=0, length=7000)
+                parent = result.get('parent_context')
+                if not parent or parent.get('has_more'):
+                    return None
+                original = parent.get('text')
+                if not isinstance(original, str) or hashlib.sha256(original.encode('utf-8')).hexdigest() != parent.get('text_hash'):
+                    raise CoreDataError('rag_context_integrity_invalid', '父条款上下文校验失败。')
+                if original not in text:
+                    text += '\n\n' + original
+            verified_text[key] = text
+            selected.append(evidence_for_model(evidence_with_quotes({**item, 'text': text})))
+        content = json.dumps({'trust': 'external_untrusted', 'verified_clause_evidence': selected}, ensure_ascii=False)
+        if estimate_tokens(content) > state['budget']:
+            return None
+        self.validate(run_id)
+        state['admitted'].update(verified_text)
+        state['quote_options'].update({item['id']: {quote['quote_id']: quote['text'] for quote in item['quote_options']}
+                                       for item in selected})
+        return [{'role': 'user', 'content': content}]
+
     async def execute(self, run_id: str, name: str, arguments: dict, max_characters: int) -> str:
         state = self.runs[run_id]
         self.validate(run_id)
@@ -166,7 +200,9 @@ class RagGrounding:
         if remaining <= 0:
             raise CoreDataError("rag_context_too_small", "本轮证据预算已用完。")
         if name == "rag.search":
-            result = await self.service.search(state["project_id"], arguments["query"], run_id=run_id,
+            original_query = state.get('query', '')
+            query = original_query if explicit_clause_numbers(original_query) else arguments['query']
+            result = await self.service.search(state["project_id"], query, run_id=run_id,
                                                library_ids=arguments.get("library_ids"),
                                                version_ids=arguments.get("version_ids"), limit=arguments.get("limit", 8),
                                                **({'retrieval_scope': state['retrieval_scope']} if state.get('retrieval_scope') else {}))

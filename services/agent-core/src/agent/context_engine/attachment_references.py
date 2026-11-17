@@ -1,4 +1,5 @@
 """Explicit attachment selection. Text mentions never grant send permission."""
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +42,33 @@ def validate_saved_selection(plan: Any, intent: dict[str, Any]) -> list[dict[str
         raise CoreDataError("attachment_reference_selection_changed",
                             "The saved attachment selection failed integrity validation. Select it again.")
     return selection
+
+
+def task_attachment_ids(connection, task_id, request):
+    """Resolve task-local identities for references already sealed against this run."""
+    allowed = {item['id'] for item in request.get('attachments', [])}
+    explicit = {item['attachment_id']: item for item in validate_references(request.get('attachment_references', []))}
+    if not explicit:
+        return allowed
+    row = connection.execute(
+        """SELECT p.requirements_hash, p.resolution_hash, p.resolved_intent_json, r.user_message_id
+           FROM execution_wait_tasks t JOIN model_runs r ON r.id=t.run_id
+           JOIN execution_plans p ON p.id=r.execution_plan_id AND p.run_id=r.id
+           WHERE t.id=?""", (task_id,),
+    ).fetchone()
+    if row is None:
+        return allowed
+    plan = dict(row)
+    selection = validate_saved_selection(plan, json.loads(plan['resolved_intent_json']))
+    materialized = {row[0] for row in connection.execute(
+        'SELECT id FROM message_attachments WHERE message_id=?', (plan['user_message_id'],))}
+    for item in selection:
+        reference = explicit.get(item.get('source_attachment_id'))
+        if reference and item['current_attachment_id'] in materialized and all(
+            item.get(key) == reference[key] for key in ('source_start', 'source_end') if key in reference
+        ):
+            allowed.add(item['current_attachment_id'])
+    return allowed
 
 
 def validate_references(references: Any) -> list[dict[str, Any]]:

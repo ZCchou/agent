@@ -1373,14 +1373,22 @@ class CoreRepository:
             )), None)
             # Recheck the original as well as the extracted/normalized artifact.
             ContextEngineService._read_attachment(attachment, text=False)
+            document_source = any(item['kind'] == 'document.source' for item in attachment['artifacts'])
+            has_range = 'source_start' in reference or 'source_end' in reference
+            if document_source and artifact is None:
+                if has_range:
+                    raise CoreDataError("attachment_reference_range_invalid",
+                                        "Extract document text before selecting a text range.")
+                # Whole-document references are read lazily from the verified binary source.
+                result.append(attachment)
+                continue
             content = ContextEngineService._read_attachment(attachment,
                 text=attachment["kind"] == "text", model_variant=attachment["kind"] == "image", artifact=artifact)
             if attachment["kind"] == "text":
                 _, start, end = text_range(attachment, content)
-                document_source = any(item['kind'] == 'document.source' for item in attachment['artifacts'])
-                if not document_source or 'source_start' in reference or 'source_end' in reference:
+                if not document_source or has_range:
                     attachment.update(source_start=start, source_end=end)
-            elif "source_start" in reference or "source_end" in reference:
+            elif has_range:
                 raise CoreDataError("attachment_reference_range_invalid", "Images do not have text ranges.")
             result.append(attachment)
         return result

@@ -504,8 +504,10 @@ def test_native_tool_protocol_gets_one_bounded_correction(
         assert run["status"] == "completed"
         assert run["assistant_message"]["content"] == "Recovered after one correction."
         assert len(captured_messages) == 2
+        from agent.message_assembly import validate_system_message_prefix
+        validate_system_message_prefix(captured_messages[1])
         assert any(
-            message.get("role") == "system" and "previous tool call was rejected" in message["content"]
+            message.get("role") == "user" and "previous tool call was rejected" in message["content"]
             for message in captured_messages[1]
         )
         assert service.list_tool_operations(run["id"]) == []

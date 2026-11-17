@@ -153,7 +153,8 @@ class TaskPlans:
                         for scope in previous.get('source_scopes', []))
                     or any(output not in outputs for output in previous.get('deliverables', []))):
                 raise CoreDataError('task_plan_invalid', '原任务要求的资料范围与交付物需要保留。')
-            allowed = {item['id'] for item in json.loads(current['request_json']).get('attachments', [])}
+            from agent.context_engine.attachment_references import task_attachment_ids
+            allowed = task_attachment_ids(connection, task_id, json.loads(current['request_json']))
             allowed.update(row[0] for row in connection.execute('SELECT source_id FROM task_sources WHERE task_id=?', (task_id,)))
             allowed.update(row[0] for row in connection.execute('SELECT alias FROM task_source_aliases WHERE task_id=?', (task_id,)))
             if any(scope['source_id'] not in allowed for scope in scopes):
@@ -348,7 +349,10 @@ class TaskPlans:
                         inventory_total += len(ids)
                         continue
                     required.update((artifact, key) for key in ids)
-                missing += len({inventory.canonical(task_id,item['id']) for item in plan['request'].get('attachments', [])} - {inventory.canonical(task_id,scope['source_id']) for scope in scopes})
+                from agent.context_engine.attachment_references import task_attachment_ids
+                authorized_ids = task_attachment_ids(connection, task_id, plan['request'])
+                missing += len({inventory.canonical(task_id, identity, connection) for identity in authorized_ids}
+                               - {inventory.canonical(task_id, scope['source_id'], connection) for scope in scopes})
             else:
                 required.update(available)
                 missing += int(require_declared)
