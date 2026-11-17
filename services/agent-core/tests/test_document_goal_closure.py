@@ -271,3 +271,121 @@ def test_extraction_exports_verified_text_with_only_known_visual_gaps(tmp_path, 
     assert '1 个图形' in reply and '[打开文件]' in reply
     assert exported[0].splitlines()[:4] == ['标题', '第一项', '第二项', '未请求项']
     assert 'word/document.xml#object-0' in exported[0]
+
+
+
+def test_explicit_summary_keeps_read_bounds_without_extraction_answer_contract():
+    from agent.execution.document_goal_runtime import requested_document_answer_kind
+
+    request = '请只读取 DOCX 的前三个非空文字位置，用一句话概括标题和文档类型。不要导出。'
+    assert requested_document_answer_kind(request, 'extract') == 'synthesis'
+    assert requested_document_answer_kind(request, 'review') == 'synthesis'
+    from agent.execution.document_goal_runtime import normalize_document_answer_draft
+    draft = example_goal('source')
+    draft.update(answer_kind='review', evidence_required=True)
+    scope = draft['source_scopes'][0]
+    scope.update(operation='review', scope='selected', requested_count=3,
+                 selector={'kind': 'prefix_nonempty', 'count': 3})
+    normalize_document_answer_draft(request, draft)
+    assert draft['answer_kind'] == 'synthesis'
+    assert draft['source_scopes'] == [{**scope, 'operation': 'read'}]
+    assert not draft['evidence_required']
+    assert requested_document_answer_kind('逐字提取三个字段，不要总结。', 'extract') == 'extract'
+    assert requested_document_answer_kind('请审阅并总结缺项。', 'review') == 'review'
+    assert requested_document_answer_kind('提取并导出表格，另附摘要。', 'extract') == 'extract'
+
+
+
+def test_single_literal_fill_requires_explicit_target_value_and_new_docx():
+    from agent.execution.document_goal_runtime import explicit_literal_fill
+
+    request = ('只将所引用模板的第1张表第7行第2列的唯一空白单元格（位置 ID：t-0-r6-c1）'
+               '填为“QA-模拟填充值-001”，并另存为“QA-单元格模拟填写.docx”。'
+               '其余位置保留，原件不修改。不查资料库。')
+    current = {'content': request, 'attachments': [{'name': 'fixture.docx', 'id': 'source'}]}
+    assert explicit_literal_fill({}, current) == {
+        'target_id': 't-0-r6-c1', 'text': 'QA-模拟填充值-001', 'path': 'QA-单元格模拟填写.docx'}
+    for changed in [request.replace('第7行', '第8行'), request.replace('只将', '不要将'), request.replace('QA-单元格', '../QA-单元格'),
+                    request.replace('QA-单元格模拟填写.docx', 'fixture.docx'),
+                    request.replace('不查资料库', '并按照 DO-160F 第8.2.1.3条核对'),
+                    request.replace('QA-模拟填充值-001', '一份真实结论') + '还需填写 t-0-r7-c1']:
+        assert explicit_literal_fill({}, {**current, 'content': changed}) is None
+    assert explicit_literal_fill({'rag_decision': {'requested_mode': 'required'}}, current) is None
+
+
+
+def test_verified_local_summary_does_not_reopen_proven_scope():
+    from hashlib import sha256
+    from agent.runtime import ChatRunService
+
+    text = '这是一个适航试验大纲模板。'
+    run = {'id': 'run', '_verified_local_summary_hash': sha256(text.encode()).hexdigest()}
+    actual = asyncio.run(ChatRunService._finish_task_goal(SimpleNamespace(), run, 'attempt',
+        text, None, None, None, None, [], (), 'native', False))
+    assert actual == text
+
+
+def test_user_supplied_local_check_is_synthesis_when_asked_to_decide():
+    from agent.execution.document_goal_runtime import normalize_document_answer_draft
+
+    request = ('只根据附件，检查封面第一段（p-0）是否还存在占位符。'
+               '判断规则：连续两个以上字母 X 视为占位符。请说明有或没有。'
+               '不要查资料库，不要修改或导出文件。')
+    draft = example_goal('source')
+    draft.update(answer_kind='extract', evidence_required=True)
+    draft['source_scopes'][0].update(scope='selected', target_ids=['p-0'])
+    normalize_document_answer_draft(request, draft)
+    assert draft['answer_kind'] == 'synthesis'
+    assert not draft['evidence_required']
+    assert draft['source_scopes'][0]['operation'] == 'read'
+    assert draft['source_scopes'][0]['target_ids'] == ['p-0']
+
+    draft.update(answer_kind='review', evidence_required=True)
+    draft['source_scopes'][0]['operation'] = 'review'
+    normalize_document_answer_draft(request, draft, rag_decision={'requested_mode': 'required'})
+    assert draft['answer_kind'] == 'review'
+    assert draft['evidence_required']
+
+
+def test_application_review_dispatch_preserves_explicit_authorized_targets():
+    from agent.execution.document_goal_runtime import explicit_review_scope
+
+    positions = ['p-16', 't-2-r0-c3']
+    scope = {'source_id': 'attachment', 'operation': 'review', 'scope': 'selected', 'target_ids': positions}
+    goals = {'source_scopes': [scope], 'deliverables': []}
+    request = '请只审查 p-16 和 t-2-r0-c3'
+    assert explicit_review_scope(request, goals, 'attachment') == scope
+    assert explicit_review_scope('请只审查 p-16', goals, 'attachment') is None
+    assert explicit_review_scope(request, goals, 'different') is None
+    assert explicit_review_scope(request, {**goals, 'deliverables': [{'format': 'docx'}]}, 'attachment') is None
+    assert explicit_review_scope(request, {**goals, 'source_scopes': [{**scope, 'operation': 'read'}]}, 'attachment') is None
+
+
+def test_named_evidence_review_plans_only_the_explicit_ids_before_model_call():
+    from agent.execution.document_goal_runtime import plan_named_evidence_review
+
+    request = ('请对照项目资料库中 DO-160F 第8.2.1.3条，只审查附件振动段落（位置 ID：p-649）。'
+               '仅在对话中回答，不要修改或导出文件。')
+    attachment = {'id': 'source', 'name': 'template.docx'}
+    current = {'content': request, 'attachments': [attachment]}
+    run = {'rag_decision': {'requested_mode': 'required'}}
+    draft = plan_named_evidence_review(run, current, [attachment])
+    assert draft['answer_kind'] == 'review' and draft['evidence_required']
+    assert normalize_goal(draft, [attachment])['source_scopes'][0]['target_ids'] == ['p-649']
+    assert draft['first_action']['limit'] == 1
+    assert plan_named_evidence_review(run, {**current, 'content': request.replace('只审查', '不要审查')}, [attachment]) is None
+    assert plan_named_evidence_review(run, {**current, 'content': request + '另存为审阅报告。'}, [attachment]) is None
+    assert plan_named_evidence_review({}, {**current, 'content': '只审查附件 p-649，不查资料库。'}, [attachment]) is None
+
+
+def test_completed_named_review_rechecks_rag_generation_without_model_replanning():
+    from hashlib import sha256
+    from agent.runtime import ChatRunService
+
+    text = '选定位置 p-649 已复核。'
+    run = {'id': 'selected', '_verified_named_review_hash': sha256(text.encode()).hexdigest()}
+    checked = []
+    service = SimpleNamespace(rag_grounding=SimpleNamespace(validate=checked.append))
+    result = asyncio.run(ChatRunService._finish_task_goal(service, run, 'attempt',
+        text, None, None, None, None, [], (), 'native', False))
+    assert result == text and checked == ['selected']

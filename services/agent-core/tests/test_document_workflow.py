@@ -291,3 +291,37 @@ def test_template_dedup_preserves_authorized_attachment_identity(tmp_path):
     legacy = docs.register_template(run['id'], payload, 'same.docx')
     assert legacy['id'] not in {first['id'], second['id']}
     assert docs.register_template(run['id'], payload, 'same.docx')['id'] == legacy['id']
+
+
+def test_single_cell_fill_preserves_all_other_docx_parts(tmp_path):
+    import zipfile
+
+    _, run, service = workflow(tmp_path)
+    payload = io.BytesIO(template_bytes())
+    with zipfile.ZipFile(payload, 'a') as package:
+        package.writestr('customXml/unreferenced-test.xml', b'<custom>keep this</custom>')
+    source = service.register_template(run['id'], payload.getvalue(), 'template.docx')
+    filled = service.fill(run['id'], source['id'], [{'target_id': 't-0-r0-c1', 'text': 'QA Text'}],
+                          preserve_package=True)
+    output = service.path_for(run['id'], filled['id'])
+    with zipfile.ZipFile(payload) as original, zipfile.ZipFile(output) as copy:
+        assert copy.namelist() == original.namelist()
+        assert [name for name in copy.namelist() if copy.read(name) != original.read(name)] == ['word/document.xml']
+    assert Document(output).tables[0].cell(0, 1).text == 'QA Text'
+
+
+def test_first_nonempty_page_skips_blank_positions_and_keeps_raw_continuation(tmp_path):
+    _, run, service = workflow(tmp_path)
+    doc = Document()
+    for text in (' ', 'Title', '', 'Subtitle', '', 'Other'):
+        doc.add_paragraph(text)
+    payload = io.BytesIO()
+    doc.save(payload)
+    source = service.register_template(run['id'], payload.getvalue(), 'template.docx')
+    read = service.inspect(run['id'], source['id'], limit=2, nonempty_only=True)
+    assert [field['id'] for field in read['fields']] == ['p-1', 'p-3']
+    assert read['total'] == 6
+    assert read['next_offset'] == 4
+    selected = service.inspect(run['id'], source['id'], limit=1, selected_ids={'p-5'})
+    assert [field['id'] for field in selected['fields']] == ['p-5']
+    assert selected['next_offset'] is None

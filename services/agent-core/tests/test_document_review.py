@@ -793,3 +793,26 @@ def test_bad_completed_outputs_stay_counted_when_transport_recovery_renews_attem
             (root['id'],))]
     assert len(failures) == 2
     assert all(item['output_character_count'] == 42 for item in failures)
+
+
+def test_selected_review_report_labels_its_scope():
+    from agent.document_review import _markdown
+
+    report = {'coverage_scope': 'selected_targets', 'targets': [],
+              'coverage': {'total': 1, 'reviewed': 1, 'pending': 0}}
+    body = _markdown(report)
+    assert body.startswith('# 选定位置审阅')
+    assert '选定位置共 1 项' in body
+
+
+def test_exact_clause_comparison_renders_verified_page_without_adding_support():
+    from agent.document_review import comparison_markdown
+
+    source = {'id': 'rag-1', 'title': 'DO-160F', 'revision': 'F', 'clause_number': '8.2.1.3',
+              'locator': {'page': 46}, 'text': '8.2.1.3 Procedures\nUse a qualified laboratory and verified equipment.'}
+    body = comparison_markdown('比对 DO-160F 第8.2.1.3条', [source], set())
+    assert '已核验的对照引文' in body and '物理页 46' in body and 'rag-evidence:rag-1' in body
+    assert '> Use a qualified laboratory and verified equipment' in body
+    assert comparison_markdown('比对 DO-160F 第8.2.1.3条', [source], {'rag-1'}) == ''
+    assert comparison_markdown('比对 DO-160F 第8.2.1.4条', [source], set()) == ''
+    assert comparison_markdown('比对 DO-160F 第8.2.1.3条', [{**source, 'locator': {}}], set()) == ''

@@ -5288,6 +5288,11 @@ class ChatRunService:
                 messages.append({'role': 'user', 'content': '本任务已经确认的补充信息\n' + json.dumps(answers, ensure_ascii=False)})
         current = next(item for item in self.repository.get_run_conversation(run_id)['messages'] if item['id'] == run['user_message_id'])
         external_input = self.user_input_sources._manifest(run_id).is_file()
+        if not response_only and not external_input and 'document.export' in allowed_tools and tools_enabled:
+            from agent.execution.document_goal_runtime import publish_explicit_literal_fill
+            literal_output = await publish_explicit_literal_fill(self, run, attempt_id, current)
+            if literal_output is not None:
+                return literal_output
         if (run['provider_profile_id'].startswith('managed:') and not response_only and not external_input
                 and execution_plan is not None and execution_step is not None
                 and any(a['name'].lower().endswith('.docx') for a in current.get('attachments', []))):
@@ -5298,7 +5303,13 @@ class ChatRunService:
             with self.repository._connect() as connection:
                 planned_goal = connection.execute('SELECT payload_json FROM task_goal_execution WHERE task_id=?', (root['id'],)).fetchone()
             if planned_goal:
-                result_id = json.loads(planned_goal[0]).get('_first_result_id')
+                draft = json.loads(planned_goal[0])
+                result_id = draft.get('_first_result_id')
+                if tools_enabled and 'document.review_targets' in allowed_tools:
+                    from agent.execution.document_goal_runtime import dispatch_explicit_review
+                    reviewed = await dispatch_explicit_review(self, run, attempt_id, current, draft, budget_attempt_ids)
+                    if reviewed is not None:
+                        return reviewed
                 if result_id:
                     self._validate_saved_result_source(run_id, result_id)
                     metadata = self.result_store.metadata(run_id, result_id)
@@ -6280,11 +6291,16 @@ class ChatRunService:
     async def _finish_task_goal(self, run, attempt_id, content, provider, plan, step, attempt,
                                 messages, allowed_tools, tool_mode, application_document):
         run_id = run['id']
-        if run.get('_verified_local_extraction'):
+        if run.get('_verified_local_extraction') or run.get('_verified_literal_fill'):
             return content
-        if run.get('_verified_exact_answer_hash'):
+        if run.get('_verified_local_summary_hash'):
             from hashlib import sha256
-            if run['_verified_exact_answer_hash'] == sha256(content.encode()).hexdigest():
+            if run['_verified_local_summary_hash'] == sha256(content.encode()).hexdigest():
+                return content
+        grounded_receipt = run.get('_verified_named_review_hash') or run.get('_verified_exact_answer_hash')
+        if grounded_receipt:
+            from hashlib import sha256
+            if grounded_receipt == sha256(content.encode()).hexdigest():
                 self.rag_grounding.validate(run_id)
                 return content
         root = self.execution_monitor.start_task(run_id=run_id)
@@ -6630,6 +6646,14 @@ class ChatRunService:
                 'message': '项目证据审阅不可用。附件内校对可继续使用文档读取工具。'}, ensure_ascii=False)
         result = await self._review_template_planned(run, attempt_id, None, message['content'],
             template_id=arguments['template_id'], target_ids=arguments.get('target_ids'), return_result=True)
+        from agent.document_review import comparison_markdown
+
+        state = self.rag_grounding.runs[run['id']]
+        self.rag_grounding.validate(run['id'])
+        cited_ids = {item['id'] for target in result['report']['targets'] for item in target['evidence']}
+        comparison = comparison_markdown(message['content'],
+            (state['evidence'][key] for key in state['admitted']), cited_ids)
+        result['markdown'] += comparison
         artifact = self.documents.create(run['id'], result['markdown'], arguments.get('format', 'markdown'),
                                          max_characters=20 * 1024 * 1024)
         self.documents.record_review(run['id'], artifact['id'], result['report'])
@@ -7228,7 +7252,7 @@ class ChatRunService:
         from agent.execution.document_goal_runtime import finalize
         return await finalize(self, *args)
 
-    def _document_tool(self, run_id, call, max_characters=16000, *, complete_inventory=False):
+    def _document_tool(self, run_id, call, max_characters=16000, *, complete_inventory=False, nonempty_only=False, selected_ids=None):
         arguments = call.arguments
         self.rag_grounding.validate(run_id)
         if call.name == 'document.inspect_template':
@@ -7243,7 +7267,9 @@ class ChatRunService:
                     raise CoreDataError('document_template_forbidden', '请先将模板附件授权给本轮消息。')
                 _, original = self.document_attachments._original(attachment)
                 template_id = self.documents.register_template(run_id, original.read_bytes(), attachment['name'], source_id=attachment['id'])['template_id']
-            result = self.documents.inspect(run_id, template_id, arguments.get('offset', 0), arguments.get('limit', 100), max_characters)
+            result = self.documents.inspect(run_id, template_id, arguments.get('offset', 0),
+                                            arguments.get('limit', 100), max_characters, nonempty_only=nonempty_only,
+                                            selected_ids=selected_ids)
             from agent.document_inventory import inventory
             artifact = self.documents.get(run_id, template_id)
             inventory_fields = inventory(self.documents.path_for(run_id, template_id).read_bytes())['fields']

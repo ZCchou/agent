@@ -276,10 +276,40 @@ def _parent_checkpoint(workflow, activity, parent, key, identity, fields):
         return None
 
 
+def comparison_markdown(request, admitted_sources, cited_ids):
+    """Display retrieved requested clauses as comparison material, separate from support."""
+    from agent.rag.retrieval import explicit_clause_numbers
+
+    requested = set(explicit_clause_numbers(request))
+    shown = set()
+    lines = []
+    for source in admitted_sources:
+        clause = source.get('clause_number') or ''
+        source_id = source.get('id', '')
+        locator = source.get('locator')
+        if (clause.upper() not in requested or clause.upper() in shown or source_id in cited_ids
+                or not re.fullmatch(r'[A-Za-z0-9_-]+', source_id) or not isinstance(locator, dict)
+                or type(locator.get('page')) is not int or locator['page'] < 1):
+            continue
+        excerpts = [line.strip() for line in source['text'].splitlines() if line.strip()]
+        if not excerpts:
+            continue
+        # Favor a substantive line over the clause number or heading alone.
+        excerpt = next((line for line in excerpts if len(line) >= 24 and not line.startswith(clause)),
+                       excerpts[0])[:180]
+        lines.extend(['', f'[{plain_markdown(source_label(source))}](rag-evidence:{source_id})',
+                      '', '> ' + plain_markdown(excerpt)])
+        shown.add(clause.upper())
+    return '\n\n## 已核验的对照引文\n' + '\n'.join(lines) if lines else ''
+
+
 def _markdown(report):
     coverage = report['coverage']
-    lines = ['# 全文非空内容审阅', '', '适航资料分析草案，待人工复核。', '',
-             f"非空位置共 {coverage['total']} 项，已审阅 {coverage['reviewed']} 项，待处理 {coverage['pending']} 项。"]
+    selected = report['coverage_scope'] == 'selected_targets'
+    title = '选定位置审阅' if selected else '全文非空内容审阅'
+    positions = '选定位置' if selected else '非空位置'
+    lines = ['# ' + title, '', '适航资料分析草案，待人工复核。', '',
+             f"{positions}共 {coverage['total']} 项，已审阅 {coverage['reviewed']} 项，待处理 {coverage['pending']} 项。"]
     for target in report['targets']:
         title = ' / '.join(target['chapter_path']) or '文档正文'
         lines.extend(['', '## ' + plain_markdown(title) + ' · ' + plain_markdown(target['id']), '',

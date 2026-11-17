@@ -196,6 +196,227 @@ def validate_sources(service, run, task_id, goals):
             raise CoreDataError('attachment_changed', '收尾资料版本已变化，需重新处理。')
 
 
+
+_SUMMARY_REQUEST = re.compile(r'总结|概括|摘要|概述|归纳|\b(?:summari[sz]e|summary|synopsis)\b', re.I)
+_VERBATIM_REQUEST = re.compile(r'逐字|逐句|逐项抄录|原样|原文摘录|提取.{0,20}(?:并|再|后).{0,12}(?:导出|保存)|\bverbatim\b', re.I)
+_REQUEST_NEGATION = re.compile(
+    r'(?:不要|无需|禁止|请勿|不必|不需要|不做|不|without|do not)\s*(?:再|做|进行)?\s*'
+    r'(?:(?:修改|填写|回填|审阅|审查|导出|保存|改写)\s*(?:或|和|及|并|、)\s*)?$', re.I)
+_LOCAL_CRITERION = re.compile(
+    r'判断规则|检查规则|核对规则|判定规则|\b(?:check using (?:this|the following) rule|use (?:this|the following) rule)\b', re.I)
+_LOCAL_DECISION = re.compile(r'是否|有无|有或没有|\b(?:whether|yes or no|yes/no)\b', re.I)
+
+
+
+_REVIEW_OR_MODIFICATION = re.compile(r'审查|审阅|复核|评估|核对|符合|校对|纠错|填写|回填|修改|\b(?:review|audit|assess|verify|fill|edit|modify)\b', re.I)
+_MODIFICATION_REQUEST = re.compile(r'填写|回填|修改|改写|\b(?:fill|edit|modify)\b', re.I)
+_EXPORT_REQUEST = re.compile(r'导出|另存|保存为|输出为|\b(?:export|save)\b', re.I)
+
+
+def _positive_request(pattern, request):
+    return any(not _REQUEST_NEGATION.search(request[max(0, match.start()-24):match.start()])
+               for match in pattern.finditer(request))
+
+
+def requested_document_answer_kind(request, planned, *, rag_decision=None):
+    """Keep read bounds while distinguishing direct questions from exact extraction."""
+    from agent.rag.routing import project_evidence_policy
+
+    if planned not in {'extract', 'review'} or _VERBATIM_REQUEST.search(request):
+        return planned
+    if _positive_request(_EXPORT_REQUEST, request):
+        return planned
+    if (_LOCAL_CRITERION.search(request) and _LOCAL_DECISION.search(request)
+            and project_evidence_policy(rag_decision or {}, request, has_attachments=True) == 'attachment_only'
+            and not _positive_request(_MODIFICATION_REQUEST, request)):
+        return 'synthesis'
+    if _positive_request(_REVIEW_OR_MODIFICATION, request):
+        return planned
+    return 'synthesis' if _positive_request(_SUMMARY_REQUEST, request) else planned
+
+
+def normalize_document_answer_draft(request, draft, *, rag_decision=None):
+    if not isinstance(draft, dict):
+        return
+    planned = draft.get('answer_kind')
+    answer_kind = requested_document_answer_kind(request, planned, rag_decision=rag_decision)
+    if answer_kind == planned:
+        return
+    draft['answer_kind'] = answer_kind
+    if planned == 'review':
+        for scope in draft.get('source_scopes', []):
+            if isinstance(scope, dict) and scope.get('operation') == 'review':
+                scope['operation'] = 'read'
+    # User-supplied criteria and local summaries require only the declared source.
+    from agent.rag.routing import project_evidence_policy
+    if project_evidence_policy(rag_decision or {}, request, has_attachments=True) in {'attachment_only', 'none'}:
+        draft['evidence_required'] = False
+
+
+
+def explicit_literal_fill(run, current):
+    """Recognize a single user-supplied literal and an explicitly fresh DOCX destination."""
+    from agent.rag.routing import project_evidence_policy
+
+    request = current['content']
+    attachments = current.get('attachments', [])
+    if len(attachments) != 1:
+        return None
+    attachment = attachments[0]
+    if not attachment['name'].lower().endswith('.docx') or 'source_start' in attachment or 'source_end' in attachment:
+        return None
+    if project_evidence_policy(run.get('rag_decision') or {}, request, has_attachments=True) in {'mixed', 'required'}:
+        return None
+    if not all(phrase in request for phrase in ('单元格', '空白', '原件不修改')):
+        return None
+    if re.search(r'\b(?:DO|CCAR|FAR|CS)\s*-?\s*\d|依据|判据|核对|审阅', request, re.I):
+        return None
+    if re.search(r'(?:不要|请勿|禁止|无需|不必)[^，。；！？\r\n]*(?:填为|填入|另存为)', request):
+        return None
+    targets = re.findall(r'(?<![a-z0-9-])t-\d+-r\d+-c\d+(?![a-z0-9-])', request, re.I)
+    values = re.findall(r'(?:填为|填入)\s*“([^”\r\n]{1,16000})”', request)
+    outputs = re.findall(r'另存为\s*“([^”\r\n]{1,220}\.docx)”', request, re.I)
+    if len(targets) != 1 or len(values) != 1 or len(outputs) != 1 or not values[0].strip():
+        return None
+    coords = re.search(r'第\s*(\d+)\s*张表\s*第\s*(\d+)\s*行\s*第\s*(\d+)\s*列', request)
+    if coords:
+        table, row, col = (int(value) - 1 for value in coords.groups())
+        if f't-{table}-r{row}-c{col}' != targets[0]:
+            return None
+    path = outputs[0]
+    if re.search(r'[<>:"/\\|?*\x00-\x1f]', path) or path.strip() != path or path.casefold() == attachment['name'].casefold():
+        return None
+    return {'target_id': targets[0], 'text': values[0], 'path': path}
+
+
+async def publish_explicit_literal_fill(service, run, attempt_id, current):
+    from agent.document_inventory import inventory
+
+    spec = explicit_literal_fill(run, current)
+    if spec is None or run['id'] in service.rag_grounding.runs:
+        return None
+    attachment, = current['attachments']
+    _, source = service.document_attachments._original(attachment)
+    payload = source.read_bytes()
+    if sha256(payload).hexdigest() != attachment['sha256']:
+        raise CoreDataError('attachment_changed', '待填写原件已发生变化。')
+    before = inventory(payload)['fields']
+    target = next((field for field in before if field['id'] == spec['target_id']), None)
+    if not target or target['kind'] != 'table_cell' or target['text'].strip():
+        raise CoreDataError('document_fields_invalid', '指定位置不存在、不可写或已经有内容，未填写。')
+    template = service.documents.register_template(run['id'], payload, attachment['name'], source_id=attachment['id'])
+    artifact = service.documents.fill(run['id'], template['id'],
+        [{'target_id': spec['target_id'], 'text': spec['text']}], preserve_package=True)
+    after = inventory(service.documents.path_for(run['id'], artifact['id']).read_bytes())['fields']
+    expected = [(field['id'], spec['text'] if field['id'] == spec['target_id'] else field['text']) for field in before]
+    if [(field['id'], field['text']) for field in after] != expected:
+        raise CoreDataError('document_publish_unverified', '填写后发现目标之外的位置发生变化，未导出。')
+    service.document_attachments._original(attachment)
+    call = ToolCall('application-literal-fill-' + artifact['id'], 'document.export',
+                    {'artifact_id': artifact['id'], 'path': spec['path']})
+    publication = await service._application_document_operation(run, attempt_id, call)
+    service.documents.record_publication(run['id'], artifact['id'], publication)
+    service.documents.verify_publication(run['id'], artifact['id'])
+    run['_verified_literal_fill'] = True
+    return '已填入指定空白单元格。已核对其余文字位置。\n\n[打开文件](<' + spec['path'] + '>)'
+
+
+_REVIEW_REQUEST = re.compile(r'审查|审阅|核对|\b(?:review|audit)\b', re.I)
+_DOCUMENT_POSITION = re.compile(
+    r'(?<![a-z0-9-])(?:p-\d+|t-\d+(?:-r\d+-c\d+-t\d+)*-r\d+-c\d+)(?![a-z0-9-])', re.I)
+
+
+def plan_named_evidence_review(run, current, attachments):
+    """Resolve an expressly named review scope before asking a model to plan it."""
+    from agent.rag.routing import project_evidence_policy
+
+    request = current['content']
+    if len(attachments) != 1 or len(current.get('attachments', [])) != 1:
+        return None
+    attachment = attachments[0]
+    if not attachment['name'].lower().endswith('.docx') or 'source_start' in attachment or 'source_end' in attachment:
+        return None
+    if project_evidence_policy(run.get('rag_decision') or {}, request, has_attachments=True) not in {'required', 'mixed'}:
+        return None
+    if (not re.search(r'(?:只|仅)(?:对|审查|审阅|核对)|\bonly\b', request, re.I)
+            or not _positive_request(_REVIEW_REQUEST, request)
+            or _positive_request(_EXPORT_REQUEST, request) or _positive_request(_MODIFICATION_REQUEST, request)):
+        return None
+    positions = list(dict.fromkeys(_DOCUMENT_POSITION.findall(request.casefold())))
+    if not 1 <= len(positions) <= 100:
+        return None
+    draft = example_goal(attachment['id'])
+    draft.update(answer_kind='review', evidence_required=True,
+                 success_criteria=['只审阅用户点名的位置，使用能核验的项目资料库证据，并在对话中回答原始要求。'])
+    draft['source_scopes'][0].update(operation='review', scope='selected', target_ids=positions,
+                                      requested_count=len(positions), reason='用户指定了文档位置 ID。')
+    draft['first_action']['limit'] = len(positions)
+    return draft
+
+
+def explicit_review_scope(request, goals, attachment_id):
+    """An automatic review can dispatch only positions named by the user."""
+    if not goals or goals['deliverables'] or _positive_request(_EXPORT_REQUEST, request):
+        return None
+    active = [scope for scope in goals['source_scopes'] if scope['scope'] != 'excluded']
+    if len(active) != 1:
+        return None
+    scope = active[0]
+    if (scope['source_id'] != attachment_id or scope['operation'] != 'review'
+            or scope['scope'] != 'selected' or not scope['target_ids'] or scope.get('selector')):
+        return None
+    named = set(_DOCUMENT_POSITION.findall(request.casefold()))
+    return scope if named == set(scope['target_ids']) else None
+
+
+async def dispatch_explicit_review(service, run, attempt_id, current, body, budget_ids):
+    from agent.execution.source_inventory import SourceInventory
+    from agent.rag.routing import project_evidence_policy
+
+    if (body.get('answer_kind') != 'review' or not body.get('_first_result_id')
+            or body['first_action']['tool'] != 'document.inspect_template'
+            or project_evidence_policy(run.get('rag_decision') or {}, current['content'],
+                                       has_attachments=True) not in {'required', 'mixed'}):
+        return None
+    root = service.execution_monitor.start_task(run_id=run['id'])
+    goals = service.task_plans.goals.get(root['id'])
+    scope = explicit_review_scope(current['content'], goals, body['first_action']['attachment_id'])
+    if scope is None or not any(a['id'] == scope['source_id'] for a in current['attachments']):
+        return None
+    store = SourceInventory(service.repository)
+    resolved = store.resolve(root['id'], scope)
+    if not resolved['resolved'] or not store.coverage(root['id'], {**scope, 'operation': 'read'})['ready']:
+        return None
+    validate_sources(service, run, root['id'], goals)
+    operations = service.tool_loop.repository.list_for_run(run['id'])
+    call_id = f"goal-selected-review-{goals['revision']}"
+    if any(op['attempt_id'] == attempt_id and op['provider_call_id'] == call_id for op in operations):
+        return None
+    call = ToolCall(call_id, 'document.review_targets',
+                    {'template_id': resolved['artifact_id'], 'target_ids': scope['target_ids']})
+    sequence = max((op['sequence'] for op in operations), default=0) + 1
+    operation, resolution = await service.tool_loop.request(
+        run_id=run['id'], attempt_id=attempt_id, sequence=sequence, call=call,
+        budget_attempt_ids=budget_ids,
+        async_executor=lambda: service._review_targets_tool(run, attempt_id, call.arguments))
+    message = service.repository.record_tool_event(run['id'], operation['id'], call.name, operation['status'],
+                                                   len(resolution.output.encode()), resolution.error_code)
+    service.result_store.save(operation['id'], resolution.output, success=resolution.success)
+    await service._emit(run['id'], 'run.tool_completed', {'operation_id': operation['id'], 'status': operation['status'],
+                        'success': resolution.success, 'message': message})
+    if not resolution.success:
+        raise CoreDataError(resolution.error_code or 'document_review_invalid', '指定位置的资料库审阅未完成。')
+    if not service.task_plans.completion(root['id'])['ready']:
+        raise CoreDataError('task_incomplete', '指定位置的审阅结果未通过覆盖核验，已有结果已保存。')
+    validate_sources(service, run, root['id'], goals)
+    reports = run.get('_review_reports', [])
+    if not reports:
+        raise CoreDataError('document_review_invalid', '指定位置的审阅结果尚未保存。')
+    answer = '\n\n'.join(reports)
+    run['_verified_named_review_hash'] = sha256(answer.encode()).hexdigest()
+    return answer
+
+
 async def prepare(service, run, attempt_id, attempt_number, provider, plan, step, current, round_no, budget_ids):
     root=service.execution_monitor.start_task(run_id=run['id'])
     existing=service.task_plans.get(root['id'])
@@ -211,9 +432,9 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
     attachments=[a for a in current.get('attachments',[]) if any(x.get('kind')=='document.source' for x in a.get('artifacts',[]))]
     if not attachments:return round_no
     await service._emit(run['id'],'run.state_changed',{'status':'generating','phase':'goal_planning'})
-    draft = full_extraction_plan(run, current, attachments) if not prior_goals else None
-    application_plan = draft is not None
-    if application_plan:
+    extraction_plan = full_extraction_plan(run, current, attachments) if not prior_goals else None
+    draft = extraction_plan or (plan_named_evidence_review(run, current, attachments) if not prior_goals else None)
+    if draft is not None:
         requirements = normalize_goal(draft, attachments)
     else:
         payload={'request':current['content'],'rag_mode':run.get('rag_decision',{}).get('requested_mode','auto'),
@@ -241,6 +462,7 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
                 round_no=round_no,apply_rag_contract=False)
             try:
                 draft=json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
+                normalize_document_answer_draft(current['content'], draft, rag_decision=run.get('rag_decision'))
                 requirements=normalize_goal(draft,attachments)
                 break
             except (ValueError,TypeError,KeyError,CoreDataError) as error:
@@ -251,6 +473,19 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
                     'for an unresolved chapter use selection_pending with the requested chapter condition; '
                     'preserve any explicit requested position count, otherwise use requested_count null; '
                     'otherwise use selector null. Review requests require operation review. No requested file means deliverables []. Do not invent positions.'}])
+
+    first = draft['first_action']
+    source_scopes = [scope for scope in requirements['source_scopes']
+                     if scope['source_id'] == first['attachment_id'] and scope['scope'] != 'excluded']
+    selector = (source_scopes[0].get('selector') or {}) if len(source_scopes) == 1 else {}
+    inspect_first = first['tool'] == 'document.inspect_template'
+    nonempty_prefix = inspect_first and selector.get('kind') == 'prefix_nonempty'
+    selected_ids = (frozenset(source_scopes[0]['target_ids'])
+                    if inspect_first and len(source_scopes) == 1 and source_scopes[0]['scope'] == 'selected' else None)
+    if nonempty_prefix:
+        first['limit'] = min(first['limit'], selector['count'])
+    elif selected_ids:
+        first['limit'] = min(first['limit'], len(selected_ids))
 
     root=service.execution_monitor.get_task(root['id'])
     captured=service.task_plans.capture_requirements(root['id'],requirements,
@@ -264,14 +499,15 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
     if draft['evidence_required'] or any(scope['operation'] == 'review' for scope in requirements['source_scopes']):
         conversation = service.repository.get_run_conversation(run['id'])
         await service._prepare_requested_project_evidence(run, conversation, 'document_planning')
-    first=draft['first_action']
     call=ToolCall('goal-first-read-'+str(captured['revision']),first['tool'],{'attachment_id':first['attachment_id'],'limit':first['limit']})
     operations=service.tool_loop.repository.list_for_run(run['id'])
     sequence=max((o['sequence'] for o in operations),default=0)+1
     operation,resolution=await service.tool_loop.request(run_id=run['id'],attempt_id=attempt_id,sequence=sequence,call=call,
         budget_attempt_ids=budget_ids,
         local_executor=(lambda:service._document_tool(run['id'], call, max_characters=12000,
-            **({'complete_inventory': True} if application_plan else {}))) if call.name=='document.inspect_template' else None,
+            **({'complete_inventory': True} if extraction_plan else {}),
+            **({'nonempty_only': True} if nonempty_prefix else {}),
+            **({'selected_ids': selected_ids} if selected_ids else {}))) if call.name=='document.inspect_template' else None,
         async_executor=(lambda:service._read_document_attachment(run['id'],call.arguments,max_characters=12000)) if call.name=='document.read_attachment' else None)
     service.repository.record_tool_event(run['id'],operation['id'],call.name,operation['status'],len(resolution.output.encode()),resolution.error_code)
     service.result_store.save(operation['id'], resolution.output, success=resolution.success)
@@ -393,6 +629,11 @@ async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
             if not unchanged_contract:
                 draft['answer_kind'] = ('review' if any(scope['operation']=='review' for scope in goals['source_scopes'])
                     else 'modify' if goals['deliverables'] else 'synthesis')
+    if draft['answer_kind'] == 'extract':
+        current = next(m for m in service.repository.get_run_conversation(run['id'])['messages']
+                       if m['id'] == run['user_message_id'])
+        draft['answer_kind'] = requested_document_answer_kind(
+            current['content'], draft['answer_kind'], rag_decision=run.get('rag_decision'))
     if draft['answer_kind'] == 'extract' and goals['deliverables']:
         current = next(m for m in service.repository.get_run_conversation(run['id'])['messages']
                        if m['id'] == run['user_message_id'])
@@ -470,9 +711,22 @@ async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
                 service.documents.verify_publication(run['id'], artifact['id'])
             validate_sources(service, run, root['id'], new_goals)
             # Only exact extraction has a fully machine-verifiable answer contract.
+            # Local one-sentence summaries have a complete, verified source scope before generation.
+            if (draft['answer_kind'] == 'synthesis' and not goals['deliverables']
+                    and run['id'] not in service.rag_grounding.runs and not artifacts
+                    and re.search(r'一句话|一個句子|一个句子|\bone sentence\b', current['content'], re.I)
+                    and _positive_request(_SUMMARY_REQUEST, current['content'])
+                    and not _positive_request(_REVIEW_OR_MODIFICATION, current['content'])
+                    and not _positive_request(_EXPORT_REQUEST, current['content'])
+                    and all(scope['operation'] == 'read' for scope in goals['source_scopes'])):
+                summary = text.strip()
+                # A one-sentence result may end with any of the user's customary punctuation.
+                if not summary or '\n' in summary or len(re.findall(r'[。！？!?]|\.(?=\s|$)', summary)) > 1:
+                    raise CoreDataError('task_final_answer_invalid', '请用一句话概括已核验的内容。')
+                run['_verified_local_summary_hash'] = sha256(summary.encode()).hexdigest()
+                return summary
             # Other answers still pass the existing semantic goal verifier.
             if draft['answer_kind'] == 'extract':
-                from hashlib import sha256
                 draft['_verified_final'] = {'goal_revision': goals['revision'],
                     'request_digest': goals['request_digest'], 'text_sha256': sha256(text.encode()).hexdigest()}
                 with service.repository._connect() as db:
@@ -485,10 +739,10 @@ async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
             failure=error
             if getattr(error,'code','') not in {'task_final_answer_invalid','provider_empty_output','provider_response_incomplete'}:raise
             messages = base_messages + [{'role': 'user', 'content':
-                'Correct the final response against the same supplied verified material. '
-                'For extraction preserve template_id,total and every selected position in order. '
-                'Use the exact selection_ref to select the complete ordered set, or supply exact field IDs. '
-                'Omit text so the application fills originals exactly.'}]
+                ('Correct the final response against the same supplied verified material. '
+                 'For extraction preserve template_id,total and every selected position in order. '
+                 'Use the exact selection_ref or exact field IDs. Omit the field text.' if draft['answer_kind'] == 'extract'
+                 else 'Return only a single plain-text sentence answering the requested summary from the verified selection.')}]
     result='应用已验证并保存以下读取结果；模型未能生成完整最终回复。\n\n```json\n'+json.dumps(packet,ensure_ascii=False,indent=2)+'\n```'
     service.repository.checkpoint_draft(run['id'],attempt_id,result)
     raise failure

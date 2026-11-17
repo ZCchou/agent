@@ -1,5 +1,6 @@
 """Document contents, read proofs and semantic selectors, without work obligations."""
 import hashlib
+from agent.document_inventory import nonempty_position
 import json
 from agent.storage import CoreDataError
 
@@ -68,7 +69,7 @@ class SourceInventory:
             for ordinal,field in enumerate(fields):
                 text=field.get('original_content',field.get('text',''))
                 value={k:field[k] for k in ('id','position','chapter_path','field_type','extraction_status') if k in field}
-                value.update(nonempty=bool(text.strip()) or field.get('extraction_status')=='unreadable' or field.get('field_type')=='unreadable',
+                value.update(nonempty=nonempty_position(field),
                     character_count=len(text),text_sha256=hashlib.sha256(text.encode()).hexdigest())
                 previous_field = db.execute('SELECT ordinal,content_json FROM task_inventory_positions WHERE task_id=? AND source_id=? AND target_id=?',
                     (task_id,canonical,field['id'])).fetchone()

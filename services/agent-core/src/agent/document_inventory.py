@@ -29,6 +29,11 @@ def _paragraph_text(node):
     return ''.join(walk(node))
 
 
+def nonempty_position(field):
+    text = field.get('original_content', field.get('text', ''))
+    return bool(text.strip()) or field.get('extraction_status') == 'unreadable' or field.get('field_type') == 'unreadable'
+
+
 def inventory(payload):
     from agent.documents import load_docx, targets
     from agent.document_parser.office import _xml

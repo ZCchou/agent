@@ -92,6 +92,60 @@ def test_invalid_checker_output_uses_three_actual_calls_then_keeps_failure(tmp_p
     asyncio.run(scenario())
 
 
+def test_satisfied_checker_ignores_redundant_resolved_selector(tmp_path):
+    async def scenario():
+        from agent.execution.source_inventory import SourceInventory
+
+        core, _, root, plans = setup_task(tmp_path)
+        original = {**requirements(), 'deliverables': [], 'source_scopes': [
+            {**scope('read', 'selected'), 'selector': {'kind': 'prefix_nonempty', 'count': 3}}]}
+        plans.capture_requirements(root['id'], original, expected_revision=0)
+        inventory = SourceInventory(core)
+        fields = [{'id': f'p-{index}', 'text': str(index)} for index in range(4)]
+        fence = (root['revision'], root['attempt'])
+        inventory.register(root['id'], 'source', 'artifact', 'hash', fields, complete=True, fence=fence)
+        inventory.record_read(root['id'], 'source', 'hash', fields[:3], fence=fence)
+        redundant = {**original, 'source_scopes': [
+            {**original['source_scopes'][0], 'target_ids': [field['id'] for field in fields[:3]]}]}
+        calls = []
+
+        async def invoke(messages, schema):
+            calls.append(messages)
+            return json.dumps(answer(goals=redundant))
+
+        result = await verifier(core).verify(root['id'], {'candidate': '已核验三个位置'}, invoke,
+            fence=fence, input_tokens=6000)
+        assert result['status'] == 'satisfied'
+        assert result['goal_requirements'] is None
+        assert plans.goals.get(root['id'])['source_scopes'] == original['source_scopes']
+        assert len(calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_actionable_checker_retries_selector_with_target_ids(tmp_path):
+    async def scenario():
+        core, _, root, plans = setup_task(tmp_path)
+        invalid = {**requirements(), 'source_scopes': [{**scope('read', 'selected'),
+            'target_ids': ['p-0'], 'selector': {'kind': 'prefix_nonempty', 'count': 1}}]}
+        corrected = {**invalid, 'source_scopes': [{**invalid['source_scopes'][0], 'target_ids': []}]}
+        calls = []
+
+        async def invoke(messages, schema):
+            calls.append(messages)
+            proposal = invalid if len(calls) == 1 else corrected
+            return json.dumps(answer('needs_work', goals=proposal, unmet=['尚需读取第一个非空位置']))
+
+        result = await verifier(core).verify(root['id'], {'candidate': '待处理'}, invoke,
+            fence=(root['revision'], root['attempt']), input_tokens=6000)
+        assert result['status'] == 'needs_work'
+        assert plans.goals.get(root['id'])['source_scopes'] == corrected['source_scopes']
+        assert len(calls) == 2
+        assert 'target_ids=[]' in calls[1][0]['content']
+
+    asyncio.run(scenario())
+
+
 def test_unknown_checker_status_is_rejected(tmp_path):
     core, _, _, _ = setup_task(tmp_path)
     service = verifier(core)

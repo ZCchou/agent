@@ -101,11 +101,11 @@ class GoalVerification:
         return context, digest
 
     @staticmethod
-    def _messages(context, input_tokens):
+    def _messages(context, input_tokens, *, correction=''):
         value = deepcopy(context)
         value['candidate_truncated'] = False
         while True:
-            messages = [{'role': 'system', 'content': GOAL_INSTRUCTION}, {'role': 'user', 'content': encode(value)}]
+            messages = [{'role': 'system', 'content': GOAL_INSTRUCTION + correction}, {'role': 'user', 'content': encode(value)}]
             if estimate_tokens({'messages': messages, 'response_schema': VERIFICATION_SCHEMA}) + 256 <= input_tokens:
                 return messages
             text = value.get('candidate', '')
@@ -163,14 +163,24 @@ class GoalVerification:
                 value = json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
                 if isinstance(value, dict) and set(value) == {'response'}:
                     value = value['response']
+                if (isinstance(value, dict) and value.get('status') == 'satisfied'
+                        and 'goal_requirements' in value and context['requirements'] is not None):
+                    # A satisfied verdict only checks the recorded goal. Supplied
+                    # goal data cannot change it, even if the model echoes resolved IDs.
+                    value = {**value, 'goal_requirements': None}
                 result = self.validate(value)
                 break
             except (ValueError, TypeError, CoreDataError, ProviderError) as error:
                 if isinstance(error, (CoreDataError, ProviderError)) and error.code not in {
-                        'response_format_unsupported', 'task_goal_verification_invalid', 'task_goal_invalid', 'task_plan_invalid'}:
+                        'response_format_unsupported', 'task_goal_verification_invalid', 'task_goal_invalid',
+                        'task_plan_invalid', 'task_selector_invalid'}:
                     raise
                 if getattr(error, 'code', None) == 'response_format_unsupported':
                     schema = None
+                if getattr(error, 'code', None) == 'task_selector_invalid':
+                    messages = self._messages(context, input_tokens, correction=(
+                        '\n上次提交的范围选择器无效。使用 selector 时需要 scope=selected 且 target_ids=[]。'
+                        '使用已确定的 target_ids 时，不提交 selector。仅在需要修订目标时提交 goal_requirements。'))
                 failure = error
         else:
             result = {'status': 'failed', 'summary': '任务完成核对连续三次未通过格式校验。',
