@@ -1,15 +1,33 @@
 """Apply managed-process leases to the existing local HTTP provider transport."""
 from contextlib import asynccontextmanager
 import asyncio
+import logging
+import re
 from urllib.parse import urlsplit
 
 import httpx
 
 from agent.providers import (ModelProvider, ProviderError, ProviderProfile, closing_provider_stream,
-                             _provider_messages, _external_tool_definitions)
+                             _provider_messages, _external_tool_definitions, _map_http_error)
+from agent.infrastructure.logging import log_event
 
 
 _TOKEN_COUNT_TIMEOUT = 3.0
+
+
+def _preflight_diagnostic(prepared, **fields):
+    roles = [message.get('role') if message.get('role') in {
+        'system', 'developer', 'user', 'assistant', 'tool', 'function',
+    } else 'unknown' for message in prepared.messages]
+    level = logging.DEBUG
+    if 'error_code' in fields:
+        level = logging.WARNING
+    elif 'fallback_reason' in fields:
+        level = logging.INFO
+    log_event(logging.getLogger('agent.core'), level, 'model_template_preflight',
+              'Managed local template preflight completed',
+              spec_id=getattr(prepared, 'spec_id', None), protocol_id=prepared.protocol_id,
+              model_id=prepared.model_id, message_roles=roles, **fields)
 
 
 async def _next_managed_event(stream):
@@ -80,11 +98,14 @@ class ManagedLocalProvider(ModelProvider):
     async def _measure_request(self, prepared):
         runtime = getattr(self.models, '_runtime', None)
         if not getattr(runtime, 'supports_token_counting', False) or prepared.protocol_id != 'openai_chat':
+            _preflight_diagnostic(prepared, fallback_reason='counting_unavailable')
             return None
         endpoint = urlsplit(self.profile.base_url)
         if not self.profile.local_strict or endpoint.scheme != 'http' or endpoint.hostname not in {'127.0.0.1', '::1'}:
+            _preflight_diagnostic(prepared, fallback_reason='unsupported_endpoint')
             return None
         if endpoint.username or endpoint.password or endpoint.query or endpoint.fragment or endpoint.path.rstrip('/') != '/v1':
+            _preflight_diagnostic(prepared, fallback_reason='unsupported_endpoint')
             return None
         for message in prepared.messages:
             content = message.get('content')
@@ -92,6 +113,7 @@ class ManagedLocalProvider(ModelProvider):
                 continue
             if not isinstance(content, list) or any(not isinstance(part, dict) or part.get('type') != 'text'
                                                     or not isinstance(part.get('text'), str) for part in content):
+                _preflight_diagnostic(prepared, fallback_reason='non_text_content')
                 return None
         body = {'model': prepared.model_id, 'messages': _provider_messages(list(prepared.messages)),
                 'add_generation_prompt': True}
@@ -104,6 +126,8 @@ class ManagedLocalProvider(ModelProvider):
                 'name': 'conversation_checkpoint' if prepared.options.purpose == 'context_compaction' else 'rag_answer',
                 'strict': True, 'schema': prepared.options.response_schema}}
         base_url = self.profile.base_url.rstrip('/').removesuffix('/v1')
+        phase = 'apply_template'
+        status = None
         try:
             async with asyncio.timeout(_TOKEN_COUNT_TIMEOUT):
                 async with httpx.AsyncClient(timeout=_TOKEN_COUNT_TIMEOUT, trust_env=False,
@@ -111,19 +135,50 @@ class ManagedLocalProvider(ModelProvider):
                     # Locked b12110 uses the inference parser and server thinking
                     # defaults here, then counts text prompts with both flags true.
                     rendered = await client.post(base_url + '/apply-template', json=body)
+                    status = rendered.status_code
                     rendered.raise_for_status()
                     value = rendered.json()
                     if not isinstance(value, dict) or not isinstance(value.get('prompt'), str):
+                        _preflight_diagnostic(prepared, phase=phase, http_status=status,
+                                              fallback_reason='malformed_template_response')
                         return None
+                    phase = 'tokenize'
+                    status = None
                     tokenized = await client.post(base_url + '/tokenize', json={
                         'content': value['prompt'], 'add_special': True, 'parse_special': True})
+                    status = tokenized.status_code
                     tokenized.raise_for_status()
                     value = tokenized.json()
                     tokens = value.get('tokens') if isinstance(value, dict) else None
                     if isinstance(tokens, list) and all(type(token) is int and token >= 0 for token in tokens):
+                        _preflight_diagnostic(prepared, phase=phase, http_status=status,
+                                              token_count=len(tokens), outcome='counted')
                         return len(tokens)
-        except (httpx.HTTPError, ValueError, TypeError, TimeoutError):
-            pass
+                    _preflight_diagnostic(prepared, phase=phase, http_status=status,
+                                          fallback_reason='malformed_tokenizer_response')
+        except httpx.HTTPStatusError as error:
+            mapped = _map_http_error(error.response)
+            lowered = error.response.text.lower()
+            missing_model = error.response.status_code == 404 and (
+                any(marker in lowered for marker in ('model_not_found', 'unknown model', 'no such model'))
+                or re.search(r'\bmodel\b[^\r\n]{0,160}\b(?:not found|does not exist|not loaded)\b', lowered)
+            )
+            if mapped.code in {'model_not_found', 'invalid_provider_response', 'provider_unavailable'} \
+                    and error.response.status_code in {404, 405, 501} and not missing_model:
+                _preflight_diagnostic(prepared, phase=phase, http_status=error.response.status_code,
+                                      fallback_reason='endpoint_unsupported')
+                return None
+            mapped.details.update(http_status=error.response.status_code, phase=phase)
+            _preflight_diagnostic(prepared, error_code=mapped.code, **mapped.details)
+            raise mapped from None
+        except (httpx.TimeoutException, TimeoutError):
+            _preflight_diagnostic(prepared, phase=phase, http_status=status, fallback_reason='count_timeout')
+        except httpx.RequestError:
+            _preflight_diagnostic(prepared, phase=phase, http_status=status, error_code='network_unavailable')
+            raise ProviderError('network_unavailable', 'The local model service is unavailable.',
+                                details={'phase': phase}) from None
+        except (ValueError, TypeError):
+            _preflight_diagnostic(prepared, phase=phase, http_status=status, fallback_reason='malformed_response')
         return None
 
     async def list_models(self):

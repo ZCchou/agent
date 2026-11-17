@@ -14,6 +14,7 @@ from agent.context_engine.domain import (
     SourceRef,
     TrustKind,
 )
+from agent.message_assembly import extend_application_messages
 from agent.context_engine.policy import estimate_tokens
 from agent.context_engine.retrieval import RetrievedKnowledge
 
@@ -268,7 +269,9 @@ def pack_context(
                 "effective_attachment_ids": [value["attachment"]["id"] for value in current_message.get("_attachment_items", [])]},
         ))
 
-    messages = stable_messages + dynamic_messages
+    messages = []
+    extend_application_messages(messages, stable_messages)
+    extend_application_messages(messages, dynamic_messages)
     serialized_tokens = estimate_tokens(messages)
     if serialized_tokens > hard_limit:
         raise ContextEngineError('current_input_too_large', 'The serialized context exceeds the available input budget.')

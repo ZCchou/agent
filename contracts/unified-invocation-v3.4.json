@@ -4,7 +4,7 @@
   "settings_schema_version": 20,
   "core_schema_version": 37,
   "ipc_version": 30,
-  "core_version": "0.17.0-preview.6",
+  "core_version": "0.17.0-preview.7",
   "build_id": "schema37-agent-unified-v1",
   "tool_contract_version": "tool-contract-v9",
   "capability_contract_version": "capability-v1",

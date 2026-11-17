@@ -12,7 +12,7 @@ from agent.storage import SCHEMA_VERSION, CoreDataError, CoreRepository
 
 
 PROTOCOL_VERSION = 30
-CORE_VERSION = "0.17.0-preview.6"
+CORE_VERSION = "0.17.0-preview.7"
 BUILD_ID = "schema37-agent-unified-v1"
 
 

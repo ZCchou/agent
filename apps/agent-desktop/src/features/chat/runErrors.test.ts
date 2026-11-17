@@ -51,6 +51,16 @@ describe("failed run limit diagnostics", () => {
   });
 });
 
+describe("model template diagnostics", () => {
+  it.each([
+    ["model_message_order_invalid", "消息顺序", "message order"],
+    ["model_template_render_failed", "聊天模板", "chat template"],
+  ])("localizes %s in both languages", async (code, chinese, english) => {
+    expect(await translated(code, "Provider request failed")).toContain(chinese);
+    expect(await translated(code, "Provider request failed", "en")).toContain(english);
+  });
+});
+
 describe("terminal response fallback", () => {
   const run = { id: "run-1", status: "generating", draft: { content: "Partial output", updated_at: "old" } } as ModelRun;
   const event = { run_id: "run-1", sequence: 1, event_type: "run.failed", timestamp: "now", data: {

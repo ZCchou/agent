@@ -489,6 +489,8 @@ const chat = {
     provider_event_unsupported: "The model provider returned a response format this version does not support.",
     persistence_failed: "The response could not be safely saved.", core_interrupted: "Generation was interrupted when Core stopped.",
     cancelled_by_user: "Generation was stopped.",
+    model_message_order_invalid: "The conversation message order is incompatible with the model template.",
+    model_template_render_failed: "The model chat template could not render this request.",
     model_tool_protocol_failed: "The model did not return a valid, safe tool operation.",
     tool_limit_exceeded: "This task exceeded the safe file-operation or data limit.",
     tool_call_limit_exceeded: "This attempt reached the tool-call limit. Retry starts a new tool-call allowance.",

@@ -489,6 +489,8 @@ const chat = {
     provider_event_unsupported: "模型服务返回了当前版本尚未适配的响应格式。",
     persistence_failed: "回复无法安全保存。", core_interrupted: "Core 退出导致生成中断。",
     cancelled_by_user: "生成已停止。",
+    model_message_order_invalid: "对话消息顺序不符合模型模板要求。",
+    model_template_render_failed: "模型聊天模板无法渲染本次请求。",
     model_tool_protocol_failed: "模型未能按安全的工具格式返回操作。",
     tool_limit_exceeded: "本次任务的文件操作次数或数据量超过安全上限。",
     tool_call_limit_exceeded: "本次尝试已达到工具调用上限。重试可开启新的工具调用额度。",

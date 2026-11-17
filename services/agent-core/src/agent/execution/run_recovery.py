@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent.message_assembly import insert_system_message
+
 
 REASONS = {
     'task_final_answer_invalid': '最终回答的位置引用或原文未通过校验，已保存的读取结果仍可核对',
@@ -96,6 +98,8 @@ REASONS = {
     "tool_limit_exceeded": "工具执行达到内部额度限制",
     "search_budget_exceeded": "搜索或网页内容额度已用完",
     "model_tool_protocol_failed": "模型返回的工具格式无法执行",
+    "model_template_render_failed": "模型聊天模板无法处理本次消息，请检查模型与模板配置后重试",
+    "model_message_order_invalid": "本次模型请求的消息顺序无效，请检查消息组装后重试",
     "model_tool_contract_failed": "模型返回的工具参数纠正后仍不符合格式",
     "invalid_tool_call": "工具参数无法解析或校验",
     "unsupported_tool": "请求的工具不可用",
@@ -123,6 +127,10 @@ REASONS = {
 
 IMAGE_REFUSAL_CODES = frozenset({
     "model_vision_unsupported", "image_format_unsupported", "image_payload_too_large",
+})
+
+DETERMINISTIC_TEMPLATE_ERROR_CODES = frozenset({
+    'model_template_render_failed', 'model_message_order_invalid',
 })
 
 
@@ -160,6 +168,8 @@ def failure_explanation_messages(goal: str, code: str, operations: list[dict[str
 
 def recovery_allowed(error: BaseException, *, partial: str, operations: list[dict[str, Any]]) -> bool:
     code = getattr(error, "code", "internal_error")
+    if code in DETERMINISTIC_TEMPLATE_ERROR_CODES:
+        return False
     if code.startswith(('rag_', 'ocr_', 'execution_')) or code == 'model_recovery_identity_changed':
         return False
     if code.startswith('document_') or code in {'terminal_isolation_unavailable', 'rag_library_required', 'attachment_purpose_invalid'}:
@@ -218,7 +228,7 @@ def closing_messages(messages: list[dict[str, Any]], partial: str, code: str,
                 result.append(item)
     if partial:
         result.append({"role": "assistant", "content": partial})
-    result.append({"role": "system", "content": (
+    insert_system_message(result, {"role": "system", "content": (
         "工具执行或回复生成失败，但必须给用户一个有用的收尾结果。"
         f"失败原因：{REASONS.get(code, REASONS['internal_error'])}（{code}）。"
         + outcome_summary(operations)

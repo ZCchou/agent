@@ -1,6 +1,8 @@
 """Live, observational model context, separate from execution authority."""
 from __future__ import annotations
 
+from agent.message_assembly import insert_system_message
+
 import asyncio
 import json
 import uuid
@@ -149,5 +151,4 @@ def replace_snapshot(messages: list[dict[str, Any]], content: str) -> None:
                    and isinstance(m.get("content"), str) and m["content"].startswith(MARKER))]
     # Runtime metadata belongs with the leading instructions. Keep the user or
     # tool result at the conversation tail for providers that use that boundary.
-    index = next((i for i, message in enumerate(messages) if message.get("role") != "system"), len(messages))
-    messages.insert(index, {"role": "system", "content": content})
+    insert_system_message(messages, {"role": "system", "content": content})

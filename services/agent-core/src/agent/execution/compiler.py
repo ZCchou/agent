@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -9,6 +10,8 @@ from agent.execution.domain import InvocationSpec
 from agent.provider_tool_adapter import structured_messages
 from agent.providers import GenerationOptions
 from agent.storage import CoreDataError
+from agent.message_assembly import validate_system_message_prefix
+from agent.infrastructure.logging import log_event
 from agent.tool_contracts import TOOL_CONTRACT_VERSION, ToolContractRegistry
 
 
@@ -198,6 +201,14 @@ class InvocationCompiler:
             structured_messages(messages, set(spec.allowed_tool_names))
             if spec.tool_transport == "structured_json" else messages
         )
+        try:
+            validate_system_message_prefix(compiled_messages)
+        except CoreDataError as error:
+            log_event(logging.getLogger('agent.core'), logging.WARNING, 'model_request_rejected',
+                'Model request message order is invalid', spec_id=spec.spec_id,
+                plan_id=spec.plan_id, step_id=spec.step_id, model_id=spec.model_id,
+                error_code=error.code, **error.details)
+            raise
         options = GenerationOptions(
             purpose=spec.endpoint_role,
             max_output_tokens=spec.max_output_tokens,

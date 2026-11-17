@@ -330,7 +330,9 @@ def test_web_specialist_receives_prior_vision_artifact_without_the_image() -> No
         for message in messages if isinstance(message.get("content"), list)
         for part in message["content"] if isinstance(part, dict)
     )
-    assert "Example Person" in messages[-1]["content"]
+    assert "Example Person" in messages[0]["content"]
+    assert messages[0]['role'] == 'system'
+    assert messages[-1]['role'] == 'user'
     assert ChatRunService._prior_artifacts_for_specialist("vision_analysis", artifacts) == []
 
 

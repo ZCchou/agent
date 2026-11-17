@@ -229,6 +229,29 @@ def validate_profile(profile: ProviderProfile) -> None:
 def _map_http_error(response: httpx.Response) -> ProviderError:
     status = response.status_code
     lowered = response.text.lower()
+    if status in {401, 403}:
+        return ProviderError("authentication_failed", "Provider authentication failed.")
+    if any(marker in lowered for marker in ("out of memory", "oom", "resource exhausted")):
+        return ProviderError("resource_exhausted", "The model provider ran out of resources.")
+    if status in {400, 422, 500}:
+        template_markers = {
+            "system message must be at the beginning": "system_message_order",
+            "conversation roles must alternate": "conversation_role_order",
+            "jinja2.exceptions.templateerror": "jinja_template_error",
+            "jinja2.exceptions.templateruntimeerror": "jinja_template_error",
+            "jinja2.exceptions.templatesyntaxerror": "jinja_template_error",
+            "jinja template error": "jinja_template_error",
+            "failed to render chat template": "chat_template_render",
+            "failed to render the chat template": "chat_template_render",
+            "error rendering chat template": "chat_template_render",
+            "failed to apply chat template": "chat_template_render",
+        }
+        for marker, category in template_markers.items():
+            if marker in lowered:
+                return ProviderError(
+                    "model_template_render_failed", "The model chat template could not render the request.",
+                    details={"http_status": status, "phase": "provider_response", "template_error": category},
+                )
     if status == 400 and "response_format" in lowered and any(
         marker in lowered for marker in ("unsupported", "unknown", "unrecognized", "not support")
     ):
@@ -268,10 +291,6 @@ def _map_http_error(response: httpx.Response) -> ProviderError:
         return ProviderError(
             "provider_context_limit_exceeded", "The provider rejected the request as too large."
         )
-    if any(marker in lowered for marker in ("out of memory", "oom", "resource exhausted")):
-        return ProviderError("resource_exhausted", "The model provider ran out of resources.")
-    if status in {401, 403}:
-        return ProviderError("authentication_failed", "Provider authentication failed.")
     if status == 404:
         return ProviderError("model_not_found", "The selected model or endpoint was not found.")
     if status == 429:

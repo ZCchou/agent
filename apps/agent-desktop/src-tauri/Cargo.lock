@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-desktop"
-version = "0.17.0-preview.6"
+version = "0.17.0-preview.7"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
