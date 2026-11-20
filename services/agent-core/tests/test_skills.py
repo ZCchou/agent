@@ -209,6 +209,9 @@ def test_builtin_document_skill_installation_is_progressive_and_preserves_prefer
     install_builtin_skill(skills)
     item = skills.load('local-document-work', explicit=False)
     assert item['enabled'] and not item['rag_required']
+    assert skills.load('grounded-document-review')['rag_required']
+    assert skills.requires_rag('$grounded-document-review 核对附件与资料库')
+    assert not skills.requires_rag('提取附件中已填写的内容，保存为文档')
     assert not skills.requires_rag('$local-document-work summarize attachment')
     assert 'document.read_attachment' in item['content']
     assert 'references/examples.md' in item['content']

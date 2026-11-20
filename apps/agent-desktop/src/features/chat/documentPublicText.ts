@@ -3,7 +3,7 @@ import type { ChatMessage, ModelRunEvent } from "../../types/domain";
 export interface DocumentPublicText {
   runId: string;
   closed?: boolean;
-  streams: Array<{ id: string; content: string; sequence: number }>;
+  streams: Array<{ id: string; content: string; sequence: number; committed?: boolean; targetLabels?: Record<string, string> }>;
 }
 
 export function appendDocumentPublicText(current: DocumentPublicText | null, event: ModelRunEvent,
@@ -14,13 +14,21 @@ export function appendDocumentPublicText(current: DocumentPublicText | null, eve
     return { ...(existing ?? { runId: event.run_id, streams: [] }), closed: true };
   if (event.event_type === "run.state_changed" && event.data.status === "generating")
     return existing?.closed ? { ...existing, closed: false } : current;
-  if (existing?.closed || event.event_type !== "run.document_processing"
-    || event.data.phase !== "public_text" || event.data.public_text !== true
-    || typeof event.data.stream_id !== "string" || typeof event.data.delta !== "string") return current;
+  if (existing?.closed || event.event_type !== "run.document_processing" || event.data.public_text !== true
+    || typeof event.data.stream_id !== "string") return current;
+  const committed = event.data.phase === "public_text_committed";
+  const text = committed ? event.data.presented_body : event.data.delta;
+  if ((!committed && event.data.phase !== "public_text") || typeof text !== "string" || !text.trim() && committed) return current;
   const next = existing ?? { runId: event.run_id, streams: [] };
   const old = next.streams.find(stream => stream.id === event.data.stream_id);
-  if (old && old.sequence >= event.sequence) return current;
-  const entry = { id: event.data.stream_id, content: (old?.content ?? "") + event.data.delta, sequence: event.sequence };
+  if (old && (old.sequence >= event.sequence || (old.committed && !committed))) return current;
+  let targetLabels = old?.targetLabels;
+  if (event.data.target_labels && typeof event.data.target_labels === "object" && !Array.isArray(event.data.target_labels)) {
+    targetLabels = Object.fromEntries(Object.entries(event.data.target_labels).filter(([key, label]) =>
+      /^(?:p-\d+|t-\d+-r\d+-c\d+)$/.test(key) && typeof label === "string" && label.trim()));
+  }
+  const entry = { id: event.data.stream_id, content: committed ? text : (old?.content ?? "") + text, sequence: event.sequence,
+    committed, targetLabels };
   return { ...next, streams: old ? next.streams.map(stream => stream === old ? entry : stream) : [...next.streams, entry] };
 }
 
@@ -62,7 +70,7 @@ export function createDocumentTextBuffer(publish: Publish) {
     event(event: ModelRunEvent, activeRunId: string | null) {
       if (event.run_id !== activeRunId) return;
       if (event.event_type === "run.document_processing") {
-        if (event.data.phase !== "public_text" || event.data.public_text !== true) return;
+        if (!["public_text", "public_text_committed"].includes(String(event.data.phase)) || event.data.public_text !== true) return;
         pending.push(event);
         timer ??= setTimeout(flush, 60);
       } else if (event.event_type === "run.state_changed" || ["run.completed", "run.failed", "run.cancelled", "run.interrupted"].includes(event.event_type)) {

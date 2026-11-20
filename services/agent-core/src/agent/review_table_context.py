@@ -1,6 +1,84 @@
 """Bounded, readonly original-cell context; never additional review targets."""
 from bisect import bisect_left, bisect_right
+from itertools import groupby
 import re
+
+
+_TABLE_DIRECTIONS = (
+    ('following', re.compile(r'下表|表格如下|\b(?:following table|table below)\b', re.I)),
+    ('preceding', re.compile(r'上表|(?:上述|前述|以上)\s*(?:表格?|步骤|[a-z\d]+\s*(?:至|到|[-–~～])\s*[a-z\d]+)'
+                             r'|\b(?:preceding table|table above)\b', re.I)),
+)
+_CONDITION = re.compile(r'适用|类别|[A-Z]\s*类|参数(?:和剖面)?\s*[：:]|要求\s*[：:]|\b(?:category|applicability)\b', re.I)
+
+
+def paragraph_table_references(fields, target_ids):
+    """Resolve explicit deictic references only within a contiguous source section, in XML order."""
+    wanted = set(target_ids)
+    result = {}
+    for section, section_fields in groupby(fields, key=lambda field: field.get('section_id')):
+        if not section:
+            continue
+        blocks = []
+        conditions = []
+        refs = []
+        for field in section_fields:
+            key = field['id']
+            table = re.match(r'^(t-\d+)-r\d+-c\d+', key)
+            if table:
+                table_id = table[1]
+                if not blocks or blocks[-1][0] != table_id:
+                    blocks.append((table_id, []))
+                # Nested tables are separate semantic grids.
+                if table.end() == len(key):
+                    blocks[-1][1].append(field)
+                continue
+            text = field.get('text', '').strip()
+            if not text or not re.fullmatch(r'p-\d+', key):
+                continue
+            index = len(blocks)
+            blocks.append((None, field))
+            if _CONDITION.search(text):
+                conditions.append(index)
+            if key in wanted:
+                directions = [name for name, pattern in _TABLE_DIRECTIONS if pattern.search(text)]
+                if directions:
+                    refs.append((key, index, directions))
+        for key, index, directions in refs:
+            entry = {'direction': directions, 'tables': [], 'section_context': {}}
+            for direction in directions:
+                step = 1 if direction == 'following' else -1
+                for distance in range(1, 8):
+                    pos = index + step * distance
+                    if not 0 <= pos < len(blocks):
+                        break
+                    table_id, members = blocks[pos]
+                    if table_id:
+                        cells = {}
+                        clipped = False
+                        remaining = 1500
+                        for member in members:
+                            text = member.get('text', '').strip()
+                            if not text:
+                                continue
+                            if len(cells) >= 32 or remaining <= 0:
+                                clipped = True
+                                break
+                            excerpt = text[:min(180, remaining)]
+                            cells[member['id']] = excerpt
+                            remaining -= len(excerpt)
+                            clipped |= len(excerpt) < len(text)
+                        entry['tables'].append({'id': table_id, 'direction': direction, 'cells': cells,
+                                                'excerpt_only': clipped})
+                        break
+            before = bisect_left(conditions, index)
+            # Only nearby antecedent context, in source order. Its claims belong to the attachment.
+            for pos in conditions[max(0, before-4):before]:
+                if index-pos <= 14:
+                    field = blocks[pos][1]
+                    entry['section_context'][field['id']] = field['text'][:180]
+            result[key] = entry
+    return result
 
 
 def _cell(field):

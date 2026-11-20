@@ -134,3 +134,44 @@ def test_pinned_tokenizer_counts_without_acquiring_busy_generation_slot(monkeypa
         assert caught.value.code == 'managed_session_changed'
 
     asyncio.run(scenario())
+
+
+
+@pytest.mark.parametrize('count,declared,expected', [
+    (12040, None, 5022), (1000, None, 16062), (1000, 6000, 6000),
+    (None, None, 4096), (None, 2048, 2048)])
+def test_only_measured_freeform_review_expands_to_available_context(monkeypatch, count, declared, expected):
+    from contextlib import asynccontextmanager
+    from agent.execution.compiler import InvocationCompiler
+    from test_unified_invocation_v3 import model_spec
+
+    async def scenario():
+        capabilities = {'context_length': 20224}
+        if declared is not None:
+            capabilities['max_output_tokens'] = declared
+        profile = ProviderProfile('managed:model', 'model', 'openai_compatible', 'http://127.0.0.1:1/v1',
+                                  model_capabilities={'model': capabilities})
+        provider = ManagedLocalProvider(profile, None, None)
+
+        async def measure(prepared):
+            return count
+
+        @asynccontextmanager
+        async def session(provider):
+            yield SimpleNamespace(measure_request=measure)
+
+        monkeypatch.setattr('agent.runtime.ModelInvocationService.provider_session', session)
+        spec = model_spec(protocol_id='openai_chat', adapter_id='openai.chat', route_id='openai.chat',
+                          response_format=None, max_output_tokens=4096)
+        service = SimpleNamespace(invocation_compiler=InvocationCompiler())
+        messages = [{'role': 'user', 'content': 'Review these positions.'}]
+        final, prepared = await ChatRunService._prepare_measured_model_request(
+            service, provider, spec, messages, requested_output_tokens=4096, expand_review_output=True)
+        assert final.max_output_tokens == prepared.options.max_output_tokens == expected
+        if count is not None:
+            assert prepared.input_budget['request_tokens'] + expected <= int(20224 * .85)
+        ordinary, _ = await ChatRunService._prepare_measured_model_request(
+            service, provider, spec, messages, requested_output_tokens=4096)
+        assert ordinary.max_output_tokens == 4096
+
+    asyncio.run(scenario())

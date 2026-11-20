@@ -1,4 +1,4 @@
-import { Component, memo, useMemo, type ErrorInfo, type ReactNode } from "react";
+import { Component, memo, useId, useMemo, type ErrorInfo, type ReactNode } from "react";
 import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -7,6 +7,7 @@ import type { AssistantMessageState } from "./AssistantMessageBody";
 import { MarkdownCodeBlock } from "./MarkdownCodeBlock";
 import { MarkdownImage } from "./MarkdownImage";
 import { MarkdownLink } from "./MarkdownLink";
+import { reviewVerdicts } from "./reviewVerdicts";
 import { markdownUrlTransform } from "./markdownPolicy";
 import type { ProjectDirectoryTarget, ProjectFileTarget } from "./markdownPolicy";
 
@@ -52,27 +53,41 @@ const rehypePlugins: Options["rehypePlugins"] = [[rehypeKatex, {
   trust: false, strict: "warn", maxExpand: 1000, throwOnError: false,
 }]];
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds }: {
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds, documentReview, targetLabels }: {
   content: string; state: AssistantMessageState;
+  documentReview?: boolean;
+  targetLabels?: Readonly<Record<string, string>>;
   verifiedEvidenceIds?: readonly string[];
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;
 }) {
+  const scope = useId();
   // Stable component types retain code/image/link state as streamed text grows.
   const components = useMemo<Components>(() => ({
     a: (props) => <MarkdownLink {...props} verifiedEvidenceIds={verifiedEvidenceIds} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />,
+    button: ({ children, node, ...props }) => <button {...props} onClick={() => {
+      const targetId = node?.properties.dataReviewSource;
+      if (typeof targetId !== "string" || !targetId.startsWith(scope + "-quote-")) return;
+      const target = document.getElementById(targetId);
+      if (!(target instanceof HTMLDetailsElement)) return;
+      target.open = true;
+      target.querySelector("summary")?.focus();
+    }}>{children}</button>,
     img: MarkdownImage,
     pre: (props) => <MarkdownCodeBlock {...props} state={state} />,
     table: ({ children, ...props }) => (
       <div className="markdown-table-scroll"><table {...props}>{children}</table></div>
     ),
-  }), [onProjectFile, onProjectDirectory, state, verifiedEvidenceIds]);
+  }), [scope, onProjectFile, onProjectDirectory, state, verifiedEvidenceIds]);
+  const review = documentReview || content.startsWith("# 文档审阅正文\n") || content.startsWith("# 文档审阅报告\n");
+  const plugins = useMemo<Options["rehypePlugins"]>(() => review
+    ? [...rehypePlugins, [reviewVerdicts, { labels: targetLabels, scope }]] : rehypePlugins, [review, targetLabels, scope]);
   return (
     <MarkdownErrorBoundary content={content}>
       <div className="markdown-body">
         <ReactMarkdown
           remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
+          rehypePlugins={plugins}
           skipHtml
           urlTransform={markdownUrlTransform}
           components={components}

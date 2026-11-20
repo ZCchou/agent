@@ -132,20 +132,27 @@ def test_only_unresolved_targets_supplement_once_and_resume_preserves_original(m
             return {"public_review_body": "## p-1\nNew finding."}
         async def evidence(batch):
             return {"evidence": [], "generation": None}
+        commits = []
+        def on_commit(batch, section):
+            assert any(stored.get('presented_body') == section['presented_body'] for stored in cache.values())
+            commits.append(section['presented_body'])
         async def run():
             return await review._freeform_review(workflow, "run", template, "Review", fields, generate, evidence,
-                activity=Activity(), identity={"batch_output_tokens": 4096}, token_allowance=12000)
+                activity=Activity(), identity={"batch_output_tokens": 4096}, token_allowance=12000, on_public_commit=on_commit)
         if cancel and not capacity:
             with pytest.raises(asyncio.CancelledError):
                 await run()
         result = await run()
         assert calls == ([["p-0", "p-1"]] if capacity else [["p-0", "p-1"], ["p-1"]])
-        assert "Original overview.\n## p-0\nSaved finding." in result["markdown"]
+        assert result['report']['public_review_sections'][0]['body'] == "Original overview.\n## p-0\nSaved finding."
+        assert all(body in result["markdown"] for body in commits)
+        assert "Original overview.\n## actual source\nSaved finding." in result["markdown"]
         states = {row["target_id"]: row["status"] for row in result["report"]["public_target_delivery"]}
         assert states == {"p-0": "delivered", "p-1": "pending" if cancel or capacity else "delivered"}
         assert result["report"]["coverage"]["reviewed"] == 0
         await run()
         assert len(calls) == (1 if capacity else 2)
+        assert len(commits) == (1 if capacity or cancel else 2)
     asyncio.run(exercise())
 
 

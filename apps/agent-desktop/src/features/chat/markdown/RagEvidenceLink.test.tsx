@@ -128,3 +128,27 @@ describe("chat evidence citations", () => {
     await expect(loadRagEvidencePage("project-a", evidenceId, 0, new AbortController().signal)).rejects.toThrow("rag_evidence_invalid");
   });
 });
+it("decorates explicit document verdicts and approved numeric citations while preserving ordinary chat prose", () => {
+ const report = "## p-7\n\n**判断**：无法判断。\n\n> **判断**：不符合\n\n|判断|原文|\n|--|--|\n|待补充|符合|";
+ const content = renderToStaticMarkup(<MarkdownRenderer content={report} state="draft" documentReview targetLabels={{"p-7":"低温试验"}} />);
+ expect(content).toContain('title="p-7">低温试验');
+ expect(content).toContain('review-verdict--unknown');
+ expect(content).toContain('review-verdict--missing');
+ expect(content).not.toContain('review-verdict--issue');
+ expect(content).not.toContain('review-verdict--pass');
+ expect(renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />)).not.toContain('review-verdict');
+ const id="rag-12345678-1234-1234-1234-123456789012";
+ useApp.mockReturnValue({activeConversation:{project_id:"project-a"}});
+ const cite=`原文[1](rag-evidence:${id})`;
+ expect(renderToStaticMarkup(<MarkdownRenderer content={cite} state="complete" verifiedEvidenceIds={[id]} />)).toContain('markdown-link--citation');
+ expect(renderToStaticMarkup(<MarkdownRenderer content={cite} state="complete" />)).not.toContain('markdown-link--citation');
+});
+it("opens only a matching local report source; the same source number is scoped to its own message", () => {
+ const report="# 文档审阅正文\n\n正文[1](#审阅出处-1)[2](#审阅出处-2)\n\n##### 审阅出处 1\n\n**来源**　标准 · §4.6.2 · PDF 第 18 页\n\n> 减压在 15s 内完成。";
+ const html=renderToStaticMarkup(<><MarkdownRenderer content={report} state="complete" /><MarkdownRenderer content={report} state="complete" /></>);
+ const ids=[...html.matchAll(/<details id="([^"]+)"/g)].map(m=>m[1]);
+ expect(new Set(ids).size).toBe(2);
+ for(const id of ids) expect(html).toContain('aria-controls="'+id+'"');
+ expect(html).not.toContain('aria-label="审阅出处 2"');
+ expect(html).toContain('<summary>[1] 标准 · §4.6.2 · PDF 第 18 页</summary>');
+});

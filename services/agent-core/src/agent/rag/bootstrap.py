@@ -6,6 +6,7 @@ import shutil
 def install_builtin_skill(registry):
     _install(registry, 'airworthiness-clause-qa', 'builtin-rag-skill-v1.installed')
     _install(registry, 'local-document-work', 'builtin-local-document-work-v1.installed')
+    _install(registry, 'grounded-document-review', 'builtin-grounded-document-review-v1.installed')
 
 
 def _install(registry, name, marker_name):

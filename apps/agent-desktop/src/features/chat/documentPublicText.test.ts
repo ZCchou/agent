@@ -7,6 +7,16 @@ it("shows first delta independently and deduplicates the same sequence",()=>{
  expect(appendDocumentPublicText(first,event,"run")).toBe(first);
  expect(appendDocumentPublicText(first,{...event,sequence:2,data:{...event.data,delta:" continues"}},"run")?.streams[0].content).toBe("Public document text continues");
 });
+it("replaces only the checkpointed stream and retires its presented text on the matching receipt", () => {
+ const stream=appendDocumentPublicText(null,{...event,data:{...event.data,target_labels:{"p-2":"低温工作试验"}}},"run");
+ expect(stream?.streams[0].targetLabels).toEqual({"p-2":"低温工作试验"});
+ const saved={...event,sequence:2,data:{...event.data,phase:"public_text_committed",presented_body:"## 低温工作试验"}};
+ const committed=appendDocumentPublicText(stream,saved,"run");
+ expect(committed?.streams[0].content).toBe("## 低温工作试验");
+ expect(appendDocumentPublicText(committed,{...event,sequence:3},"run")).toBe(committed);
+ expect(reconcileDocumentReceipt(committed,"run","c",receipt("# 文档审阅正文\n\n## 低温工作试验"))?.streams).toHaveLength(0);
+ expect(appendDocumentPublicText(stream,{...saved,data:{...saved.data,presented_body:" "}},"run")).toBe(stream);
+});
 it("does not mix another run or private activity into public document text",()=>{
  expect(appendDocumentPublicText(null,event,"another")).toBeNull();
  expect(appendDocumentPublicText(null,{...event,data:{...event.data,public_text:false}},"run")).toBeNull();

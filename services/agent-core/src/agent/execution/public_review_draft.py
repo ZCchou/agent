@@ -68,7 +68,7 @@ def public_review_draft(service, run):
                 if identity['targets'] != ids or seen.intersection(ids):
                     continue
                 seen.update(ids)
-                chunks.append(section['body'])
+                chunks.append(section.get('presented_body') or section['body'])
             if chunks:
                 body = '\n\n'.join(chunks) + '\n\n尚未完成整份审阅。'
         if not body:

@@ -544,3 +544,28 @@ def test_exact_clause_can_close_without_exposing_repeat_tools():
         'parent_context': {'text': parent, 'text_hash': hashlib.sha256(parent.encode()).hexdigest(),
                            'has_more': True}}
     assert grounding.prepare_exact_clause_answer('run') is None
+
+
+
+def test_public_rag_numbers_only_verified_sources_and_retains_text():
+    g = grounding()
+    prepare(g)
+    state = g.runs['run-1']
+    first = 'rag-aaaaaaaa-1111-4444-8888-111111111111'
+    second = 'rag-bbbbbbbb-2222-4444-8888-222222222222'
+    state['admitted'] = {first, second}
+    state['evidence'] = {key: evidence() for key in (first, second)}
+    state['quote_options'] = {key: {'q-one': 'actual quote'} for key in (first, second)}
+    text, verified = g.public_answer('run-1',
+        f'已知 [{second}|q-one]。待核 [unknown|q-one]。补充 [rag-aaaaaaaa|q-one]。'
+        f'再次引用 [{second}|q-one]。模型自建 [虚构](rag-evidence:{second})。')
+    assert text == (f'已知 [1](rag-evidence:{second})。待核 〔引文未核验〕。补充 [2](rag-evidence:{first})。'
+                    f'再次引用 [1](rag-evidence:{second})。模型自建 虚构〔引文未核验〕。')
+    assert verified == {first, second}
+    state['admitted'].add(first.replace('1111', 'ffff'))
+    assert g.public_answer('run-1', '文字 [rag-aaaaaaaa|q-one]') == ('文字 〔引文未核验〕', set())
+    payload = {'response': {'claims': [{'text': 'Fact', 'evidence': [{'id': second, 'quote': 'actual quote'}]},
+                                       {'text': 'More', 'evidence_gap': 'Missing data'}]}}
+    assert g.public_answer('run-1', json.dumps(payload)) == (
+        f'Fact [1](rag-evidence:{second})\n\nMore\n\nMissing data', {second})
+    assert g.public_answer('run-1', '可直接展示的回答') == ('可直接展示的回答', set())

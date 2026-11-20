@@ -12,11 +12,13 @@ export interface AssistantMessageBodyProps {
   content: string;
   state: AssistantMessageState;
   verifiedEvidenceIds?: readonly string[];
+  documentReview?: boolean;
+  targetLabels?: Readonly<Record<string, string>>;
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;
 }
 
-export const AssistantMessageBody = memo(function AssistantMessageBody({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds }: AssistantMessageBodyProps) {
+export const AssistantMessageBody = memo(function AssistantMessageBody({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds, documentReview, targetLabels }: AssistantMessageBodyProps) {
   const { t } = useTranslation("chat");
   const displayContent = presentUnexecutedTools(content, t("status.unexecutedTools"));
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -42,7 +44,8 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({ content
 
   return (
     <div className="chat-message__bubble chat-message__bubble--assistant">
-      <MarkdownRenderer verifiedEvidenceIds={verifiedEvidenceIds} content={displayContent} state={state} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
+      <MarkdownRenderer verifiedEvidenceIds={verifiedEvidenceIds} content={displayContent} state={state} documentReview={documentReview}
+        targetLabels={targetLabels} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
       {state !== "streaming" && content ? (
         <div className="assistant-message-actions">
           <button type="button" onClick={() => void copyMarkdown()}>

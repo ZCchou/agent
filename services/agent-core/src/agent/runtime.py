@@ -4631,13 +4631,24 @@ class ChatRunService:
         return prepared
 
     async def _prepare_measured_model_request(self, provider, spec, messages, *,
-                                            requested_output_tokens, refresh_snapshot=None):
+                                            requested_output_tokens, refresh_snapshot=None, expand_review_output=False):
         """Freeze the actual template budget before persisting an immutable spec."""
-        window = (getattr(provider.profile, 'model_capabilities', None) or {}).get(spec.model_id, {}).get('context_length')
+        capabilities = (getattr(provider.profile, 'model_capabilities', None) or {}).get(spec.model_id, {})
+        window = capabilities.get('context_length')
         if not isinstance(provider, ManagedLocalProvider) or type(window) is not int:
             return spec, self.invocation_compiler.compile_model(spec, messages, context_window=window)
         original = spec
         ceiling = requested_output_tokens
+        if expand_review_output and spec.protocol_id == 'openai_chat' and not spec.allowed_tool_names and not spec.response_format:
+            # The review batch reserve is an input-packing heuristic. The resident
+            # managed engine reports its loaded slot size and any real model limit.
+            # Use the conservative original spec if template measurement is unavailable.
+            declared_limit = capabilities.get('max_output_tokens')
+            ceiling = window
+            if type(declared_limit) is int and declared_limit > 0:
+                ceiling = min(window, declared_limit)
+                if original.max_output_tokens > declared_limit:
+                    original = replace(original, max_output_tokens=declared_limit, spec_hash='')
         spec = replace(spec, max_output_tokens=ceiling, spec_hash='')
         # Pinned local tokenizer endpoints only render/count text. They can run
         # while another request owns the sole inference slot.
@@ -4702,6 +4713,7 @@ class ChatRunService:
         response_schema: dict[str, Any] | None = None,
         diagnostic_only: bool = False,
         on_public_text: Any = None,
+        expand_review_output: bool = False,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
         async def checked_public_text(delta):
             active_run = self.repository.get_model_run(run['id'])
@@ -4736,7 +4748,7 @@ class ChatRunService:
                 spec = replace(spec, response_format='json_schema',
                                response_schema_json=json.dumps(response_schema, sort_keys=True), spec_hash='')
             spec, prepared = await self._prepare_measured_model_request(provider, spec, messages,
-                requested_output_tokens=max_output_tokens)
+                requested_output_tokens=max_output_tokens, expand_review_output=expand_review_output)
             self.execution_repository.save_invocation_spec(spec)
             if getattr(prepared, 'input_budget', None) and self.context.context_repository.next_snapshot_round(run['id']) > 0:
                 self.context.context_repository.save_tool_round_snapshot(run['id'],
@@ -6777,6 +6789,17 @@ class ChatRunService:
                 register_quote_options(state, key, item['quote_options'])
             return {'evidence': presented, 'generation': found['generation']}
 
+        from agent.review_presentation import review_target_labels
+        public_streams = {}
+
+        async def committed(batch, saved):
+            stream_id = public_streams.pop(batch['index'], None)
+            if stream_id and saved.get('presented_body'):
+                await self._emit(run['id'], 'run.document_processing', {
+                    'phase': 'public_text_committed', 'public_text': True,
+                    'stream_id': stream_id, 'presented_body': saved['presented_body'],
+                    'verified_source_quotes': saved.get('verified_source_quotes', [])})
+
         async def generate(batch, sources):
             nonlocal schema_available
             self.rag_grounding.validate(run['id'])
@@ -6791,15 +6814,18 @@ class ChatRunService:
             public_options = {}
             streamed = []
             if batch.get('freeform_review'):
-                owner = current_activity.get()
-                stream_id = f"{template['id']}:{owner.attempt if owner else attempt_id}:{batch['index']}"
+                stream_id = str(uuid.uuid4())
+                public_streams[batch['index']] = stream_id
+                labels = review_target_labels(batch)
                 async def public_text(delta):
                     streamed.append(delta)
                     await self._emit(run['id'], 'run.document_processing', {
                         'phase': 'public_text', 'public_text': True, 'delta': delta,
                         'stream_id': stream_id, 'template_id': template['id'],
+                        **({'target_labels': labels} if len(streamed) == 1 else {}),
                         'target_ids': batch['target_ids']})
                 public_options['on_public_text'] = public_text
+                public_options['expand_review_output'] = True
             try:
                 text, usage, _ = await self._invoke_planned_step(run, plan, step, attempt,
                     self._provider(self._profile_for_step(profile, step)), messages,
@@ -6977,7 +7003,7 @@ class ChatRunService:
                 return await review_template(self.documents, run['id'], template['id'], request,
                     generate, evidence, lambda text, citations: self.rag_grounding.document_claim(run['id'], text, citations),
                     activity=activity, identity=identity, token_allowance=allowance, parent_task_id=parent_task_id,
-                    target_ids=target_ids, freeform=True, review_source=review_source)
+                    target_ids=target_ids, freeform=True, review_source=review_source, on_public_commit=committed)
             except BaseException as error:
                 if managed_expected is not None and self._managed_transport_failure(error):
                     reload_model = True

@@ -1306,7 +1306,7 @@ export function ChatPage() {
           }}
           onSettings={() => setCurrentPage("models")} />
         {activeConversationId && documentPublicText && documentPublicText.runId === lastRunId && documentPublicText.streams.map(stream => <AssistantMessageBody key={documentPublicText.runId + stream.id}
-          content={stream.content} state="draft"
+          content={stream.content} state="draft" documentReview targetLabels={stream.targetLabels}
           onProjectFile={effectiveKind === "project_work" ? openProjectFile : undefined}
           onProjectDirectory={effectiveKind === "project_work" ? openProjectDirectory : undefined} />)}
         {sending && (!monitoredExecution || streamingContent) ? (

@@ -17,7 +17,10 @@ from test_unified_invocation_v3 import model_spec
 def test_review_targets_template_id_uses_manifest_topic_without_attachment(tmp_path,monkeypatch,legacy_name_missing,public_body,rag_mode,fault=None):
  async def exercise():
   public_events=[]
+  committed_events=[]
   async def emit(event):
+   if event.get('event_type')=='run.document_processing' and event['data'].get('phase')=='public_text_committed':
+    committed_events.append(event)
    if event.get('event_type')=='run.document_processing' and event['data'].get('phase')=='public_text':
     public_events.append(event)
   core,project,work,service=await fixture(tmp_path,emit)
@@ -85,11 +88,17 @@ def test_review_targets_template_id_uses_manifest_topic_without_attachment(tmp_p
      with core._connect() as db:assert db.execute("SELECT count(*) FROM document_artifacts WHERE run_id=? AND kind='markdown'",(run['id'],)).fetchone()[0]==0
      return
     if fault and fault!='length':
+     assert not committed_events
      assert len(calls)==1, 'A public generation must not be replayed after output'
      assert not resolution.success
      with core._connect() as db:assert db.execute("SELECT count(*) FROM document_artifacts WHERE run_id=? AND kind='markdown'",(run['id'],)).fetchone()[0]==0
      return
     assert resolution.success, resolution.output
+    if public_body and public_events:
+     assert committed_events
+     assert public_events[0]['data']['target_labels']
+     assert committed_events[0]['data']['stream_id']==public_events[0]['data']['stream_id']
+     assert committed_events[0]['data']['presented_body']
     receipt=service.result_store.save(operation['id'],resolution.output,success=resolution.success)
     assert operation['status']=='completed' and receipt['success'] and receipt['result_sha256']
     result=json.loads(resolution.output)
