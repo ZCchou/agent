@@ -400,6 +400,7 @@ const common = {
         "unknown": "更新失败，请重试。"
       }
     },
+    interfaceStyle: { label: "界面风格", classic: "经典", error: "界面风格保存失败。" },
     moreSettings: "更多设置",
     webSearch: {
       title: "联网与搜索", description: "管理搜索服务、隐私、默认路径和连接状态。", open: "打开",

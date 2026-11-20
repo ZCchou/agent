@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory)][string]$CoreExecutable,
     [Parameter(Mandatory)][string]$RagRuntimeDirectory,
     [Parameter(Mandatory)][string]$LlmRuntimeDirectory,
+    [Parameter(Mandatory)][string]$OcrRuntimeDirectory,
+    [Parameter(Mandatory)][string]$OcrModelDirectory,
     [Parameter(Mandatory)][string]$PrerequisiteDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [string]$Python = 'python',
@@ -91,7 +93,8 @@ if (-not $ResumePrepared) {
         }
     }
     Invoke-Checked $Python @((Join-Path $PSScriptRoot 'offline_delivery.py'), 'prepare-payload', '--llm', $LlmRuntimeDirectory,
-        '--rag', $RagRuntimeDirectory, '--prereqs', $PrerequisiteDirectory, '--destination', $payload, '--release-id', $releaseId)
+        '--rag', $RagRuntimeDirectory, '--ocr', $OcrRuntimeDirectory, '--models', $OcrModelDirectory,
+        '--prereqs', $PrerequisiteDirectory, '--destination', $payload, '--release-id', $releaseId)
     $manifestPath = Join-Path $payload 'payload-manifest.json'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $total = [long]0
@@ -142,7 +145,7 @@ if (-not $ResumePrepared) {
         fallback_reason = $(if ($external) { 'NSIS 2 GiB executable/data-block limit, conservative uncompressed input bound exceeded. Complete offline ZIP selected before unsupported bundling. https://nsis.sourceforge.io/Features' } else { $null })
     }
     $prepared | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $preparedPath -Encoding UTF8
-    Copy-Item -LiteralPath (Join-Path $repository 'docs/offline-windows-operations.zh-CN.md') -Destination (Join-Path $output '离线安装与迁移说明.md')
+    Copy-Item -LiteralPath (Join-Path $repository 'docs/offline-local-install.zh-CN.md') -Destination (Join-Path $output '离线安装与迁移说明.md')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'offline-runtime.lock.json') -Destination (Join-Path $output 'runtime-provenance.lock.json')
 }
 $prepared = Get-Content -LiteralPath $preparedPath -Raw | ConvertFrom-Json

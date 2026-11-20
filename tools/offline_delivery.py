@@ -16,7 +16,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = Path(__file__).with_name('offline-runtime.lock.json')
-COMPONENTS = ('llm-runtime', 'rag-runtime', 'prerequisites')
+COMPONENTS = ('llm-runtime', 'rag-runtime', 'ocr-runtime', 'ocr-model-package', 'prerequisites')
 NSIS_LIMIT = 2 ** 31 - 64 * 1024 * 1024
 TAURI_TEMPLATE_SHA256 = 'f56e20d1afca05594d8218b45152455493b51e26ec3422835d1b418e6a2acf2f'
 
@@ -190,7 +190,23 @@ def verify_llm(root: Path) -> dict:
     return manifest
 
 
-def make_payload(llm: Path, rag: Path, prereqs: Path, target: Path, release_id: str) -> Path:
+def verify_ocr(ocr: Path, models: Path) -> None:
+    from build_ocr_runtime import verify_existing
+    from prepare_ocr_models import MODELS
+    verify_existing(ocr)
+    descriptor = 'ocr-model.json'
+    manifest = json.loads((models / descriptor).read_text(encoding='utf-8-sig'))
+    roles = {role: {'name': name, 'directory': 'models/' + name} for role, name in MODELS.items()}
+    if manifest.get('schema_version') != 1 or manifest.get('profile') != 'pp-structure-v3' or manifest.get('models') != roles:
+        raise ValueError('Incomplete PP-StructureV3 model package')
+    observed = {name: sha256(path) for name, path in safe_tree(models) if name != descriptor}
+    if observed != manifest.get('files') or any(
+            role['directory'] + '/inference.pdiparams' not in observed for role in roles.values()):
+        raise ValueError('OCR model package inventory or weights mismatch')
+
+
+def make_payload(llm: Path, rag: Path, prereqs: Path, target: Path, release_id: str, *,
+                 ocr: Path, models: Path) -> Path:
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     from rag_runtime_bundle import verify, verify_build_identity
@@ -200,6 +216,7 @@ def make_payload(llm: Path, rag: Path, prereqs: Path, target: Path, release_id: 
     for _ in safe_tree(rag):
         pass
     verify_llm(llm)
+    verify_ocr(ocr, models)
     runtime = verify(rag, 'cuda')
     verify_build_identity(runtime, ROOT)
     lock = json.loads(LOCK.read_text(encoding='utf-8'))
@@ -210,6 +227,8 @@ def make_payload(llm: Path, rag: Path, prereqs: Path, target: Path, release_id: 
     target.mkdir(parents=True)
     shutil.copytree(llm, target / 'llm-runtime')
     shutil.copytree(rag, target / 'rag-runtime')
+    shutil.copytree(ocr, target / 'ocr-runtime')
+    shutil.copytree(models, target / 'ocr-model-package')
     (target / 'prerequisites').mkdir()
     for name in lock['prerequisites']:
         shutil.copyfile(prereqs / name, target / 'prerequisites' / name)
@@ -223,7 +242,7 @@ def make_payload(llm: Path, rag: Path, prereqs: Path, target: Path, release_id: 
 
 def installer_hook(manifest: Path, destination: Path, embedded_payload: bool = False, *,
                    application_manifest: Path, run_prerequisites: bool = True,
-                   include_ocr: bool = False, airworthiness: bool = False) -> Path:
+                   include_ocr: bool = False, airworthiness: bool = False, bundled_ocr: bool = False) -> Path:
     """Bake the external payload identity into the installer itself."""
     digest = sha256(manifest)
     application_digest = sha256(application_manifest)
@@ -344,6 +363,8 @@ Var OfflineTransactionToken
   ${{EndIf}}
 !macroend
 '''
+    if bundled_ocr:
+        content = content.replace('-Action ', '-BundledOcr -Action ')
     if include_ocr:
         content = content.replace('-Action ', '-IncludeOcr -Action ')
     if airworthiness:
@@ -497,7 +518,7 @@ def main():
     prepare.add_argument('--cache', type=Path, required=True)
     prepare.add_argument('--destination', type=Path, required=True)
     payload = subs.add_parser('prepare-payload')
-    for name in ('llm', 'rag', 'prereqs', 'destination'):
+    for name in ('llm', 'rag', 'ocr', 'models', 'prereqs', 'destination'):
         payload.add_argument('--' + name, type=Path, required=True)
     payload.add_argument('--release-id', required=True)
     verify = subs.add_parser('verify-payload')
@@ -519,14 +540,16 @@ def main():
     if args.action == 'prepare-llm':
         prepare_llm(args.cache, args.destination)
     elif args.action == 'prepare-payload':
-        path = make_payload(args.llm, args.rag, args.prereqs, args.destination, args.release_id)
+        path = make_payload(args.llm, args.rag, args.prereqs, args.destination, args.release_id,
+                            ocr=args.ocr, models=args.models)
         files = json.loads(path.read_text(encoding='utf-8'))['files']
         print(json.dumps({'manifest_sha256': sha256(path), 'files': len(files),
                           'bytes': sum(item['bytes'] for item in files.values()),
                           'fallback_reason': nsis_capacity_reason(sum(item['bytes'] for item in files.values()),
                                                                  max(item['bytes'] for item in files.values()))}))
     elif args.action == 'installer-hook':
-        installer_hook(args.manifest, args.destination, args.embedded, application_manifest=args.application_manifest)
+        installer_hook(args.manifest, args.destination, args.embedded, application_manifest=args.application_manifest,
+                       bundled_ocr=True)
     elif args.action == 'archive':
         archive_delivery(args.directory, not args.checksums_only)
     elif args.action == 'installer-template':

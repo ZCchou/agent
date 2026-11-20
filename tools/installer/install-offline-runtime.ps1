@@ -6,6 +6,7 @@ param(
     [string]$ManifestSha256,
     [switch]$RunPrerequisites,
     [switch]$IncludeOcr,
+    [switch]$BundledOcr,
     [switch]$Airworthiness,
     [switch]$DeferCommit,
     [string]$TransactionToken,
@@ -26,6 +27,10 @@ foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Secu
 $components = @('llm-runtime', 'rag-runtime')
 $appFiles = @('agent-desktop.exe', 'agent.exe', 'agent-core.exe', 'uninstall.exe')
 $owner = 'io.github.zcchou.agent.offline-runtime.v1'
+if ($BundledOcr) {
+    $components += @('ocr-runtime', 'ocr-model-package')
+    $appFiles += @('agent-installer.exe', 'agent-updater.exe')
+}
 if ($IncludeOcr) {
     $components += @('ocr-runtime', 'ocr-model-package')
     $appFiles += 'agent_desktop_lib.dll'
@@ -100,6 +105,7 @@ function Read-ApplicationManifest([string]$Path, [string]$Digest) {
     }
     $record = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     $allowed = @('agent-desktop.exe', 'agent-core.exe')
+    if ($BundledOcr) { $allowed += @('agent-installer.exe', 'agent-updater.exe') }
     if ($IncludeOcr) { $allowed += 'agent_desktop_lib.dll' }
     if ($Airworthiness) { $allowed += @('agent_desktop_lib.dll', 'agent-updater.exe', 'application.json') }
     if ($record.schema_version -ne 1 -or @($record.files.PSObject.Properties).Count -lt 2) { throw 'Invalid application identity manifest' }
@@ -148,7 +154,9 @@ function Verify-Tree([string]$Root, $Manifest, [string[]]$OnlyComponents = @()) 
     }
     $observed = 0
     $roots = @($Root)
-    if ($OnlyComponents.Count) { $roots = @($OnlyComponents | ForEach-Object { Get-SafePath $Root $_ }) }
+    if ($OnlyComponents.Count) {
+        $roots = @($OnlyComponents | ForEach-Object { Get-SafePath $Root $_ } | Where-Object { Test-Path -LiteralPath $_ })
+    }
     foreach ($treeRoot in $roots) {
         foreach ($item in Get-Tree $treeRoot) {
             $name = $item.FullName.Substring([IO.Path]::GetFullPath($Root).TrimEnd('\').Length + 1).Replace('\', '/')

@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import uuid
 
-from offline_delivery import verify_llm
+from offline_delivery import verify_llm, verify_ocr
 from rag_runtime_bundle import verify, verify_build_identity
 
 
@@ -19,6 +19,7 @@ def main():
     root = args.installation.resolve()
     repository = Path(__file__).resolve().parents[1]
     verify_llm(root / 'llm-runtime')
+    verify_ocr(root / 'ocr-runtime', root / 'ocr-model-package')
     runtime = verify(root / 'rag-runtime', 'cuda')
     verify_build_identity(runtime, repository)
     data = args.data_directory.resolve()
@@ -49,7 +50,8 @@ def main():
     lines = [json.loads(line) for line in result.read_text(encoding='utf-8').splitlines()]
     if lines[-1].get('type') != 'end' or not any(line.get('type') == 'chunk' for line in lines):
         raise ValueError('Installed parser produced an incomplete result')
-    print(json.dumps({'runtime_hashes_verified': True, 'cpu_cuda_bundle': runtime['device_bundle'],
+    print(json.dumps({'runtime_hashes_verified': True, 'ocr_profile': 'pp-structure-v3',
+                      'cpu_cuda_bundle': runtime['device_bundle'],
                       'parser_mode_passed': True, 'installation': str(root)}))
 
 

@@ -47,3 +47,25 @@ def test_model_manifest_cannot_escape_directory(tmp_path):
     source.joinpath('ocr-model.json').write_text(json.dumps(manifest))
     with pytest.raises(CoreDataError):
         OcrModelStore(tmp_path / 'managed').import_bundle(source)
+
+
+def test_offline_app_registers_default_once_and_preserves_custom_model(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'agent-core.exe'))
+    bundled = model_bundle(tmp_path / 'ocr-model-package')
+    store = OcrModelStore(tmp_path / 'profile' / 'ocr-models')
+    default, = store.list_models()['models']
+    assert default['status'] == 'ready'
+    assert store.get_profile(default['id'])['digest'] == default['id']
+    custom = model_bundle(tmp_path / 'custom')
+    manifest = json.loads((custom / 'ocr-model.json').read_text())
+    manifest['name'] = 'Custom'
+    (custom / 'ocr-model.json').write_text(json.dumps(manifest))
+    existing = OcrModelStore(tmp_path / 'other-profile' / 'ocr-models')
+    existing.import_bundle(custom)
+    (bundled / 'inference.pdiparams').write_bytes(b'corrupt')
+    assert store.list_models()['models'] == [default]
+    assert [m['name'] for m in existing.list_models()['models']] == ['Custom']
+    with pytest.raises(CoreDataError, match='hash'):
+        OcrModelStore(tmp_path / 'fresh' / 'ocr-models').list_models()

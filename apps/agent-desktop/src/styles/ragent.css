@@ -1,0 +1,56 @@
+/* Match the ragent desktop palette and conversation layout. */
+:root[data-interface-style="ragent"] {
+  --color-background: #fafafa;
+  --color-sidebar: #fafafa;
+  --color-text: #1a1a1a;
+  --color-text-secondary: #4a4a4a;
+  --color-text-muted: #737373;
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  --color-primary-soft: #dbeafe;
+  --color-border: #e5e5e5;
+  --color-border-soft: #f0f0f0;
+  --color-success: #10b981;
+  --font-size-body: 14px;
+  --font-size-page-title: 24px;
+  --line-height-body: 1.5;
+  --topbar-height: 60px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+[data-interface-style="ragent"] {
+  .sidebar { padding: 12px; }
+  .sidebar-brand { padding: 4px 4px 12px; border-bottom: 1px solid #f0f0f0; margin-bottom: 12px; }
+  .sidebar-brand__icon { width: 40px; height: 40px; border-radius: 8px; background: #dbeafe; }
+  .sidebar-brand__icon img { width: 29px; height: 29px; }
+  .sidebar-brand__name { font-weight: 600; }
+  .sidebar-brand__tagline { font-size: 12px; }
+  .sidebar-new-chat {
+    justify-content: flex-start;
+    gap: 12px;
+    border: 1px solid #e6eef6;
+    border-radius: 16px;
+    padding: 8px 12px;
+    background: linear-gradient(115deg, #f0f9ff, #fff 62%, #fef3c7);
+    color: #1f2937;
+    box-shadow: 0 4px 12px rgb(15 23 42 / 6%);
+  }
+  .sidebar-new-chat:hover { background: linear-gradient(115deg, #dbeafe, #fff 62%, #fef3c7); }
+  .sidebar-new-chat .ui-button__icon {
+    display: grid; width: 32px; height: 32px; place-items: center; border-radius: 10px;
+    background: linear-gradient(135deg, #60a5fa, #2563eb); color: white;
+  }
+  .sidebar-nav-item { color: #4a4a4a; }
+  .sidebar-nav-item:hover { background: #f5f5f5; }
+  .sidebar-nav-item--active { background: #dbeafe; color: #2563eb; }
+  .app-workspace { background: white; }
+  .chat-messages, .chat-composer-area { width: min(840px, 100%); }
+  .chat-composer { border-radius: 20px; box-shadow: 0 4px 12px rgb(0 0 0 / 6%); }
+  .chat-message--user { max-width: 80%; }
+  .chat-message--user > .chat-message__bubble { background: #f5f5f5; color: #333; font-size: 15px; line-height: 1.5; }
+  .chat-message--assistant .markdown-body { font-size: 15px; line-height: 1.75; }
+  .chat-run-message__status { border-color: #bfdbfe; background: #dbeafe; color: #1e40af; }
+  .chat-run-message__agent { background: #bfdbfe; color: #2563eb; }
+  .execution-task-card { border-radius: 12px; border: 1px solid #bfdbfe; padding: 10px 14px; background: #eff6ff; }
+  .execution-task-card li::marker { color: #2563eb; }
+}

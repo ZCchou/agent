@@ -77,7 +77,7 @@ class OcrPipeline:
             if not isinstance(pages, list) or not 1 <= len(pages) <= 10_000:
                 raise CoreDataError('ocr_result_invalid', 'Invalid page scan result')
             self.progress(job['id'], total_pages=len(pages), phase='recognizing')
-            models = self.models.list_models()['models']
+            models = (await asyncio.to_thread(self.models.list_models))['models']
             profile_id = options.get('profile_id') or (models[0]['id'] if models else None)
             page_range = set(options.get('pages', []))
             selected = [page for page in pages if options.get('ocr_mode', 'auto') != 'off'
