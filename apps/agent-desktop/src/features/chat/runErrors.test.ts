@@ -89,3 +89,11 @@ describe("terminal response fallback", () => {
     expect(applyRunFailure(run, { ...event, run_id: "other" })).toBe(run);
   });
 });
+
+
+it("keeps public streamed body when terminal payload only has a notice", () => {
+  const run = {id:"run-1", draft:{content:"Public original body",updated_at:"old"}} as ModelRun;
+  const event = {run_id:"run-1",sequence:1,event_type:"run.failed",timestamp:"now",data:{fallback_content:"System failure notice"}} as ModelRunEvent;
+  expect(applyRunFailure(run,event).draft?.content).toContain("Public original body");
+  expect(applyRunFailure(run,event).draft?.content).toContain("System failure notice");
+});

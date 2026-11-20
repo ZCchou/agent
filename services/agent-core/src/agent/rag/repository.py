@@ -9,6 +9,7 @@ import uuid
 
 from agent.migrations.v24_rag import create_tables
 from agent.rag.documents import MAX_CHUNKS
+from agent.rag.locations import located_source, prime_location_cache
 from agent.rag.retrieval import lexical_tokens
 from agent.storage import CoreDataError, _open_database, _utc_now
 
@@ -217,7 +218,8 @@ class RagRepository(WorkspaceRepository):
                 raise CoreDataError('rag_invalid_request', 'Invalid physical page.')
             chunks = connection.execute("SELECT * FROM rag_chunks WHERE version_id=? AND (? IS NULL OR json_extract(locator,'$.page')=?) ORDER BY ordinal LIMIT ? OFFSET ?", (version_id, page, page, limit, offset)).fetchall()
             total = connection.execute("SELECT count(*) FROM rag_chunks WHERE version_id=? AND (? IS NULL OR json_extract(locator,'$.page')=?)", (version_id, page, page)).fetchone()[0]
-            return {'version': version, 'chunks': [{**dict(row), 'locator': json.loads(row['locator'])} for row in chunks],
+            location_cache = prime_location_cache(connection, [dict(row) for row in chunks])
+            return {'version': version, 'chunks': [located_source(connection, {**dict(row), 'locator': json.loads(row['locator'])}, location_cache) for row in chunks],
                     'warnings': version['warnings'], 'total_chunks': total, 'offset': offset}
 
     def original_for_version(self, version_id):
@@ -344,7 +346,7 @@ class RagRepository(WorkspaceRepository):
         if payload.get('original_hash') not in (None, row['original_hash']):
             raise CoreDataError('rag_evidence_invalid', 'The evidence original identity changed. Retrieve the source again.')
         payload['original_hash'] = row['original_hash']
-        return payload
+        return located_source(connection, payload)
 
     def preview_evidence(self, project_id, evidence_id, offset=0, length=8000):
         if not isinstance(offset, int) or offset < 0 or not isinstance(length, int) or not 1 <= length <= 8000:
@@ -362,19 +364,25 @@ class RagRepository(WorkspaceRepository):
         parent_id = locator.get('clause_parent_id') or locator['block_id']
         key = 'clause_parent_id'
         scope = 'clause' if result.get('clause_number') else 'block'
+        if scope == 'block':
+            parent_id, key = locator['block_id'], 'block_id'
         if not result.get('clause_number') and locator.get('table_parent_id'):
             parent_id, key, scope = locator['table_parent_id'], 'table_parent_id', 'table'
         with closing(self.connect()) as connection:
             # Repeat authorization in the same read transaction used for context.
             connection.execute('BEGIN')
             self.checked_evidence(project_id, evidence_id, connection=connection)
-            rows = connection.execute('''SELECT text,locator FROM rag_chunks WHERE version_id=?
-                AND json_extract(locator,?)=? ORDER BY ordinal''',
+            rows = connection.execute("""SELECT * FROM rag_chunks WHERE version_id=?
+                AND json_extract(locator,?)=? ORDER BY ordinal""",
                 (result['version_id'], '$.' + key, parent_id)).fetchall()
-        blocks = {}
-        for row in rows:
-            source_locator = json.loads(row['locator'])
-            blocks.setdefault(source_locator['block_id'], []).append(row['text'])
+            blocks = {}
+            location_cache = prime_location_cache(connection, [dict(row) for row in rows])
+            for row in rows:
+                source = located_source(connection, {**dict(row), 'locator': json.loads(row['locator'])}, location_cache)
+                source_locator = source['locator']
+                if source_locator.get(key) != parent_id:
+                    continue
+                blocks.setdefault(source_locator['block_id'], []).append(row['text'])
         parent_text = '\n\n'.join(''.join(fragments) for fragments in blocks.values())
         if not parent_text:
             return result

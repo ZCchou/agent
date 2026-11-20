@@ -47,9 +47,9 @@ def test_automatic_greeting_skips_all_retrieval_and_force_mode_checks_project(tm
             forced = await service.start({'conversation_id': conversation['id'], 'content': '你好', 'idempotency_key': 'forced', 'rag_mode': 'required'})
             await service.tasks[forced['run']['id']]
             blocked = core.get_model_run(forced['run']['id'])
-            assert blocked['status'] == 'failed' and blocked['error_code'] == 'rag_library_required'
-            assert '资料库' in blocked['draft']['content']
-            assert len(core.get_conversation(conversation['id'])['messages']) == before + 1
+            assert blocked['status'] == 'completed', blocked['error_message']
+            assert '你好' in blocked['assistant_message']['content'] and '未取得项目资料库依据' in blocked['assistant_message']['content']
+            assert len(core.get_conversation(conversation['id'])['messages']) == before + 2
         finally:
             await service.shutdown()
     asyncio.run(exercise())
@@ -72,11 +72,12 @@ async def fixture(*args, **kwargs):
     return core, project, conversation, service
 
 
+@pytest.mark.parametrize("history_dependent", [False, True])
 @pytest.mark.parametrize("mode", ["text_only", "native", "structured"])
 @pytest.mark.parametrize("corrupt_quote", [False, True])
 @pytest.mark.parametrize("repair_first", [False, True])
 @pytest.mark.parametrize("select_quote", [False, True])
-def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monkeypatch, mode, corrupt_quote, repair_first, select_quote):
+def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monkeypatch, mode, corrupt_quote, repair_first, select_quote, history_dependent):
     requests = []
     diagnostic_requests = []
     transports = []
@@ -112,19 +113,25 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
                 records.append(value["evidence"])
             elif isinstance(value.get("evidence"), list):
                 records.extend(value["evidence"])
-        first_action = mode != 'text_only' and len(requests) == 1
+            for key in ('verified_answer_evidence', 'verified_clause_evidence'):
+                if isinstance(value.get(key), list):
+                    records.extend(value[key])
+        constrained = payload.get("response_format", {}).get("type") == "json_schema"
+        advertised_native = any(tool.get('function', {}).get('name') == 'rag_search'
+                                for tool in payload.get('tools', []))
+        advertised_structured = (mode == 'structured' and not constrained
+                                 and 'rag.search' in str(payload['messages']))
+        first_action = len(requests) == 1 and (advertised_native or advertised_structured)
         assert records or first_action, "Evidence must precede professional answer generation"
         if not first_action:
-            assert any("适航资料问答输出约定" in message.get("content", "") for message in payload["messages"])
+            assert any("用自然语言直接回答" in message.get("content", "") for message in payload["messages"])
         if mode == 'text_only':
             assert all('Use the current runtime capability observation when planning requested work and continuations.'
                        not in message.get('content', '') for message in payload['messages'])
         if mode == 'native' and 'tools' in payload:
             assert 'fs_list' in json.dumps(payload['tools'])
         constrained = payload.get("response_format", {}).get("type") == "json_schema"
-        if mode == "structured" and not constrained and not first_action:
-            assert "Serialize the claims JSON" in payload["messages"][0]["content"]
-        if mode != "text_only" and len(requests) == 1:
+        if first_action:
             delta = {"tool_calls": [{"index": 0, "id": "retrieve", "type": "function", "function": {
                 "name": "rag_search", "arguments": json.dumps({"query": "25.1309 失效"})}}]}
             finish = "tool_calls"
@@ -140,7 +147,7 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
             delta = {"content": json.dumps({"claims": [{"text": "需要核查失效状态安全性要求。", "evidence": [
                 citation]}]}, ensure_ascii=False)}
             finish = "stop"
-            if mode == "structured" and not constrained:
+            if mode == "structured" and advertised_structured:
                 delta["content"] = json.dumps({"type": "text", "content": delta["content"]})
         if repair_first and not corrupt_quote and not any("invalid_answer" in message.get("content", "") for message in payload["messages"]) and (mode == "text_only" or constrained):
             delta = {"content": "普通文字，未生成 JSON。"}
@@ -170,7 +177,12 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
         await ready(service.rag, library)
         assert (await wait_job(service.rag, await service.rag.handle("index.build", {"library_id": library})))["status"] == "completed"
         await service.rag.handle("library.bind", {"library_id": library, "project_id": project["id"], "enabled": True})
-        response = await service.start({"conversation_id": conversation["id"], "content": "请依据当前项目资料库，引用原文说明25.1309 对失效有何要求，资料版本未标注请明确说明",
+        question = "请依据当前项目资料库，引用原文说明25.1309 对失效有何要求，资料版本未标注请明确说明"
+        if history_dependent:
+            core._insert_message(conversation['id'], 'user', '设备条件：飞行关键设备，失效可能影响安全。')
+            core._insert_message(conversation['id'], 'assistant', '已记录本轮设备条件，后续须结合这些条件。')
+            question = '按上面的设备条件，' + question
+        response = await service.start({"conversation_id": conversation["id"], "content": question,
             "idempotency_key": "rag-chat", "web_search_global_enabled": True, "web_search_mode": "off"})
         run_id = response["run"]["id"]
         plan = service.execution_repository.get_for_run(run_id)
@@ -178,42 +190,31 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
                        for item in plan.get('requirements', {}).get('capability_advisories', []))
         await service.tasks[run_id]
         run = core.get_model_run(run_id)
-        if corrupt_quote:
-            assert run["status"] == "failed"
-            assert run["error_code"] == "rag_quote_invalid"
-            assert "伪造原文" not in str(run.get("draft"))
-            assert "claims" not in str(run.get("draft"))
+        assert run['status'] == 'completed', (run.get('error_code'), run.get('error_message'))
+        body = run['assistant_message']['content']
+        plain = repair_first and not corrupt_quote and mode == 'text_only'
+        assert ('普通文字' in body) if plain else ('需要核查失效状态安全性要求。' in body)
+        assert '伪造原文' not in body and 'claims' not in body
+        approved = run['assistant_message']['verified_evidence_ids']
+        if plain or corrupt_quote:
+            assert approved == [] and 'rag-evidence:' not in body
         else:
-            assert run["status"] == "completed", run.get("error_message")
-            assert "rag-evidence:rag-" in run["assistant_message"]["content"]
-            assert "草案" in run["assistant_message"]["content"]
-        assert all("claims" not in event["data"].get("delta", "") for event in events if event["event_type"] == "run.chunk")
-        assert len(diagnostic_requests) == int(corrupt_quote)
-        if corrupt_quote:
-            assert '原文摘录校验未通过' in run['draft']['content']
-        from goal_check_support import goal_check_content
-        answers = [payload for payload in requests if goal_check_content(payload) is None]
-        assert len(answers) == (1 if mode == "text_only" else 3) + int(corrupt_quote or repair_first)
-        assert len(requests) - len(answers) == int(mode != 'text_only' and not corrupt_quote)
-        assert answers[-1]["response_format"]["type"] == "json_schema"
-        assert "tools" not in answers[-1]
-        assert answers[-1]["max_tokens"] <= 512
-        if corrupt_quote or repair_first:
-            repair = next(json.loads(message['content']) for message in answers[-1]['messages']
-                          if 'invalid_answer' in message.get('content', ''))
-            assert 'validation_details' in repair
-            assert repair['allowed_quotes']
-            with core._connect() as connection:
-                diagnostics = connection.execute("SELECT a.content_json FROM execution_artifacts a JOIN execution_steps s ON s.id=a.step_id JOIN execution_plans p ON p.id=s.plan_id WHERE p.run_id=? AND a.artifact_type='rag_validation'", (run_id,)).fetchall()
-            assert diagnostics
-            diagnostic = json.loads(diagnostics[-1][0])
-            assert len(diagnostic['answer_hash']) == 64
-            assert diagnostic['error_code'] in {'rag_quote_invalid', 'rag_answer_invalid'}
-            assert '伪造原文' not in diagnostics[-1][0]
-            with core._connect() as connection:
-                assert connection.execute("SELECT COUNT(*) FROM execution_steps s JOIN execution_artifacts a ON a.id=s.artifact_id JOIN execution_plans p ON p.id=s.plan_id WHERE p.run_id=? AND a.artifact_type='rag_validation'", (run_id,)).fetchone()[0] == 0
+            assert len(approved) == 1 and 'rag-evidence:' + approved[0] in body
+        history = core.get_conversation(conversation['id'])['messages']
+        assert next(m for m in history if m['id'] == run['assistant_message']['id'])['verified_evidence_ids'] == approved
+        assert all('claims' not in event['data'].get('delta', '') for event in events if event['event_type'] == 'run.chunk')
+        assert not diagnostic_requests
+        agent_transport = history_dependent and mode != 'text_only'
+        assert len(requests) == (2 if agent_transport else 1)
+        assert not any(p.get('response_format', {}).get('type') == 'json_schema' for p in requests)
+        operations = service.tool_loop.repository.list_for_run(run_id)
+        if agent_transport:
+            assert any(op['tool_name'] == 'rag.search' for op in operations)
+        else:
+            assert not operations
         if not corrupt_quote and mode == "text_only":
             await service.rag.handle("library.bind", {"library_id": library, "project_id": project["id"], "enabled": False})
+            assert not core.get_model_run(run_id)["assistant_message"]["verified_evidence_ids"]
             history_only = True
             transports.clear()
             followup = await service.start({"conversation_id": conversation["id"], "content": "继续说明",
@@ -224,15 +225,13 @@ def test_project_chat_retrieves_before_model_and_validates_answer(tmp_path, monk
     asyncio.run(exercise())
 
 
-def test_schema_unsupported_falls_back_without_repeating_retrieval(tmp_path, monkeypatch):
+def test_prose_does_not_request_schema_or_repeat_retrieval(tmp_path, monkeypatch):
     original = httpx.AsyncClient
     formats = []
     def respond(request):
         payload = json.loads(request.content)
         formats.append(payload.get("response_format", {}).get("type"))
-        if len(formats) == 1:
-            return httpx.Response(400, text='response_format json_schema is unsupported')
-        assert formats[-1] == "json_object"
+        assert formats[-1] is None
         records = []
         for message in payload["messages"]:
             try: value = json.loads(message.get("content", ""))
@@ -264,7 +263,7 @@ def test_schema_unsupported_falls_back_without_repeating_retrieval(tmp_path, mon
             assert run["status"] == "completed", run.get("error_message")
             with core._connect() as connection:
                 assert connection.execute("SELECT COUNT(*) FROM rag_searches WHERE run_id=?", (run["id"],)).fetchone()[0] == 1
-            assert formats == ["json_schema", "json_object"]
+            assert formats == [None]
         finally:
             await service.shutdown()
     asyncio.run(exercise())

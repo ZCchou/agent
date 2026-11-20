@@ -38,7 +38,7 @@ export const MessageTimelineItem = memo(function MessageTimelineItem({ message, 
   return <article className={`chat-message chat-message--${message.role}${message.source_message_id ? " chat-message--derived" : ""}`}>
     <span>{message.role === "user" ? t("roles.you") : message.role === "system_event" ? t("roles.system") : t("roles.agent")}</span>
     {message.role === "assistant" ? (
-      <AssistantMessageBody content={message.content} state="complete" onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
+      <AssistantMessageBody verifiedEvidenceIds={message.verified_evidence_ids} content={message.content} state="complete" onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
     ) : (
       <div className="chat-message__bubble chat-message__bubble--plain">{editing ? <div className="message-editor">
         <textarea autoFocus aria-label={t("messages.editQuestion")} value={editValue} maxLength={1000000}

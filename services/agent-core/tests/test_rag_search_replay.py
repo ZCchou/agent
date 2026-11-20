@@ -273,3 +273,27 @@ def test_execution_request_restarts_standalone_search_under_original_root(tmp_pa
         finally:
             await original.close()
     asyncio.run(scenario())
+
+
+def test_review_pool_identity_tracks_device_model_and_project_bindings(tmp_path):
+ async def run():
+    engine=Engines()
+    records=engine.list_models()
+    engine.list_models=lambda:records
+    core=CoreRepository(tmp_path/'review-cache.db')
+    service,library=await indexed_service(core,engine)
+    try:
+        project=core.create_project('Pool','work')['id']
+        await service.handle('library.bind',{'library_id':library,'project_id':project,'enabled':True})
+        old=service.review_cache_identity(project)
+        records[1]['device']='cuda'
+        assert service.review_cache_identity(project)!=old
+        records[1]['digest']='c'*64
+        with pytest.raises(CoreDataError,match='fingerprint'):
+            service.review_cache_identity(project)
+        records[1]['digest']='b'*64
+        await service.handle('library.bind',{'library_id':library,'project_id':project,'enabled':False})
+        assert service.review_cache_identity(project)!=old
+    finally:
+        await service.close()
+ asyncio.run(run())

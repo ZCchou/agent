@@ -1344,9 +1344,11 @@ class CoreRepository:
             rejected_grouped: dict[str, list[dict[str, Any]]] = {}
             for rejection in rejection_rows:
                 rejected_grouped.setdefault(rejection["message_id"], []).append(dict(rejection))
+            citations = self._message_evidence(connection, conversation_id)
             result["messages"] = [
                 {
                     **dict(message),
+                    "verified_evidence_ids": citations.get(message["id"], []),
                     "attachments": grouped.get(message["id"], []),
                     "attachment_rejections": rejected_grouped.get(message["id"], []),
                 }
@@ -2314,6 +2316,7 @@ class CoreRepository:
             result["assistant_message"] = dict(message) if message else None
             if result["assistant_message"] is not None:
                 result["assistant_message"]["attachments"] = []
+                result["assistant_message"]["verified_evidence_ids"] = self._message_evidence(connection, row["conversation_id"]).get(message["id"], [])
             return result
 
     def _branch_before_message(
@@ -2857,8 +2860,30 @@ class CoreRepository:
                  optional_nonnegative("cached_input_tokens"), estimated_cost, attempt_id),
             )
 
+    @staticmethod
+    def _message_evidence(connection, conversation_id):
+        rows = connection.execute("""
+            SELECT r.assistant_message_id, e.id
+            FROM model_runs r JOIN conversations c ON c.id=r.conversation_id
+            JOIN execution_wait_tasks t ON t.run_id=r.id
+            JOIN execution_wait_activity a ON a.task_id=t.id AND a.kind='message_evidence_verified'
+            JOIN json_each(a.payload_json,'$.ids') ids
+            JOIN rag_evidence e ON e.id=ids.value AND e.project_id=c.project_id
+            JOIN rag_searches s ON s.id=e.search_id AND s.run_id=r.id
+            JOIN rag_projects p ON p.project_id=e.project_id AND p.generation=s.generation
+            JOIN rag_bindings b ON b.library_id=e.library_id AND b.project_id=e.project_id AND b.enabled=1 AND b.index_id=e.index_id
+            JOIN rag_versions v ON v.id=e.version_id AND v.status='confirmed'
+            JOIN rag_libraries l ON l.id=e.library_id AND l.archived_at IS NULL
+            WHERE r.conversation_id=? AND r.assistant_message_id=json_extract(a.payload_json,'$.message_id')
+            AND COALESCE(json_extract(e.payload,'$.original_hash'),v.original_hash)=v.original_hash
+        """, (conversation_id,))
+        result = {}
+        for message_id, evidence_id in rows:
+            result.setdefault(message_id, []).append(evidence_id)
+        return result
+
     def complete_model_run(self, run_id: str, attempt_id: str, content: str,
-                           *, rag_guard: tuple[str, int] | None = None) -> dict[str, Any]:
+                           *, rag_guard: tuple[str, int] | None = None, verified_evidence_ids=()) -> dict[str, Any]:
         # The input-editor limit must not reject an already generated answer.
         content = content.strip()
         if not content:
@@ -2884,6 +2909,11 @@ class CoreRepository:
             assistant = self._insert_message_with_connection(
                 connection, run["conversation_id"], "assistant", content
             )
+            if rag_guard and verified_evidence_ids:
+                connection.execute("""INSERT INTO execution_wait_activity(task_id,attempt,revision,kind,recorded_at,payload_json)
+                    SELECT id,attempt,revision,'message_evidence_verified',strftime('%s','now'),?
+                    FROM execution_wait_tasks WHERE run_id=?""",
+                    (json.dumps({'message_id': assistant['id'], 'ids': sorted(set(verified_evidence_ids))}), run_id))
             connection.execute(
                 "UPDATE run_attempts SET finished_at = ? WHERE id = ?", (now, attempt_id)
             )
@@ -2893,7 +2923,6 @@ class CoreRepository:
                        error_code = NULL, error_message = NULL WHERE id = ?""", (now, assistant["id"], run_id)
             )
         result = self.get_model_run(run_id)
-        result["assistant_message"] = assistant
         return result
 
     def interrupt_active_runs(self) -> list[str]:

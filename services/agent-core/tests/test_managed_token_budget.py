@@ -98,3 +98,39 @@ def test_local_measurement_recompiles_before_dispatch_with_final_fingerprint(mon
         assert all(message['tool_call_id'] in calls for message in messages if message['role'] == 'tool')
 
     asyncio.run(scenario())
+
+
+def test_pinned_tokenizer_counts_without_acquiring_busy_generation_slot(monkeypatch):
+    from agent.execution.compiler import InvocationCompiler
+    from test_unified_invocation_v3 import model_spec
+
+    async def scenario():
+        profile = ProviderProfile('managed:model', 'model', 'openai_compatible', 'http://127.0.0.1:1/v1',
+                                  model_capabilities={'model': {'context_length': 8192}})
+        models = SimpleNamespace(pinned=lambda model: model == 'model', get_profile=lambda _: profile,
+                                 _runtime=SimpleNamespace(session_id='active'))
+        provider = ManagedLocalProvider(profile, None, models)
+
+        async def measure(_):
+            return 123
+
+        monkeypatch.setattr(provider, '_measure_request', measure)
+        spec, request = await ChatRunService._prepare_measured_model_request(
+            SimpleNamespace(invocation_compiler=InvocationCompiler()), provider, model_spec(max_output_tokens=512),
+            [{'role': 'user', 'content': 'Review the attachment'}], requested_output_tokens=512)
+        assert request.input_budget['measurement'] == 'engine_template_tokenizer'
+        assert request.input_budget['request_tokens'] == 123 + 64
+
+        async def expired(_):
+            models._runtime.session_id = 'new'
+            return 123
+
+        monkeypatch.setattr(provider, '_measure_request', expired)
+        from agent.providers import ProviderError
+        with pytest.raises(ProviderError) as caught:
+            await ChatRunService._prepare_measured_model_request(
+                SimpleNamespace(invocation_compiler=InvocationCompiler()), provider, spec,
+                [{'role': 'user', 'content': 'Review the attachment'}], requested_output_tokens=512)
+        assert caught.value.code == 'managed_session_changed'
+
+    asyncio.run(scenario())

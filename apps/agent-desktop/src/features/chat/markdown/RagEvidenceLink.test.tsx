@@ -19,11 +19,28 @@ const page = {
 
 describe("chat evidence citations", () => {
   it("renders a persisted markdown citation as a source button", () => {
-    const html = renderToStaticMarkup(<MarkdownRenderer content={`[AC source](rag-evidence:${evidenceId})`} state="complete" />);
+    const html = renderToStaticMarkup(<MarkdownRenderer content={`[AC source](rag-evidence:${evidenceId})`} state="complete" verifiedEvidenceIds={[evidenceId]} />);
     expect(html).toContain("AC source");
     expect(html).toContain('class="markdown-link markdown-link--evidence"');
     expect(html).toContain('aria-haspopup="dialog"');
     expect(html).not.toContain('href="rag-evidence:');
+  });
+
+  it("keeps unverified and other-message citation text inert without deleting prose", () => {
+    const content = `Public answer [source](rag-evidence:${evidenceId}) remains visible.`;
+    const unverified = renderToStaticMarkup(<MarkdownRenderer content={content} state="complete" />);
+    expect(unverified).toContain("Public answer");
+    expect(unverified).toContain("remains visible");
+    expect(unverified).not.toContain('aria-haspopup="dialog"');
+    const other = renderToStaticMarkup(<MarkdownRenderer content={content} state="complete" verifiedEvidenceIds={["rag-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]} />);
+    expect(other).not.toContain('aria-haspopup="dialog"');
+  });
+
+  it("shows HTML-shaped public prose as inert text rather than deleting it", () => {
+    const html = renderToStaticMarkup(<MarkdownRenderer content={"<div>Public HTML-shaped paragraph</div>"} state="complete" />);
+    expect(html).toContain("Public HTML-shaped paragraph");
+    expect(html).toContain("&lt;div&gt;");
+    expect(html).not.toContain("<div>Public HTML");
   });
 
   it("keeps ordinary links rendering independently from evidence context", () => {

@@ -11,7 +11,7 @@ const drafts = new Map<string, Record<string, Answer>>();
 
 export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings, externalTask, onRespond }: {
   scope: string; enabled: boolean;
-  onAccepted(result: AcceptedModelRun): Promise<boolean>;
+  onAccepted(result: AcceptedModelRun): Promise<boolean | "unavailable">;
   onModelSettings(): void;
   externalTask?: IntentTask;
   onRespond?(answers: Record<string, string>): Promise<void>;
@@ -42,7 +42,8 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings, 
     if (adopting.current === identity) return;
     adopting.current = identity;
     void onAccepted(task.result).then((accepted) => {
-      if (accepted) intentTasks.acknowledge(scope, task.result!);
+      if (accepted === "unavailable") intentTasks.consume(task.id);
+      else if (accepted) intentTasks.acknowledge(scope, task.result!);
     }).finally(() => { if (adopting.current === identity) adopting.current = ""; });
   }, [enabled, scope, task, onAccepted, externalTask]);
   useEffect(() => {

@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+MANAGED_USAGE_TRAILER_SECONDS = 2.0
+
 from agent.multimodal import (
     contains_images,
     ollama_content,
@@ -865,6 +867,11 @@ class OpenAICompatibleProvider(ModelProvider):
                     yield event
             return
         calls: dict[int, dict[str, str]] = {}
+        diagnostic_stage, diagnostic_reason, diagnostic_index = "fragment", "invalid_call", None
+        certification_reason = "not_fully_drained"
+        tool_forwarded = False
+        managed_text = self.profile.local_strict and self.profile.id.startswith('managed:') and not tools
+        received_usage = False
         finish_reason: str | None = None
         streamed_text = ""
         response_opened = False
@@ -919,7 +926,21 @@ class OpenAICompatibleProvider(ModelProvider):
                     if response.is_error:
                         await response.aread()
                         raise _map_http_error(response)
-                    async for line in response.aiter_lines():
+                    lines = response.aiter_lines()
+                    trailer_deadline = None
+                    while True:
+                        try:
+                            if trailer_deadline is None:
+                                line = await anext(lines)
+                            else:
+                                async with asyncio.timeout_at(trailer_deadline):
+                                    line = await anext(lines)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError:
+                            if trailer_deadline is None:
+                                raise
+                            break
                         if not line or not line.startswith("data:"):
                             continue
                         data = line[5:].strip()
@@ -929,6 +950,9 @@ class OpenAICompatibleProvider(ModelProvider):
                             value = json.loads(data)
                             usage = value.get("usage")
                             if isinstance(usage, dict):
+                                received_usage = received_usage or (
+                                    isinstance(usage.get('prompt_tokens'), int) and
+                                    isinstance(usage.get('completion_tokens'), int))
                                 yield ProviderEvent("usage", usage={
                                     "input_tokens": int(usage.get("prompt_tokens") or 0),
                                     "output_tokens": int(usage.get("completion_tokens") or 0),
@@ -938,6 +962,8 @@ class OpenAICompatibleProvider(ModelProvider):
                                 })
                             choices = value.get("choices") or []
                             if not choices:
+                                if managed_text and received_usage and not calls and finish_reason in {'stop', 'length'}:
+                                    break
                                 continue
                             choice = choices[0]
                             delta = choice.get("delta", {})
@@ -962,26 +988,33 @@ class OpenAICompatibleProvider(ModelProvider):
                                 "finish", finish_reason=finish_reason,
                             )
                         for raw_call in delta.get("tool_calls", []) or []:
+                            diagnostic_stage, diagnostic_reason, diagnostic_index = "fragment", "invalid_call", None
                             if not isinstance(raw_call, dict):
                                 raise ProviderError(
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                            diagnostic_reason = "invalid_index"
                             index = raw_call.get("index", 0)
                             if not isinstance(index, int) or isinstance(index, bool) or index < 0:
                                 raise ProviderError(
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                            diagnostic_index = index
                             current = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                            diagnostic_reason = "invalid_id_metadata"
                             _merge_stable_tool_fragment(current, "id", raw_call.get("id"))
+                            diagnostic_reason = "invalid_function"
                             function = raw_call.get("function", {})
                             if not isinstance(function, dict):
                                 raise ProviderError(
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                            diagnostic_reason = "invalid_name_metadata"
                             _merge_stable_tool_fragment(current, "name", function.get("name"))
+                            diagnostic_reason = "invalid_arguments_type"
                             arguments = function.get("arguments", "")
                             if isinstance(arguments, str):
                                 current["arguments"] += arguments
@@ -994,13 +1027,27 @@ class OpenAICompatibleProvider(ModelProvider):
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                        # Managed text calls have no further semantic payload after finish and usage.
+                        # Native tool streams still drain their complete ordered fragments and trailer.
+                        if managed_text and not calls and finish_reason in {'stop', 'length'}:
+                            if received_usage:
+                                break
+                            if trailer_deadline is None:
+                                trailer_deadline = asyncio.get_running_loop().time() + MANAGED_USAGE_TRAILER_SECONDS
             # Usage can arrive after the finish frame. Drain it before failing,
             # and never parse or yield tools from a truncated response.
             validate_provider_completion(streamed_text, finish_reason, {}, require_output=False)
+            from agent.native_tool_diagnostics import batch_correction_certification
+            correction_eligible, certification_reason = batch_correction_certification(
+                calls, finish_reason, forwarded_semantic=tool_forwarded)
+            validated_calls = []
             for index in sorted(calls):
                 raw = calls[index]
+                diagnostic_index = index
+                diagnostic_stage, diagnostic_reason = "arguments_json", "invalid_json"
                 try:
                     arguments = json.loads(raw["arguments"] or "{}")
+                    diagnostic_stage, diagnostic_reason = "arguments_schema", "invalid_schema"
                     internal_name = _internal_tool_name(raw["name"])
                     candidate = ToolCall(raw["id"] or f"openai-{index}", internal_name, arguments)
                     call = candidate if internal_name == "native.web_search" else validate_tool_call(candidate)
@@ -1014,18 +1061,25 @@ class OpenAICompatibleProvider(ModelProvider):
                             **({'tool_argument_constraint': 'template_identity'}
                                if isinstance(error, CoreDataError)
                                and (error.details or {}).get('tool_argument_constraint') == 'template_identity' else {}),
-                            # Early fragment failures and ambiguous batches
-                            # cannot certify a safe model correction.
-                            "native_tool_correction_eligible": (
-                                len(calls) == 1 and finish_reason in {"stop", "tool_calls"}
-                            ),
+                            # No tool is forwarded until every call validates.
+                            "native_tool_correction_eligible": correction_eligible,
                         },
                     ) from error
+                validated_calls.append(call)
+            for call in validated_calls:
+                tool_forwarded = True
                 yield ProviderEvent(
                     "native_search_call" if call.name == "native.web_search" else "tool_call",
                     tool_call=call,
                 )
         except ProviderError as error:
+            if error.code == "model_tool_protocol_failed":
+                from agent.native_tool_diagnostics import build
+                if error.message == "Model returned conflicting tool metadata.":
+                    diagnostic_reason = "conflicting_metadata"
+                error.details['native_tool_diagnostic'] = build(calls, diagnostic_index,
+                    diagnostic_stage, diagnostic_reason, error.__cause__)
+                error.details['native_tool_diagnostic']['certification_reason'] = certification_reason
             error.details.update(text_character_count=len(streamed_text),
                 tool_argument_character_count=sum(len(call['arguments']) for call in calls.values()))
             if finish_reason is not None:

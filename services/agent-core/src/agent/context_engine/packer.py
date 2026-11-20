@@ -127,9 +127,9 @@ def pack_context(
     if used + protected_cost > hard_limit:
         raise ContextEngineError('context_compaction_required', 'Required history must be compacted before this request can run.')
     if rag_evidence:
-        from agent.rag.grounding import ANSWER_INSTRUCTION, evidence_for_model
-        stable_messages[0]["content"] += "\n" + ANSWER_INSTRUCTION
-        instruction_cost = estimate_tokens(ANSWER_INSTRUCTION)
+        from agent.rag.grounding import PUBLIC_ANSWER_INSTRUCTION, evidence_for_model
+        stable_messages[0]["content"] += "\n" + PUBLIC_ANSWER_INSTRUCTION
+        instruction_cost = estimate_tokens(PUBLIC_ANSWER_INSTRUCTION)
         stable_cost += instruction_cost
         used += instruction_cost
         evidence_limit = min(6000, int(hard_limit * 0.45), max(0, hard_limit - used - protected_cost - 128))

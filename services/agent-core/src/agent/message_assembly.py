@@ -16,6 +16,15 @@ def extend_application_messages(messages: list[dict[str, Any]], additions: Itera
     for message in list(additions):
         if message.get('role') == 'system':
             insert_system_message(messages, message)
+        elif (message.get('role') == 'assistant' and message.get('_working_notes')
+                and not message.get('tool_calls')):
+            # Derived memory precedes conversational data. It remains assistant
+            # material, never a policy or the latest answer to the user's turn.
+            index = next((i for i, item in enumerate(messages) if item.get('role') != 'system'), len(messages))
+            while (index < len(messages) and messages[index].get('role') == 'assistant'
+                    and messages[index].get('_working_notes') and not messages[index].get('tool_calls')):
+                index += 1
+            messages.insert(index, dict(message))
         else:
             messages.append(dict(message))
 

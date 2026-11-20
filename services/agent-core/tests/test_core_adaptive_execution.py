@@ -429,12 +429,7 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         cancellation = None
 
         async def emit(value):
-            nonlocal checkpoint_count, cancellation
-            if (linked_retry and cancellation is None and value['event_type'] == 'execution.activity'
-                    and value['data'].get('stage') == 'document_review' and value['data'].get('event') == 'checkpoint'):
-                checkpoint_count += 1
-                if checkpoint_count == 2:
-                    cancellation = asyncio.create_task(service.cancel(value['run_id']))
+            pass
 
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:19999/v1'
@@ -442,6 +437,26 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         if long_targets:
             config['model_capabilities']['model']['context_length'] = 8192
         core, project, work, service = await fixture(tmp_path, emit, config)
+        checkpoint = service.execution_monitor._checkpoint
+        cancelled_activity = []
+        def checkpoint_then_cancel(activity, key, identity, payload):
+            nonlocal checkpoint_count, cancellation
+            committed = checkpoint(activity, key, identity, payload)
+            if committed and linked_retry and cancellation is None and activity.stage == 'document_review':
+                checkpoint_count += 1
+                if checkpoint_count == 2:
+                    # Cancellation is a business-checkpoint guarantee, not a
+                    # count of UI notifications, which may be coalesced.
+                    with core._connect() as db:
+                        saved = db.execute('SELECT payload_json FROM execution_wait_checkpoints '
+                            'WHERE task_id=? AND stage=? AND checkpoint_key=?',
+                            (activity.task_id, activity.stage, key)).fetchone()
+                    assert saved and json.loads(saved['payload_json']) == payload
+                    cancelled_activity.append(activity)
+                    owner = service.execution_monitor.get_task(activity.task_id)['run_id']
+                    cancellation = asyncio.create_task(service.cancel(owner))
+            return committed
+        monkeypatch.setattr(service.execution_monitor, '_checkpoint', checkpoint_then_cancel)
         await service.rag.close()
         service.rag = RagService(core, Engines())
         service.rag_grounding = RagGrounding(service.rag)
@@ -487,6 +502,9 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
                 assert cancellation is not None
                 await cancellation
                 assert run['status'] == 'cancelled'
+                assert checkpoint_count == 2 and len(cancelled_activity) == 1
+                assert not checkpoint(cancelled_activity[0], 'late-after-cancel', {}, [])
+                assert not cancelled_activity[0].progress(completed=999)
                 parent_root = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
                 with core._connect() as connection:
                     saved = connection.execute('SELECT payload_json FROM execution_wait_checkpoints WHERE task_id=? AND stage=?',

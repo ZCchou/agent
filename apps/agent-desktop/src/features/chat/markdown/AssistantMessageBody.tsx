@@ -1,6 +1,7 @@
 import { Check, Copy, TriangleAlert } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { presentUnexecutedTools } from "./presentUnexecutedTools";
 import { copyText } from "./copyText";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import type { ProjectDirectoryTarget, ProjectFileTarget } from "./markdownPolicy";
@@ -10,12 +11,14 @@ export type AssistantMessageState = "complete" | "streaming" | "draft";
 export interface AssistantMessageBodyProps {
   content: string;
   state: AssistantMessageState;
+  verifiedEvidenceIds?: readonly string[];
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;
 }
 
-export const AssistantMessageBody = memo(function AssistantMessageBody({ content, state, onProjectFile, onProjectDirectory }: AssistantMessageBodyProps) {
+export const AssistantMessageBody = memo(function AssistantMessageBody({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds }: AssistantMessageBodyProps) {
   const { t } = useTranslation("chat");
+  const displayContent = presentUnexecutedTools(content, t("status.unexecutedTools"));
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   useEffect(() => {
@@ -30,7 +33,7 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({ content
 
   async function copyMarkdown() {
     try {
-      await copyText(content);
+      await copyText(displayContent);
       setCopyState("copied");
     } catch {
       setCopyState("failed");
@@ -39,7 +42,7 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({ content
 
   return (
     <div className="chat-message__bubble chat-message__bubble--assistant">
-      <MarkdownRenderer content={content} state={state} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
+      <MarkdownRenderer verifiedEvidenceIds={verifiedEvidenceIds} content={displayContent} state={state} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
       {state !== "streaming" && content ? (
         <div className="assistant-message-actions">
           <button type="button" onClick={() => void copyMarkdown()}>

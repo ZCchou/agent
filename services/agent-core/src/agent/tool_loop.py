@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
 
+from agent.providers import ProviderError
 from agent.storage import CoreDataError
 from agent.tool_contracts import ToolCall, canonical_arguments, search_completeness
 from agent.tool_repository import ACTIVE_TOOL_STATES, ToolRepository
@@ -82,10 +83,17 @@ class ToolLoopService:
                             executor_task.cancel()
                     waiter.add_done_callback(cancel_executor)
                     output = await executor_task
+                except asyncio.CancelledError:
+                    if call.name == 'document.review_targets' and self.repository.get(operation["id"])["status"] == 'executing':
+                        self.repository.transition(operation["id"], {'executing'}, 'interrupted',
+                                                   error_code='tool_execution_interrupted')
+                    raise
                 except CoreDataError as error:
                     output = json.dumps({'status': 'error', 'code': error.code,
                         'message': error.message, 'details': error.details}, ensure_ascii=False) if error.details else error.message
                     self.resolve(operation["id"], success=False, output=output, error_code=error.code)
+                except ProviderError as error:
+                    self.resolve(operation["id"], success=False, output="模型调用未完成。错误码：" + error.code, error_code=error.code)
                 except Exception:
                     code = "document_operation_failed" if call.name.startswith('document.') else "rag_operation_failed" if async_executor else "skill_unavailable"
                     self.resolve(operation["id"], success=False, output="Local operation failed. Check its state before retrying.", error_code=code)

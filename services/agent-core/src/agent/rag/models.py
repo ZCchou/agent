@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import shutil
+import stat
 import struct
 import sys
 import tempfile
@@ -17,6 +18,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -102,6 +104,41 @@ def _linked(path):
     return path.is_symlink() or bool(getattr(path.lstat(), "st_file_attributes", 0) & 0x400)
 
 
+def _runtime_inventory(base, manifest_path, inventory):
+    """Read every entry without following links; retain Windows file IDs."""
+    actual = set()
+    manifest_stat = manifest_path.stat()
+    stamp = [("runtime.json", manifest_stat.st_ino, manifest_stat.st_size,
+              manifest_stat.st_mtime_ns, manifest_stat.st_ctime_ns)]
+    if _linked(base):
+        raise ValueError("Linked inference runtime directory")
+    pending = [(str(base), "")]
+    while pending:
+        directory, prefix = pending.pop()
+        # Enumeration/stat errors must propagate to the caller's fail-closed
+        # integrity handler, including errors raised while iterating entries.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise ValueError("Linked inference runtime file")
+                inventory.entry_checked()
+                relative = prefix + entry.name
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append((entry.path, relative + "/"))
+                elif relative != "runtime.json":
+                    # DirEntry.stat returns st_ino=0 on Windows. An explicit
+                    # no-follow file stat preserves the complete cache stamp.
+                    info = os.stat(entry.path, follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                        raise ValueError("Linked inference runtime file")
+                    actual.add(relative)
+                    stamp.append((relative, info.st_ino, info.st_size,
+                                  info.st_mtime_ns, info.st_ctime_ns))
+                    inventory.file_processed()
+    return actual, stamp
+
+
 def _raise_walk_error(error):
     raise error
 
@@ -136,14 +173,51 @@ def _files(root, *, progress=None):
     return sorted(result)
 
 
-def _safe_relative(root, name):
+def _safe_relative(root, name, *, resolved_root=None):
     relative = Path(name)
     if not name or relative.is_absolute() or ".." in relative.parts or ":" in name or "\\" in name:
         raise ValueError(f"Invalid model package path: {name}")
     target = root / relative
-    if not target.resolve().is_relative_to(root.resolve()) or not target.is_file() or _linked(target):
+    if resolved_root is None:
+        resolved_root = root.resolve()
+    try:
+        leaf = target.lstat()
+    except FileNotFoundError:
+        leaf = None
+    if (leaf is None or not stat.S_ISREG(leaf.st_mode) or getattr(leaf, 'st_file_attributes', 0) & 0x400
+            or not target.resolve().is_relative_to(resolved_root)):
         raise ValueError(f"Missing or linked model file: {name}")
     return target
+
+
+def _verify_runtime_hashes(base, hashes, sizes, progress):
+    root = base.resolve()
+    def verify(name, on_read):
+        path = _safe_relative(base, name, resolved_root=root)
+        if _hash(path, progress=on_read) != hashes[name]:
+            raise ValueError(f"Inference runtime file hash mismatch: {name}")
+
+    small = [name for name in hashes if sizes[name] <= 256 * 1024]
+    concurrent_names = set(small) if len(small) >= 32 else set()
+    for name in hashes:
+        if name not in concurrent_names:
+            verify(name, progress.read)
+            progress.file_processed()
+    if concurrent_names:
+        # Limit queued work and leave progress, cancellation and SQLite on the owner
+        # thread. Large files retain per-block byte progress and sequential disk I/O.
+        def small_file(name):
+            count = 0
+            def read(size):
+                nonlocal count
+                count += size
+            verify(name, read)
+            return count
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for start in range(0,len(small),32):
+                for count in pool.map(small_file, small[start:start + 32]):
+                    progress.read(count)
+                    progress.file_processed()
 
 
 def _no_remote_code(value):
@@ -495,25 +569,7 @@ class ModelStore:
             executable = _safe_relative(base, metadata["executable"])
             hashes = metadata["files"]
             inventory = _IntegrityProgress('runtime_inventory', len(hashes))
-            actual = set()
-            manifest_stat = manifest_path.stat()
-            stamp = [("runtime.json", manifest_stat.st_ino, manifest_stat.st_size, manifest_stat.st_mtime_ns, manifest_stat.st_ctime_ns)]
-            if _linked(base):
-                raise ValueError("Linked inference runtime directory")
-            for directory, dirs, files in os.walk(base, followlinks=False):
-                for name in dirs + files:
-                    item = Path(directory) / name
-                    if _linked(item):
-                        raise ValueError("Linked inference runtime file")
-                    inventory.entry_checked()
-                for name in files:
-                    item = Path(directory) / name
-                    if item != manifest_path:
-                        relative = item.relative_to(base).as_posix()
-                        actual.add(relative)
-                        stat = item.stat()
-                        stamp.append((relative, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-                        inventory.file_processed()
+            actual, stamp = _runtime_inventory(base, manifest_path, inventory)
             if actual != set(hashes):
                 raise ValueError("Inference runtime contains unlisted or missing files")
             if not hashes or metadata["executable"] not in hashes:
@@ -523,11 +579,14 @@ class ModelStore:
             cache_hit = not force and self._runtime_verified == identity
             if not cache_hit:
                 progress = _IntegrityProgress('runtime_hashes', len(hashes))
-                for name, expected in hashes.items():
-                    if _hash(_safe_relative(base, name), progress=progress.read) != expected:
-                        raise ValueError(f"Inference runtime file hash mismatch: {name}")
-                    progress.file_processed()
+                sizes = {entry[0]: entry[2] for entry in stamp}
+                _verify_runtime_hashes(base, hashes, sizes, progress)
                 progress.report(force=True)
+                after = _IntegrityProgress('runtime_inventory', len(hashes))
+                names_after, stamp_after = _runtime_inventory(base, manifest_path, after)
+                after.report(force=True)
+                if names_after != actual or tuple(sorted(stamp_after)) != identity[1]:
+                    raise ValueError("Inference runtime changed during hash verification")
                 self._runtime_verified = identity
             log_event(logging.getLogger(__name__), logging.INFO, 'runtime_integrity_checked',
                       'Inference component integrity checked', cache_hit=cache_hit, file_count=len(hashes))

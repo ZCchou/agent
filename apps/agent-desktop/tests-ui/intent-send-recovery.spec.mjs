@@ -6,7 +6,7 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
   await page.addInitScript(({ initialFailure, managed }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     window.intentStarts = [];
-    window.intentTasks = [];
+    window.intentTasks = JSON.parse(localStorage.getItem("fixture-saved-intents") ?? "[]");
     let failedOnce = false;
     let accepted = null;
     const listeners = new Map();
@@ -72,6 +72,10 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
         if (args.action === 'respond') Object.assign(task, { status: 'identifying', revision: task.revision + 1, clarification: null });
         return { task: structuredClone(task) };
       }
+      if (command === "get_conversation" && args.conversationId === "deleted-chat") {
+        window.deletedLookups = (window.deletedLookups ?? 0) + 1;
+        throw new Error("conversation_not_found: Conversation unavailable");
+      }
       if (command === "get_conversation" && args.conversationId === accepted?.conversation.id) return structuredClone(accepted.conversation);
       if (command === "get_model_run") return { run: structuredClone(accepted.run) };
       if (command === "get_conversation_model_run" && args.conversationId === accepted?.conversation.id) return { run: structuredClone(accepted.run) };
@@ -130,7 +134,7 @@ test('background execution keeps progress visible without manual waiting control
   });
   await send(page, editor);
   const card = page.getByRole('region', { name: 'Task execution status' });
-  await expect(card).toContainText('Completed 18/40');
+  await expect(card).toContainText('Reranking document evidence 18/40');
   await expect(card).toContainText('Running for 400 seconds');
   await expect(card).toContainText('Fixture reranker');
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -142,7 +146,7 @@ test('background execution keeps progress visible without manual waiting control
   await expect(card).toContainText('Controlled revision is missing');
   await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 2,
     error_code: 'execution_activity_uncertain' }));
-  await expect(card).toContainText('Reranking candidates');
+  await expect(card).toContainText('Execution progress needs confirmation');
   await expect(card.getByRole('button', { name: 'Continue waiting', exact: true })).toHaveCount(0);
   await expect(card.getByRole('button', { name: 'Recover current stage', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => window.executionControls)).toEqual([]);
@@ -302,6 +306,45 @@ test('an older intent cannot overwrite a new model preparation status', async ({
   expect(await page.evaluate(() => window.statusSamples.filter(value => value.includes('Identifying task intent')))).toEqual([]);
 });
 
+test("new drafts across restart and sibling windows ignore previously completed deleted conversations", async ({ page, context }) => {
+  await openRecoveryChat(page);
+  const initial = await page.getByLabel("Current scope").textContent();
+  await page.evaluate((scope) => localStorage.setItem("fixture-saved-intents", JSON.stringify([{
+    id: "old-task", scope, revision: 1, status: "completed",
+    result: { status: "accepted", conversation: { id: "deleted-chat" }, run: { id: "old-run" } },
+  }])), initial);
+  await page.reload();
+  await expect(page.getByLabel("Current scope")).not.toHaveText(initial);
+  const reloaded = await page.getByLabel("Current scope").textContent();
+  const sibling = await context.newPage();
+  try {
+    await openRecoveryChat(sibling);
+    const second = await sibling.getByLabel("Current scope").textContent();
+    expect(new Set([initial, reloaded, second]).size).toBe(3);
+    await page.getByRole("button", { name: "New work draft" }).click();
+    await expect(page.getByLabel("Current scope")).not.toHaveText(reloaded);
+    expect(await page.evaluate(() => window.deletedLookups ?? 0)).toBe(0);
+    expect(await sibling.evaluate(() => window.deletedLookups ?? 0)).toBe(0);
+  } finally { await sibling.close(); }
+});
+
+test("restoring a deleted accepted conversation retires its receipt without overwriting the current draft", async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  const scope = await page.getByLabel("Current scope").textContent();
+  await editor.fill("Keep this working text");
+  await page.evaluate(async (scope) => {
+    const { intentTasks } = await import("/src/services/tauri/intentTasks.ts");
+    intentTasks.update({ id: "deleted-task", scope, revision: 2, status: "completed",
+      result: { status: "accepted", conversation: { id: "deleted-chat" }, run: { id: "old-run" } } });
+  }, scope);
+  await expect.poll(() => page.evaluate(async () =>
+    (await import("/src/services/tauri/intentTasks.ts")).intentTasks.isConsumed("deleted-task"))).toBe(true);
+  await expect(editor).toHaveValue("Keep this working text");
+  await expect(page.getByLabel("Current scope")).toHaveText(scope);
+  await expect(page.locator(".chat-error")).toHaveCount(0);
+  expect(await page.evaluate(() => window.deletedLookups)).toBe(1);
+});
+
 for (const completion of ["before", "after"]) test(`draft scope switch adopts completion ${completion} returning`, async ({ page }) => {
   const editor = await openRecoveryChat(page);
   await send(page, editor);
@@ -315,7 +358,7 @@ for (const completion of ["before", "after"]) test(`draft scope switch adopts co
   }
   await page.getByRole("button", { name: "Original draft", exact: true }).click();
   if (completion === "after") {
-    await expect(page.getByLabel("Current scope")).toHaveText("draft-0");
+    await expect(page.getByLabel("Current scope")).toHaveText(/^draft-[0-9a-f-]{36}$/);
     await page.evaluate(() => window.completeIntent());
   }
   await expect(page.getByLabel("Current scope")).toHaveText("recovered-chat");

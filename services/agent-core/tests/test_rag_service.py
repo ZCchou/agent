@@ -886,3 +886,60 @@ def test_parent_context_read_preserves_fragment_identity_and_complete_exception(
         assert json.loads(versions) == ['source-block-v5']
         await service.close()
     asyncio.run(exercise())
+
+def test_review_source_cross_reference_does_not_enable_exact_clause_search(tmp_path):
+    class TrackQueries(Engines):
+        def __init__(self):
+            self.queries = []
+
+        async def embed(self, model_id, texts, query=False):
+            if query:
+                self.queries.extend(texts)
+            return await super().embed(model_id, texts, query=query)
+
+    async def scenario():
+        core = CoreRepository(tmp_path / 'agent.db')
+        models = TrackQueries()
+        service = RagService(core, models)
+        try:
+            project = core.create_project('Document review', 'work')['id']
+            library = (await service.handle('library.create', {'name': 'Tests',
+                'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            await ready(service, library, content='4.5 短时工作低温的试验条件。\n\n9.1 易燃液体和蒸汽。')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            query = '按照第9.1节判定低温试验结果。'
+            result = await service.search(project, query, constraint_text='结合资料库审阅附件。')
+            assert query in models.queries
+            assert any('短时工作低温' in item['text'] for item in result['evidence'])
+            models.queries.clear()
+            result = await service.search(project, query, constraint_text='请具体查第4.5节。')
+            assert not models.queries
+            assert all('短时工作低温' in item['text'] for item in result['evidence'])
+        finally:
+            await service.close()
+
+    asyncio.run(scenario())
+
+def test_review_attachment_chapters_use_topics_only_in_named_standard(tmp_path):
+    async def scenario():
+        core = CoreRepository(tmp_path / 'standards.db')
+        service = RagService(core, Engines())
+        try:
+            project = core.create_project('Review', 'work')['id']
+            library = (await service.handle('library.create', {'name': 'Standards',
+                'embedding_model_id': 'embed', 'reranker_model_id': 'rank'}))['library']['id']
+            intended = await ready(service, library, 'DO-160F-2007-中文',
+                '5.2 温度变化速率。\n\n6.3 湿热试验程序。\n\n10.1 防水试验目的。')
+            await ready(service, library, 'DO-160G', '5.2 温度变化另一参考版次。')
+            assert (await wait_job(service, await service.handle('index.build', {'library_id': library})))['status'] == 'completed'
+            await service.handle('library.bind', {'library_id': library, 'project_id': project, 'enabled': True})
+            request = '结合项目资料库中的《DO-160F-2007-中文.pdf》，审阅第 10.1 节温度变化和第 10.2 节湿热试验计划。'
+            found = await service.search(project, '温度变化', constraint_text=request)
+            assert {item['version_id'] for item in found['evidence']} == {intended}
+            assert any(item['clause_number'] == '5.2' for item in found['evidence'])
+            exact = await service.search(project, '温度变化', constraint_text=request + '另核对 DO-160F 第 10.1 节。')
+            assert {item['clause_number'] for item in exact['evidence']} == {'10.1'}
+        finally:
+            await service.close()
+    asyncio.run(scenario())

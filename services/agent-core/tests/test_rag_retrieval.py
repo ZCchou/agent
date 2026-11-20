@@ -102,3 +102,28 @@ def test_100000_chunk_vector_scan_and_enforced_library_capacity(tmp_path):
     with pytest.raises(CoreDataError) as error:
         repository.save_version(library['id'], 'Overflow', parse_text('extra'), '1' * 64, 'overflow.txt', 'text/plain')
     assert error.value.code == 'rag_capacity_exceeded'
+
+
+@pytest.mark.parametrize('publisher,city', [('RTCA，INC.', 'Washington，DC 20036'), ('RTCA INC.', 'Washington, DC 20036')])
+def test_pdf_publisher_cover_unicode_punctuation_is_not_technical_evidence(publisher, city):
+    from agent.rag.retrieval import reference_material
+
+    text = publisher + '\n1828 L Street\n' + city + '\nRTCA/DO－160F\n第 5 章\n温度变化\n发行日期：2007'
+    assert reference_material(text, '通用试验条件和试验场地要求')
+    assert not reference_material(text, '封面上的发行日期')
+
+
+def test_spaced_preface_heading_is_reference_material():
+    from agent.rag.retrieval import reference_material
+
+    assert reference_material('前 言\n本文件由特别委员会制定。', '试验安装条件')
+    assert not reference_material('前 言\n本文件由特别委员会制定。', '前言介绍了什么')
+
+
+def test_appendix_cover_crossreferences_are_not_the_referenced_requirements():
+    from agent.rag.retrieval import reference_material
+
+    text = ('RTCA INC.\n1828 L Street\nWashington,DC 20036\nRTCA/DO－160F\n'
+            '附录 A\n环境试验标识\n第 1、2、3 章中包含相关信息。\n发行日期：2007')
+    assert reference_material(text, '通用试验条件')
+    assert not reference_material(text + '\nA.1 设备应保存环境鉴定记录。', '设备记录要求')

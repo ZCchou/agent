@@ -88,7 +88,7 @@ def test_summary_retry_keeps_authoritative_records_in_saved_notes():
     assert 'prefix_nonempty' in saved
     assert 'only first two positions' in saved
     assert json.loads(json.loads(saved.split('\n', 1)[1])['remaining'][0])['remaining'] == 1
-    assert messages[0]['content'] == 'Only first two positions, do not review'
+    assert next(message for message in messages if message['role'] == 'user')['content'] == 'Only first two positions, do not review'
 
 def test_summary_protects_current_tool_source_before_history_compaction():
     from agent.execution.working_context import summary_requirements
@@ -137,3 +137,58 @@ def test_original_input_search_keeps_its_own_result_identity_without_read_cursor
     assert {reference['result_id'] for reference in records} == {'read-result', 'search-result'}
     search = next(reference for reference in records if reference['result_id'] == 'search-result')
     assert 'next_cursor' not in search.get('facts', {})
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_summary_reclaims_covered_answers_atomically_without_losing_protocol_or_sources(valid):
+    import asyncio
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from agent.runtime import ChatRunService
+    from agent.execution.working_context import summary_sources
+
+    service = ChatRunService.__new__(ChatRunService)
+    service.execution_monitor = SimpleNamespace(start_task=lambda **_: {'id': 'task'})
+    service.task_plans = SimpleNamespace(get=lambda _: {}, completion=lambda _: {})
+    async def invoke(*args, **kwargs):
+        request = json.loads(args[5][1]['content'])
+        return json.dumps({'notes': 'short verified notes', **(request['protected_record_ids'] if valid else {})}), None, None
+    async def emit(*args):
+        pass
+    service._invoke_planned_step = invoke
+    service._emit = emit
+    saved = []
+    service._save_working_context = lambda *args: saved.append(deepcopy(args[-1]))
+    messages = [{'role': 'system', 'content': 'policy'},
+        {'role': 'user', 'content': 'original earlier request'},
+        {'role': 'assistant', 'content': 'long previous answer ' * 600},
+        {'role': 'assistant', 'content': 'another previous answer ' * 600},
+        {'role': 'user', 'content': 'Only cover title; no RAG. ' + 'attachment text ' * 80}]
+    messages += _pair('live', {'result_id': 'live-result', 'result_sha256': 'c' * 64,
+        'source_ref': {'source_sha256': 'd' * 64}, 'preview': 'cover facts'})
+    messages.append({'role': 'user', '_document_read_result': True, 'content': 'latest cover observation'})
+    original = deepcopy(messages)
+    # Deterministic tokenizer stand-in: the complete working request exceeds a
+    # 16K context budget, while bounded summary chunks individually fit.
+    measure = lambda values: sum(len(m.get('content', '')) for m in values)
+    input_limit = 12684
+    assert measure(messages) > input_limit
+    call = service._summarize_working_context({'id': 'run'}, {}, {}, 'attempt', 1,
+        None, messages, summary_sources(messages), input_limit, 1)
+    if not valid:
+        with pytest.raises(CoreDataError):
+            asyncio.run(call)
+        assert messages == original
+        assert not saved
+        return
+    asyncio.run(call)
+    assert measure(messages) < input_limit
+    assert [m for m in messages if m['role'] == 'user'] == [m for m in original if m['role'] == 'user']
+    assert messages[0] == original[0]
+    assert all(m in messages for m in original if m.get('tool_calls') or m['role'] == 'tool')
+    assert not any('long previous answer' in m.get('content', '') for m in messages)
+    notes = next(m for m in messages if m.get('_working_notes'))
+    assert 'live-result' in notes['content']
+    assert saved[-1] == messages
+    # Persistent history represented by the independent original remains intact.
+    assert original[2]['content'].startswith('long previous answer')

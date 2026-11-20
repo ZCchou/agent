@@ -4,12 +4,50 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
+import httpx
+import httpcore
 
 from agent.execution.compiler import InvocationCompiler
 from agent.execution.invocation_diagnostics import record
 from agent.model_invocation import ModelInvocationService
 from agent.providers import ProviderError, ProviderEvent, ProviderProfile
 from test_unified_invocation_v3 import model_spec
+
+
+def test_network_failure_diagnostics_allow_only_transport_types_and_native_codes(tmp_path):
+    database=tmp_path/'network.db'
+    repository=SimpleNamespace(_connect=lambda: sqlite3.connect(database))
+    spec=model_spec()
+    with repository._connect() as db:
+        db.execute('CREATE TABLE invocation_diagnostics(spec_id TEXT PRIMARY KEY,payload_json TEXT)')
+        db.execute('INSERT INTO invocation_diagnostics VALUES(?,?)',(spec.spec_id,'{"text_characters":18}'))
+    native=ConnectionResetError(10054,'private socket path')
+    native.winerror=10054
+    core=httpcore.ReadError('secret body')
+    core.__cause__=native
+    error=ProviderError('connection_reset','private URL',details={'winerror':10061,'network_error':'private'})
+    error.__cause__=httpx.ReadError('secret URL')
+    error.__cause__.__cause__=core
+    record(repository,spec,error=error)
+    record(repository,spec)
+    with repository._connect() as db:
+        result=db.execute('SELECT payload_json FROM invocation_diagnostics').fetchone()[0]
+    value=json.loads(result)
+    assert value['network_error']=={'types':['httpx.ReadError','httpcore.ReadError'],'errno':10054,'winerror':10054}
+    assert value['text_characters']==18
+    assert 'private' not in result and 'secret' not in result and '10061' not in result
+
+    unknown=type('PrivateProviderName',(httpx.ReadError,),{})('private URL')
+    unknown.__cause__=OSError(123456,'private message')
+    unknown.__cause__.winerror=True
+    unknown.__cause__.__context__=unknown
+    error.__cause__=unknown
+    with repository._connect() as db:
+        db.execute('DELETE FROM invocation_diagnostics')
+    record(repository,spec,error=error)
+    with repository._connect() as db:
+        value=json.loads(db.execute('SELECT payload_json FROM invocation_diagnostics').fetchone()[0])
+    assert 'network_error' not in value
 
 
 def test_outcome_records_safe_counts_and_preserves_partial_flags(tmp_path):

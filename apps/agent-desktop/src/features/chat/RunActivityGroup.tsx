@@ -25,16 +25,17 @@ export function RunActivityGroup({ item, projectName, conversationTitle, onResol
   onResolved(): void;
 }) {
   const { t } = useTranslation("chat");
-  const active = item.operations.some((operation) => !TERMINAL_TOOL.has(operation.status))
+  const operations = [...new Map(item.operations.map(op => [op.id, op])).values()];
+  const active = operations.some((operation) => !TERMINAL_TOOL.has(operation.status))
     || item.changeSets.some((changeSet) => !TERMINAL_CHANGE.has(changeSet.status))
     || item.webOperations.some((operation) => ![
       "completed", "failed", "cancelled", "interrupted", "unknown_outcome",
     ].includes(operation.status));
-  const terminalFailure = item.operations.some((operation) => {
+  const terminalFailure = operations.some((operation) => {
     const result = terminalResult(operation);
     return result && (result.exit_code !== 0 || result.timed_out || result.cancelled);
   });
-  const failed = terminalFailure || item.operations.some((operation) => ["failed", "interrupted"].includes(operation.status))
+  const failed = terminalFailure || operations.some((operation) => ["failed", "interrupted"].includes(operation.status))
     || item.webOperations.some((operation) => ["failed", "interrupted", "unknown_outcome"].includes(operation.status))
     || item.events.some(({ summary }) => ["failed", "interrupted"].includes(summary.status))
     || item.changeSets.some((changeSet) => RECOVERY_ATTENTION.has(changeSet.status));
@@ -42,28 +43,32 @@ export function RunActivityGroup({ item, projectName, conversationTitle, onResol
   const rolledBack = item.changeSets.some((changeSet) => changeSet.status === "rolled_back");
   const evidenceWarning = item.webOperations.some((operation) =>
     operation.status === "completed" && operation.evidence_status !== "traceable_sources");
-  const displayOperations = item.operations.length ? item.operations.map((operation) => ({
+  const displayOperations = operations.length ? operations.map((operation) => ({
     ...operation,
     search_completeness: operation.search_completeness ?? item.events.find(({ summary }) =>
       summary.operation_id === operation.id)?.summary.search_completeness ?? null,
   })) : item.events.map(({ message, summary }, index) => ({
-    id: message.id, tool_name: summary.tool_name, status: summary.status, sequence: index,
+    id: message.id, error_code: null, tool_name: summary.tool_name, status: summary.status, sequence: index,
     search_completeness: summary.search_completeness,
   }));
+  const capacityFailures = new Map(operations.filter(op => op.status === "failed"
+    && op.error_code === "rag_context_too_small" && ["rag.search", "rag.read"].includes(op.tool_name))
+    .map(op => [op.id, op.tool_name]));
+  const searches = [...capacityFailures.values()].filter(name => name === "rag.search").length;
   const searchStates = displayOperations.filter((operation) => operation.tool_name === "fs.search"
     && operation.status === "completed").map((operation) => searchPresentation(operation.search_completeness).state);
   const searchIncomplete = searchStates.includes("incomplete");
   const searchUnknown = searchStates.includes("unknown");
-  const needsAction = recoveryAttention || item.operations.some((operation) => operation.status === "waiting_user")
+  const needsAction = recoveryAttention || operations.some((operation) => operation.status === "waiting_user")
     || item.changeSets.some((changeSet) => changeSet.status === "waiting_user" || changeSet.status === "ready");
   const [expanded, setExpanded] = useState<boolean | null>(null);
   const open = expanded ?? needsAction;
   useEffect(() => { if (needsAction) setExpanded(true); }, [needsAction]);
   const mutationCount = item.changeSets.reduce((total, changeSet) => total + changeSet.mutations.length, 0);
-  const count = mutationCount || Math.max(item.events.length, item.operations.length) + item.webOperations.length;
-  const onlyWeb = item.webOperations.length > 0 && !mutationCount && !item.operations.length && !item.events.length;
+  const count = mutationCount || Math.max(item.events.length, operations.length) + item.webOperations.length;
+  const onlyWeb = item.webOperations.length > 0 && !mutationCount && !operations.length && !item.events.length;
   const onlyRouting = Boolean(item.executionSummary) && !item.webOperations.length
-    && !mutationCount && !item.operations.length && !item.events.length;
+    && !mutationCount && !operations.length && !item.events.length;
   const visibleSteps = item.executionSummary?.steps.filter((step) => step.status !== "skipped") ?? [];
   const routedModels = new Set(visibleSteps.map((step) =>
     `${step.provider_profile_id}:${step.model_id}`) ?? []);
@@ -74,6 +79,9 @@ export function RunActivityGroup({ item, projectName, conversationTitle, onResol
   };
 
   return <section className={`run-activity ${active ? "run-activity--active" : ""} ${failed ? "run-activity--failed" : ""}`}>
+    {item.progress.map(({ message, summary }) => <AssistantMessageBody key={message.id}
+      content={summary.content} state="complete" verifiedEvidenceIds={message.verified_evidence_ids}
+      onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />)}
     <button type="button" className="run-activity__summary" aria-expanded={open} onClick={(event) => {
       if (!open) pauseProcessFollowing(event.currentTarget);
       setExpanded(!open);
@@ -85,7 +93,7 @@ export function RunActivityGroup({ item, projectName, conversationTitle, onResol
         : evidenceWarning ? t("webSearch.activityMissingEvidence")
         : item.progress.length && !needsAction ? t("process.title")
         : rolledBack ? t("changes.activityRolledBack")
-        : item.operations.some((operation) => operation.tool_name === "terminal.run") ? t(active ? "terminal.activityActive" : "terminal.activityComplete")
+        : operations.some((operation) => operation.tool_name === "terminal.run") ? t(active ? "terminal.activityActive" : "terminal.activityComplete")
         : onlyRouting
         ? t(item.executionSummary?.selection_mode === "fixed"
           ? "routing.activityPath" : "routing.activityComplete", { count: routedModels.size })
@@ -93,13 +101,12 @@ export function RunActivityGroup({ item, projectName, conversationTitle, onResol
         ? t(active ? "webSearch.activityActive" : evidenceWarning
           ? "webSearch.activityMissingEvidence" : "webSearch.activityComplete", { count })
         : t(active ? "tools.progressActive" : "tools.progressComplete", { count })}</span>
+      {capacityFailures.size > 1 && <span>{t("tools.ragCapacityFailures", {
+        searches, reads: capacityFailures.size - searches,
+      })}</span>}
       <ChevronDown size={14} className={open ? "run-activity__chevron--open" : ""} />
     </button>
     {open ? <div className="run-activity__details">
-      {item.progress.length ? <div className="work-process__body work-process__body--saved">
-        <AssistantMessageBody content={item.progress.map(({ summary }) => summary.content).join("\n\n")} state="complete"
-          onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
-      </div> : null}
       {item.executionSummary ? <div className="routing-activity-details">
         <strong>{t("routing.coordinator", { model: item.executionSummary.coordinator_model_id })}</strong>
         {item.executionSummary.intent_resolution?.source ? <small className="routing-activity-details__intent">
@@ -127,12 +134,14 @@ export function RunActivityGroup({ item, projectName, conversationTitle, onResol
       </div> : null}
       {item.changeSets.map((changeSet) => <ChangeSetCard key={changeSet.id} changeSet={changeSet}
         projectName={projectName} conversationTitle={conversationTitle} expanded onResolved={onResolved} />)}
-      {item.operations.filter((operation) => operation.tool_name === "terminal.run").map((operation) =>
+      {operations.filter((operation) => operation.tool_name === "terminal.run").map((operation) =>
         <TerminalCommandCard key={operation.id} operation={operation} onResolved={onResolved} />)}
       {item.webOperations.map((operation) => <WebSearchActivity key={operation.id} operation={operation} />)}
-      {item.operations.length || item.events.length ? <ol className="run-activity__operations">
+      {operations.length || item.events.length ? <ol className="run-activity__operations">
         {displayOperations.map((operation) => <li key={operation.id}>
           <code>{operation.tool_name}</code><span>{t(`tools.operationStatus.${operation.status}`)}</span>
+          {operation.status === "failed" && operation.error_code
+            ? <span>{t(`tools.errorReasons.${operation.error_code}`, { defaultValue: operation.error_code })}</span> : null}
           {operation.tool_name === "fs.search" ? <SearchAuditLabel value={operation.search_completeness} /> : null}
         </li>)}
       </ol> : null}

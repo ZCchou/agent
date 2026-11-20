@@ -93,6 +93,20 @@ class StageActivity:
         self._rag_worker = None
         self.resource(active=None, observation_source=source)
 
+    def effective_progress(self, payload):
+        # Actual generated characters are events, not cumulative counters.
+        if not payload.get('repetitive_output') and any(type(payload.get(key)) is int and payload[key]>0 for key in ('characters','reasoning_characters')):
+            return True
+        if payload.get('kind') in {'tool_call','native_search_call','native_search_result'}:return True
+        counters=getattr(self,'_effective_counters',{})
+        advanced=False
+        for key,value in payload.items():
+            if (key=='completed' or key.startswith('integrity_') or key in {'bytes_read','files_processed','items_processed','tokens_generated'}):
+                if type(value) in (int,float) and value>counters.get(key,0):
+                    counters[key]=value;advanced=True
+        self._effective_counters=counters
+        return advanced
+
     def progress(self, completed: float | None = None, total: float | None = None,
                  **details: Any) -> bool:
         return self.monitor._record(self, 'progress', dict(details, completed=completed, total=total))
@@ -401,8 +415,9 @@ class ExecutionMonitor:
             if not self._valid(connection, activity):
                 return False
             metrics = connection.execute(
-                'SELECT details_json FROM execution_wait_stages WHERE task_id=? AND attempt=?',
+                'SELECT details_json,progress_at FROM execution_wait_stages WHERE task_id=? AND attempt=?',
                 (activity.task_id, activity.attempt)).fetchone()
+            effective=kind=='progress' and activity.effective_progress(payload)
             details = json.loads(metrics['details_json'])
             details.update(payload)
             connection.execute(
@@ -410,7 +425,7 @@ class ExecutionMonitor:
                    (task_id,attempt,revision,kind,recorded_at,payload_json) VALUES (?,?,?,?,?,?)''',
                 (activity.task_id, activity.attempt, activity.revision, kind, now, encoded))
             assignments = {
-                'progress': ('progress_at=?,completed=?,total=?', (now, payload.get('completed'), payload.get('total'))),
+                'progress': ('progress_at=?,completed=?,total=?', (now if effective else metrics['progress_at'], payload.get('completed'), payload.get('total'))),
                 'heartbeat': ('heartbeat_at=?', (now,)),
                 'resource': ('resource_at=?,resource_active=?', (now, payload.get('active'))),
                 'queue': ('queue_at=?,queue_waiting=?', (now, payload.get('waiting'))),
@@ -424,7 +439,7 @@ class ExecutionMonitor:
                     (max(0, self.active_clock() - activity.queue_clock), activity.task_id, activity.attempt))
             connection.execute('UPDATE execution_wait_tasks SET sequence=sequence+1,updated_at=? WHERE id=?',
                                (now, activity.task_id))
-        if kind == 'progress':
+        if kind == 'progress' and effective:
             activity.progress_clock = self.active_clock()
             activity.progress_sequence += 1
         elif kind == 'heartbeat':
@@ -444,6 +459,9 @@ class ExecutionMonitor:
             connection.execute('BEGIN IMMEDIATE')
             if not self._valid(connection, activity):
                 return False
+            previous=connection.execute('SELECT identity_json,payload_json FROM execution_wait_checkpoints WHERE task_id=? AND stage=? AND checkpoint_key=?',
+                (activity.task_id,activity.stage,key)).fetchone()
+            effective=previous is None or previous['identity_json']!=identity_json or previous['payload_json']!=payload_json
             connection.execute(
                 '''INSERT INTO execution_wait_checkpoints VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(task_id,stage,checkpoint_key) DO UPDATE SET
@@ -451,12 +469,13 @@ class ExecutionMonitor:
                    attempt=excluded.attempt,revision=excluded.revision,committed_at=excluded.committed_at''',
                 (activity.task_id, activity.stage, key, identity_json, payload_json,
                  activity.attempt, activity.revision, now))
-            connection.execute('UPDATE execution_wait_tasks SET auto_recoveries=0,sequence=sequence+1,updated_at=? WHERE id=?',
-                               (now, activity.task_id))
+            connection.execute('UPDATE execution_wait_tasks SET auto_recoveries=CASE WHEN ? THEN 0 ELSE auto_recoveries END,sequence=sequence+1,updated_at=? WHERE id=?',
+                               (int(effective),now, activity.task_id))
             connection.execute('UPDATE execution_wait_stages SET progress_at=? WHERE task_id=? AND attempt=?',
                                (now, activity.task_id, activity.attempt))
-        activity.progress_clock = self.active_clock()
-        activity.progress_sequence += 1
+        if effective:
+            activity.progress_clock = self.active_clock()
+            activity.progress_sequence += 1
         self._emit(activity.task_id, 'checkpoint')
         return True
 
@@ -622,7 +641,7 @@ class ExecutionMonitor:
                     active_resource = metrics['resource_active'] == 1 and metrics['resource_at'] is not None \
                         and activity.resource_clock is not None and now - activity.resource_clock < HEARTBEAT_LOSS_SECONDS
                     if first_lost_at is not None and (
-                            activity.progress_sequence != first_lost_progress_sequence or active_resource):
+                            activity.progress_sequence != first_lost_progress_sequence):
                         first_lost_at = None
                     stalled = now - progress_at >= policy.no_progress_probe_seconds
                     heartbeat_lost = activity.heartbeat_seen and \
@@ -631,7 +650,7 @@ class ExecutionMonitor:
                         and task['elapsed_seconds'] >= total_deadline
                     if total_reached:
                         self._pause(activity, 'execution_total_wait_reached')
-                    should_diagnose = (stalled or heartbeat_lost) and not active_resource and not total_reached
+                    should_diagnose = (stalled or heartbeat_lost) and not total_reached
                     if should_diagnose and (diagnosed_at is None or now - diagnosed_at >= HEARTBEAT_LOSS_SECONDS):
                         diagnosed_at = now
                         diagnostic_unavailable = False
@@ -643,7 +662,7 @@ class ExecutionMonitor:
                             else:
                                 diagnostic = diagnose(activity) if diagnose is not None else Diagnostic()
                             if inspect.isawaitable(diagnostic):
-                                diagnostic = await diagnostic
+                                diagnostic = await asyncio.wait_for(diagnostic,timeout=HEARTBEAT_INTERVAL_SECONDS)
                         except Exception:
                             diagnostic_unavailable = True
                             activity.resource(active=None, wait_reason='execution_diagnostic_unavailable')
@@ -652,6 +671,9 @@ class ExecutionMonitor:
                         if observed_status in TERMINAL:
                             raise asyncio.CancelledError()
                         if observed_status == 'waiting_recovery':
+                            continue
+                        if stalled and (getattr(activity,'replay_unsafe',False) or (not diagnostic.process_exited and not (diagnostic.communication_lost and diagnostic.activity_observed is False))):
+                            self._pause(activity,'execution_no_effective_progress')
                             continue
                         if diagnostic.process_exited:
                             confirmed_failure = True
@@ -669,6 +691,9 @@ class ExecutionMonitor:
                                 activity.resource(active=None, wait_reason='execution_activity_uncertain')
                 if confirmed_failure:
                     task = self.get_task(task_id)
+                    if getattr(activity,'replay_unsafe',False):
+                        self._pause(activity,'execution_no_effective_progress')
+                        continue
                     if safe_to_retry and task['auto_recoveries'] < policy.max_auto_recoveries:
                         self._stage_status(activity, 'failed')
                         await self._drain(operation)

@@ -56,3 +56,29 @@ def test_exact_preparation_restores_only_original_output_allowance(monkeypatch, 
             assert prepared.input_budget['request_tokens'] + expected <= int(8192 * .85)
 
     asyncio.run(scenario())
+
+
+def test_exact_overflow_exposes_only_budget_scalars(monkeypatch):
+    async def scenario():
+        profile = ProviderProfile('managed:model', 'model', 'openai_compatible', 'http://127.0.0.1:1/v1',
+                                  model_capabilities={'model': {'context_length': 16128}})
+        provider = ManagedLocalProvider(profile, None, None)
+        async def measure(_):
+            return 14000
+        @asynccontextmanager
+        async def session(_):
+            yield SimpleNamespace(measure_request=measure)
+        monkeypatch.setattr('agent.runtime.ModelInvocationService.provider_session', session)
+        service = SimpleNamespace(invocation_compiler=InvocationCompiler())
+        with pytest.raises(CoreDataError) as caught:
+            await ChatRunService._prepare_measured_model_request(service, provider,
+                model_spec(max_output_tokens=4032), [{'role': 'user', 'content': 'private original'}],
+                requested_output_tokens=4032)
+        assert caught.value.code == 'provider_context_limit_exceeded'
+        assert caught.value.details == {
+            'context_window': 16128, 'measured_input_tokens': 14000,
+            'input_hard_limit': 13196, 'minimum_output_reserve': 512,
+            'requested_output_tokens': 4032, 'safety_margin_tokens': 64,
+            'available_output_tokens': -356,
+        }
+    asyncio.run(scenario())

@@ -45,11 +45,14 @@ def validate_saved_selection(plan: Any, intent: dict[str, Any]) -> list[dict[str
 
 
 def task_attachment_ids(connection, task_id, request):
-    """Resolve task-local identities for references already sealed against this run."""
+    """Resolve only materialized inputs sealed against the task-bound run.
+
+    The immutable original request may precede edit-branch attachment cloning.
+    Its empty raw attachment list cannot revoke the admitted current inputs,
+    and a seal cannot authorize arbitrary unselected historical attachments.
+    """
     allowed = {item['id'] for item in request.get('attachments', [])}
     explicit = {item['attachment_id']: item for item in validate_references(request.get('attachment_references', []))}
-    if not explicit:
-        return allowed
     row = connection.execute(
         """SELECT p.requirements_hash, p.resolution_hash, p.resolved_intent_json, r.user_message_id
            FROM execution_wait_tasks t JOIN model_runs r ON r.id=t.run_id
@@ -63,10 +66,20 @@ def task_attachment_ids(connection, task_id, request):
     materialized = {row[0] for row in connection.execute(
         'SELECT id FROM message_attachments WHERE message_id=?', (plan['user_message_id'],))}
     for item in selection:
+        if item['current_attachment_id'] not in materialized:
+            continue
+        if (item.get('source_message_id') == plan['user_message_id']
+                and item.get('source_attachment_id') == item['current_attachment_id']):
+            allowed.add(item['current_attachment_id'])
+            continue
         reference = explicit.get(item.get('source_attachment_id'))
-        if reference and item['current_attachment_id'] in materialized and all(
+        original_message = connection.execute(
+            'SELECT message_id FROM message_attachments WHERE id=?',
+            (item.get('source_attachment_id'),)).fetchone()
+        if (reference and original_message and original_message[0] == item.get('source_message_id')
+                and all(
             item.get(key) == reference[key] for key in ('source_start', 'source_end') if key in reference
-        ):
+        )):
             allowed.add(item['current_attachment_id'])
     return allowed
 

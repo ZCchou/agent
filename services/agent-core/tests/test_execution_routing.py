@@ -114,7 +114,7 @@ def test_capability_advisories_render_as_bounded_model_context() -> None:
     assert rendered.endswith("</capability-advisories>")
 
 
-def test_degraded_file_capability_replaces_false_change_set_claims() -> None:
+def test_degraded_file_capability_retains_model_text_with_file_status() -> None:
     content = "已提交删除变更集，等待批准中。"
     advisories = [{
         "capability_id": "file_write",
@@ -127,7 +127,7 @@ def test_degraded_file_capability_replaces_false_change_set_claims() -> None:
 
     assert "没有执行任何项目文件操作" in guarded
     assert "没有提交变更集" in guarded
-    assert "等待批准" not in guarded
+    assert guarded.startswith(content)
 
 
 def test_execution_plan_persistence_defaults_advisories_for_legacy_rows(tmp_path) -> None:

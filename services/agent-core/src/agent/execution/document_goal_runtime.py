@@ -209,8 +209,8 @@ _LOCAL_DECISION = re.compile(r'是否|有无|有或没有|\b(?:whether|yes or no
 
 
 _REVIEW_OR_MODIFICATION = re.compile(r'审查|审阅|复核|评估|核对|符合|校对|纠错|填写|回填|修改|\b(?:review|audit|assess|verify|fill|edit|modify)\b', re.I)
-_MODIFICATION_REQUEST = re.compile(r'填写|回填|修改|改写|\b(?:fill|edit|modify)\b', re.I)
-_EXPORT_REQUEST = re.compile(r'导出|另存|保存为|输出为|\b(?:export|save)\b', re.I)
+_MODIFICATION_REQUEST = re.compile(r'填写|回填|修改(?!建议|意见)|改写|\b(?:fill|edit|modify)\b', re.I)
+_EXPORT_REQUEST = re.compile(r'导出|另存|保存[为到至]|输出为|\b(?:export|save)\b', re.I)
 
 
 def _positive_request(pattern, request):
@@ -218,11 +218,58 @@ def _positive_request(pattern, request):
                for match in pattern.finditer(request))
 
 
+_LOCAL_RANGE_REQUEST = re.compile(
+    r'(?:(?:只|仅)(?:依据|根据|基于|读取|阅读|查看)|\bonly\s+(?:use|read|from|based\s+on))'
+    r'[^，。；;!?\n]{0,100}?(?:封面|扉页|标题页|指定章节|相关章节|相关部分|'
+    r'第\s*[\d一二三四五六七八九十百]+\s*[章节部分]|\b(?:cover|title)\s+page\b|\bsection\s+\d+)', re.I)
+_EXCLUSIVE_ATTACHMENT = re.compile(
+    r'(?:(?:只|仅)(?:依据|根据|基于)|\bonly\s+(?:use|read|from))'
+    r'[^，。；;!?\n]{0,60}?(?:附件|文档|文件|\b(?:attachment|document|file)\b)', re.I)
+_LOCAL_METADATA = re.compile(r'标题|文档类型|作者|文号|\b(?:title|author|document type|document number)\b', re.I)
+_LOCAL_ANSWER = re.compile(r'说明|回答|描述|介绍|概括|总结|哪些|什么|是否|有无|'
+    r'\b(?:answer|describe|explain|summari[sz]e|what|whether)\b', re.I)
+_FULL_SOURCE_OBJECT = (r'全文|全篇|整篇|整份(?:文档|附件|文件)?|整个(?:文档|附件|文件)|'
+    r'全部(?:内容|非空|位置|章节)|所有(?:内容|非空|位置|章节)|各章|每章|目录')
+_FULL_SOURCE = re.compile(
+    # Consume the complete verb/object phrase once, so its negation precedes
+    # the match rather than leaving a second bare full-source noun to match.
+    r'(?:完整)?(?:阅读|读取|通读|审阅)\s*(?:' + _FULL_SOURCE_OBJECT + r')'
+    r'|完整(?:阅读|读取|审阅)(?:附件|文档|文件)?|通读(?:附件|文档|文件)?'
+    r'|(?:' + _FULL_SOURCE_OBJECT + r')'
+    r'|\b(?:(?:read|review)\s+(?:the\s+)?)?(?:full|entire|whole)\s+(?:document|file|attachment|text)'
+    r'|\ball\s+(?:chapters|sections|positions)', re.I)
+
+_LOCAL_NEGATION = re.compile(r'(?:并非|不是|不得|不能|不要|不|无需|禁止|请勿|别|do not|not)\s*$', re.I)
+
+
+def local_document_question_scope(request):
+    """Recognize explicit local read questions without guessing source positions."""
+    if (not _positive_request(_LOCAL_ANSWER, request)
+            or _positive_request(_FULL_SOURCE, request)
+            or _positive_request(_VERBATIM_REQUEST, request)
+            or _positive_request(_REVIEW_OR_MODIFICATION, request)
+            or _positive_request(_EXPORT_REQUEST, request)):
+        return None
+    matches = list(_LOCAL_RANGE_REQUEST.finditer(request))
+    if _LOCAL_METADATA.search(request):
+        matches.extend(_EXCLUSIVE_ATTACHMENT.finditer(request))
+    for match in matches:
+        if not _LOCAL_NEGATION.search(request[max(0, match.start()-24):match.start()]):
+            # Preserve the actual requested condition, not first-read limits or
+            # a guessed mapping such as cover == first N nonempty positions.
+            return request if len(request) <= 2000 else None
+    return None
+
+
+def is_local_document_summary_request(request):
+    return bool(_positive_request(_SUMMARY_REQUEST, request) or local_document_question_scope(request))
+
+
 def requested_document_answer_kind(request, planned, *, rag_decision=None):
     """Keep read bounds while distinguishing direct questions from exact extraction."""
     from agent.rag.routing import project_evidence_policy
 
-    if planned not in {'extract', 'review'} or _VERBATIM_REQUEST.search(request):
+    if planned not in {'extract', 'review'} or _positive_request(_VERBATIM_REQUEST, request):
         return planned
     if _positive_request(_EXPORT_REQUEST, request):
         return planned
@@ -232,15 +279,30 @@ def requested_document_answer_kind(request, planned, *, rag_decision=None):
         return 'synthesis'
     if _positive_request(_REVIEW_OR_MODIFICATION, request):
         return planned
-    return 'synthesis' if _positive_request(_SUMMARY_REQUEST, request) else planned
+    return 'synthesis' if is_local_document_summary_request(request) else planned
 
 
-def normalize_document_answer_draft(request, draft, *, rag_decision=None):
-    if not isinstance(draft, dict):
+def normalize_document_answer_draft(request, draft, *, rag_decision=None, confirmed_requirements=None):
+    if (not isinstance(draft, dict)
+            or (confirmed_requirements or {}).get('provenance') == 'user_clarification'):
         return
+    from agent.execution.document_review_selection import normalize_review_draft
+    normalize_requested_review_intent(request, draft)
+    normalize_review_draft(request, draft, confirmed_requirements)
     planned = draft.get('answer_kind')
     answer_kind = requested_document_answer_kind(request, planned, rag_decision=rag_decision)
-    if answer_kind == planned:
+    local_scope = local_document_question_scope(request) if planned in {'extract', 'review', 'synthesis'} else None
+    if local_scope:
+        for scope in draft.get('source_scopes', []):
+            if not isinstance(scope, dict) or scope.get('scope') == 'excluded':
+                continue
+            scope['operation'] = 'read'
+            selected = scope.get('scope') == 'selected' and (scope.get('target_ids')
+                or (scope.get('selector') or {}).get('kind') == 'selection_pending')
+            if not selected:
+                scope.update(scope='selected', target_ids=[], requested_count=None,
+                    selector={'kind': 'selection_pending', 'condition': local_scope})
+    if answer_kind == planned and not local_scope:
         return
     draft['answer_kind'] = answer_kind
     if planned == 'review':
@@ -326,6 +388,65 @@ _DOCUMENT_POSITION = re.compile(
     r'(?<![a-z0-9-])(?:p-\d+|t-\d+(?:-r\d+-c\d+-t\d+)*-r\d+-c\d+)(?![a-z0-9-])', re.I)
 
 
+def _review_only_request(request):
+    if not _positive_request(_REVIEW_REQUEST, request):
+        return False
+    for match in _MODIFICATION_REQUEST.finditer(request):
+        before=request[max(0,match.start()-24):match.start()]
+        if _REQUEST_NEGATION.search(before):continue
+        if match.group().lower() in {'填写','fill'} and re.search(r'(?:已(?:经)?(?:完成)?(?:了)?|already\s+(?:been\s+)?)\s*$',before,re.I):continue
+        return False
+    return not _positive_request(re.compile(r'技能|\b(?:skills?|web|website)\b|网页|网站|https?://',re.I),request)
+
+
+_FULL_READ_REQUEST=re.compile(r'(?:阅读|读取|通读)\s*(?:全文|全篇|整篇|整份(?:文档|附件|文件)?|整个(?:文档|附件|文件))|\bread\s+(?:(?:the|a)\s+)?(?:whole|entire|complete)\s+(?:document|attachment|file)\b',re.I)
+
+
+def normalize_requested_review_intent(request, draft):
+    """An initial inspection is not a separate full-body reading obligation."""
+    if not _review_only_request(request):return
+    scopes=draft.get('source_scopes',[])
+    reviews=[scope for scope in scopes if scope.get('operation')=='review' and scope.get('scope')!='excluded']
+    if not reviews:return
+    draft['answer_kind']='review'
+    sources={scope['source_id'] for scope in reviews}
+    if not _positive_request(_FULL_READ_REQUEST,request):
+        for scope in scopes:
+            if (scope.get('operation')=='read' and scope.get('source_id') in sources
+                    and scope.get('scope')=='full'):
+                scope.update(scope='metadata',target_ids=[],selector=None,requested_count=None,
+                    reason='首次结构检查用于支持审阅；原请求没有独立的全文读取交付要求。')
+
+
+def plan_conditional_evidence_review(run,current,attachments):
+    """Plan explicit single-source conditional reviews without guessing members."""
+    from agent.rag.routing import project_evidence_policy
+    from agent.execution.document_review_selection import selection_condition
+    from agent.execution.prepared_review_publication import requested_review_path
+    request=current['content'];condition=selection_condition(request)
+    if (len(attachments)!=1 or len(current.get('attachments',[]))!=1 or not condition
+        or not _review_only_request(request)):return None
+    attachment=attachments[0]
+    if (not attachment['name'].lower().endswith('.docx') or 'source_start' in attachment or 'source_end' in attachment
+        or project_evidence_policy(run.get('rag_decision') or {},request,has_attachments=True) not in {'required','mixed'}):return None
+    draft=example_goal(attachment['id'])
+    draft.update(answer_kind='review',evidence_required=True,success_criteria=[request])
+    draft['source_scopes'][0].update(operation='review',scope='selected',target_ids=[],requested_count=None,
+        selector={'kind':'selection_pending','condition':condition},reason=condition)
+    if _positive_request(_EXPORT_REQUEST,request):
+        paths=re.findall(r'[“\"\']([^”\"\'\r\n]{1,220}\.md)[”\"\']',request,re.I)
+        if not paths:
+            paths = re.findall(r'(?:文件名为|命名为|保存为|另存为)\s*[`“"《]?([^\s，。；、`”"》<>|:*?]{1,220}\.md)(?=[`”"》\s，。；]|$)', request, re.I)
+        if len(paths)!=1:return None
+        draft['deliverables']=[{'path':paths[0],'format':'markdown'}]
+        if requested_review_path(current,draft) is None:return None
+    if _positive_request(_FULL_READ_REQUEST,request):
+        read=example_goal(attachment['id'])['source_scopes'][0]
+        read['reason']='用户明确要求独立阅读全文。'
+        draft['source_scopes'].append(read)
+    return draft
+
+
 def plan_named_evidence_review(run, current, attachments):
     """Resolve an expressly named review scope before asking a model to plan it."""
     from agent.rag.routing import project_evidence_policy
@@ -340,9 +461,9 @@ def plan_named_evidence_review(run, current, attachments):
         return None
     if (not re.search(r'(?:只|仅)(?:对|审查|审阅|核对)|\bonly\b', request, re.I)
             or not _positive_request(_REVIEW_REQUEST, request)
-            or _positive_request(_EXPORT_REQUEST, request) or _positive_request(_MODIFICATION_REQUEST, request)):
+            or not _review_only_request(request) or _positive_request(_FULL_READ_REQUEST,request)):
         return None
-    positions = list(dict.fromkeys(_DOCUMENT_POSITION.findall(request.casefold())))
+    positions = _explicit_review_positions(request)
     if not 1 <= len(positions) <= 100:
         return None
     draft = example_goal(attachment['id'])
@@ -351,7 +472,38 @@ def plan_named_evidence_review(run, current, attachments):
     draft['source_scopes'][0].update(operation='review', scope='selected', target_ids=positions,
                                       requested_count=len(positions), reason='用户指定了文档位置 ID。')
     draft['first_action']['limit'] = len(positions)
+    if _positive_request(_EXPORT_REQUEST,request):
+        from agent.execution.prepared_review_publication import requested_review_path
+        pattern=re.compile(r'(?:保存为|另存为|导出为|输出为|\bsave\s+(?:as|to))\s*[“"\']([^”"\'\r\n]{1,220}\.md)[”"\']',re.I)
+        paths=[m[1] for m in pattern.finditer(request) if not _REQUEST_NEGATION.search(request[max(0,m.start()-24):m.start()])]
+        if len(paths)!=1:return None
+        draft['deliverables']=[{'path':paths[0],'format':'markdown'}]
+        if requested_review_path(current,draft) is None:return None
+        draft['success_criteria']=[request]
     return draft
+
+
+def _explicit_review_positions(request):
+    """Expand only an explicitly bounded paragraph range or cells in the same physical row."""
+    request=re.sub(r'[“"\'][^”"\'\r\n]{1,220}\.md[”"\']','', request, flags=re.I)
+    matches=list(_DOCUMENT_POSITION.finditer(request.casefold()))
+    ids=[]
+    for i,match in enumerate(matches):
+        current=match.group()
+        suffix=request[match.end():matches[i+1].start() if i+1<len(matches) else len(request)]
+        if re.match(r'^\s*(?:到|至|through\b|to\b|[–—~～])\s*(?:[crp]?\d|$)',suffix,re.I) and (
+                i+1==len(matches) or not re.fullmatch(r'\s*(?:到|至|through|to|[–—~～])\s*',suffix,re.I)):
+            return []
+        if i and re.fullmatch(r'\s*(?:到|至|through|to|[-–—~～])\s*',request[matches[i-1].end():match.start()],re.I):
+            previous=matches[i-1].group()
+            a=re.fullmatch(r'(.+?)(\d+)',previous);b=re.fullmatch(r'(.+?)(\d+)',current)
+            if a[1]!=b[1] or len(a[2])>9 or len(b[2])>9:return []
+            start,end=int(a[2]),int(b[2])
+            if not 0<=end-start<100:return []
+            ids.extend(f'{a[1]}{n}' for n in range(start+1,end))
+        ids.append(current)
+        if len(ids)>100:return []
+    return list(dict.fromkeys(ids))
 
 
 def explicit_review_scope(request, goals, attachment_id):
@@ -365,15 +517,169 @@ def explicit_review_scope(request, goals, attachment_id):
     if (scope['source_id'] != attachment_id or scope['operation'] != 'review'
             or scope['scope'] != 'selected' or not scope['target_ids'] or scope.get('selector')):
         return None
-    named = set(_DOCUMENT_POSITION.findall(request.casefold()))
+    named = set(_explicit_review_positions(request))
     return scope if named == set(scope['target_ids']) else None
+
+
+async def dispatch_prepared_review(service, run, attempt_id, current, body, budget_ids, root, goals, *, stage_retry=False):
+    """Continue a verified single-source review stage without asking the model to reinspect it."""
+    from agent.execution.document_review_selection import _REVIEW_INTENT,review_selection_policy,scope_gap_sha256
+    from agent.execution.prepared_review_publication import requested_review_path, publish_requested_review
+    from agent.execution.source_inventory import SourceInventory
+    from agent.execution.task_plans import TaskPlans
+
+    request = current['content']
+    if not goals or not _positive_request(_REVIEW_INTENT, request):
+        return None
+    # Past-tense "already filled" describes the input; it is not a fill request.
+    for match in _MODIFICATION_REQUEST.finditer(request):
+        before = request[max(0, match.start()-24):match.start()]
+        if _REQUEST_NEGATION.search(before):
+            continue
+        if match.group().lower() in {'填写', 'fill'} and re.search(r'(?:已(?:经)?(?:完成)?(?:了)?|already\s+(?:been\s+)?)\s*$', before, re.I):
+            continue
+        return None
+    if _positive_request(re.compile(r'技能|\b(?:skills?|web|website)\b|网页|网站|https?://',re.I), request):
+        return None
+    active = [scope for scope in goals['source_scopes'] if scope['scope'] != 'excluded']
+    attachments = current.get('attachments', [])
+    reviews=[scope for scope in active if scope['operation']=='review']
+    if len(reviews)!=1 or any(scope['operation'] not in {'read','review'} for scope in active) or len(attachments)!=1:
+        return None
+    if goals['deliverables'] and (not _positive_request(_EXPORT_REQUEST, request)
+            or requested_review_path(current, goals) is None):
+        return None
+    first = body['first_action']
+    if attachments[0]['id'] != first['attachment_id']:
+        return None
+    store = SourceInventory(service.repository)
+    source = store.canonical(root['id'], first['attachment_id'])
+    if any(store.canonical(root['id'],scope['source_id'])!=source for scope in active):
+        return None
+    fence = (root['revision'],root['attempt'])
+    with service.repository._connect() as db:
+        TaskPlans._active(db,root['id'],fence)
+        row = db.execute('SELECT * FROM task_goal_execution WHERE task_id=?',(root['id'],)).fetchone()
+        metadata = db.execute('SELECT * FROM task_inventory_sources WHERE task_id=? AND source_id=?',
+                              (root['id'],source)).fetchone()
+    if row is None or row['goal_revision'] != goals['revision'] or row['request_digest'] != goals['request_digest']:
+        raise CoreDataError('task_goal_revision_changed','准备审阅时任务要求已经变化。')
+    saved = json.loads(row['payload_json'])
+    if saved.get('_first_result_id') != body['_first_result_id'] or saved.get('first_action') != first:
+        raise CoreDataError('task_source_changed','首次检查的持久化来源与本次任务不一致。')
+    operations = service.tool_loop.repository.list_for_run(run['id'])
+    inspected = next((op for op in operations if op['id'] == body['_first_result_id']),None)
+    if (not inspected or inspected['tool_name'] != 'document.inspect_template' or inspected['status'] != 'completed'
+            or inspected['arguments'].get('attachment_id') != first['attachment_id'] or metadata is None):
+        return None
+    service._validate_saved_result_source(run['id'],inspected['id'])
+    attachment = attachments[0]
+    service.document_attachments._original(attachment)
+    if metadata['source_hash'] != attachment['sha256']:
+        raise CoreDataError('attachment_changed','已检查的原件版本已变化，不能沿用旧审阅。')
+    template = service.documents.get(run['id'],metadata['artifact_id'])
+    service.documents.path_for(run['id'],template['id'])
+    if (template['kind'] != 'template' or template['sha256'] != attachment['sha256']
+            or store.canonical(root['id'],template['manifest'].get('authorized_source_id') or template['id']) != source):
+        raise CoreDataError('attachment_reference_forbidden','已检查模板不属于当前授权原件。')
+    state = service.rag_grounding.runs.get(run['id'])
+    generation = state['generation'] if state is not None else None
+
+    def validate_grounding():
+        if state is not None:
+            service.rag_grounding.validate(run['id'])
+
+    validate_grounding()
+    if any(not store.coverage(root['id'],scope)['ready'] for scope in active if scope['operation']=='read'):
+        return None
+
+    def identity(current_goals):
+        scope = next(scope for scope in current_goals['source_scopes'] if scope['scope'] != 'excluded' and scope['operation']=='review')
+        with service.repository._connect() as db:
+            cache=db.execute('SELECT payload_json FROM task_goal_execution WHERE task_id=?',(root['id'],)).fetchone()
+        scope_state=json.loads(cache[0]).get('_review_selection',{}) if cache else {}
+        gaps=scope_state.get('scope_uncertainties',[])
+        return {'version':3,'review_selection_policy_sha256':review_selection_policy(),
+            'scope_gap_sha256':scope_gap_sha256(gaps),'has_scope_gaps':bool(gaps),
+            'canonical_source_id':source,'source_sha256':attachment['sha256'],
+            'first_result_id':inspected['id'],'goal_revision':current_goals['revision'],
+            'request_digest':current_goals['request_digest'],'evidence_generation':generation,
+            'review_scope_sha256':sha256(json.dumps(scope,ensure_ascii=True,sort_keys=True).encode()).hexdigest(),
+            'provider_profile_id':run['provider_profile_id'],'model_id':run['model_id']}
+
+    def validate_receipt(receipt, current_goals):
+        if not isinstance(receipt,dict) or any(receipt.get(key) != value for key,value in identity(current_goals).items()):
+            return False
+        operation = next((op for op in service.tool_loop.repository.list_for_run(run['id'])
+                          if op['id'] == receipt.get('review_operation_id')),None)
+        if not operation or operation['tool_name'] != 'document.review_targets' or operation['status'] != 'completed':
+            raise CoreDataError('document_review_invalid','审阅完成回执缺少实际成功操作。')
+        artifact = service.documents.get(run['id'],receipt['artifact_id'])
+        service.documents.path_for(run['id'],artifact['id'])
+        review = artifact['manifest'].get('review_report',{})
+        if (artifact['sha256'] != receipt.get('artifact_sha256') or artifact['kind'] != receipt.get('format')
+                or review.get('template_sha256') != attachment['sha256']
+                or artifact['manifest'].get('rag_generation') != generation
+                or receipt.get('has_scope_gaps') and review.get('scope_gap_sha256')!=receipt['scope_gap_sha256']):
+            raise CoreDataError('document_review_invalid','报告、原件或资料库代次与审阅回执不一致。')
+        validate_sources(service,run,root['id'],current_goals)
+        return True
+
+    if goals['deliverables']:
+        run['_requires_review_publication'] = True
+    receipt = saved.get('_prepared_review')
+    if not validate_receipt(receipt,goals):
+        call_id = f"goal-prepared-review-{goals['revision']}-{generation}-{review_selection_policy()[:12]}"
+        previous = next((op for op in operations if op['attempt_id']==attempt_id and op['provider_call_id']==call_id),None)
+        if stage_retry and previous and previous['status']=='interrupted':
+            call_id += f"-stage-{root['attempt']}"
+            previous = next((op for op in operations if op['attempt_id']==attempt_id and op['provider_call_id']==call_id),None)
+        if previous:
+            raise CoreDataError(previous.get('error_code') or 'document_review_invalid','本次审阅阶段已有操作，不能重复执行。')
+        call = ToolCall(call_id,'document.review_targets',{'template_id':template['id'],'format':'markdown'})
+        operation,resolution = await service.tool_loop.request(run_id=run['id'],attempt_id=attempt_id,
+            sequence=max((op['sequence'] for op in operations),default=0)+1,call=call,budget_attempt_ids=budget_ids,
+            async_executor=lambda:service._review_targets_tool(run,attempt_id,call.arguments))
+        message=service.repository.record_tool_event(run['id'],operation['id'],call.name,operation['status'],len(resolution.output.encode()),resolution.error_code)
+        service.result_store.save(operation['id'],resolution.output,success=resolution.success)
+        await service._emit(run['id'],'run.tool_completed',{'operation_id':operation['id'],'status':operation['status'],
+            'success':resolution.success,'message':message})
+        if not resolution.success:
+            raise CoreDataError(resolution.error_code or 'document_review_invalid','已准备原件的审阅阶段尚未完成，检查点已保留。')
+        result=json.loads(resolution.output)
+        fresh=service.task_plans.goals.get(root['id'])
+        if fresh['request_digest'] != goals['request_digest']:
+            raise CoreDataError('task_goal_revision_changed','审阅期间原始要求已变化。')
+        artifact=service.documents.get(run['id'],result['artifact_id'])
+        receipt={**identity(fresh),'review_operation_id':operation['id'],'artifact_id':artifact['id'],
+                 'artifact_sha256':artifact['sha256'],'format':artifact['kind']}
+        validate_grounding()
+        if not validate_receipt(receipt,fresh):
+            raise CoreDataError('task_incomplete','审阅范围尚未形成完整覆盖证明，不能进入发布。')
+        with service.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE');TaskPlans._active(db,root['id'],fence)
+            latest=service.task_plans.goals.get(root['id'],connection=db)
+            cache=db.execute('SELECT * FROM task_goal_execution WHERE task_id=?',(root['id'],)).fetchone()
+            if (latest['revision'] != fresh['revision'] or latest['request_digest'] != fresh['request_digest']
+                    or cache['goal_revision'] != fresh['revision'] or cache['request_digest'] != fresh['request_digest']):
+                raise CoreDataError('task_goal_revision_changed','提交审阅回执前要求已变化。')
+            payload=json.loads(cache['payload_json']);payload['_prepared_review']=receipt
+            db.execute('UPDATE task_goal_execution SET payload_json=? WHERE task_id=?',(json.dumps(payload,ensure_ascii=False),root['id']))
+        goals=fresh
+    with service.repository._connect() as db:
+        TaskPlans._active(db,root['id'],fence)
+    validate_grounding()
+    if goals['deliverables']:
+        return await publish_requested_review(service,run,attempt_id,current,goals,receipt)
+    return service.documents.path_for(run['id'],receipt['artifact_id']).read_bytes().decode('utf-8')
 
 
 async def dispatch_explicit_review(service, run, attempt_id, current, body, budget_ids):
     from agent.execution.source_inventory import SourceInventory
     from agent.rag.routing import project_evidence_policy
 
-    if (body.get('answer_kind') != 'review' or not body.get('_first_result_id')
+    from agent.execution.document_review_selection import _REVIEW_INTENT
+    if ((body.get('answer_kind') != 'review' and not _review_only_request(current['content'])) or not body.get('_first_result_id')
             or body['first_action']['tool'] != 'document.inspect_template'
             or project_evidence_policy(run.get('rag_decision') or {}, current['content'],
                                        has_attachments=True) not in {'required', 'mixed'}):
@@ -381,7 +687,20 @@ async def dispatch_explicit_review(service, run, attempt_id, current, body, budg
     root = service.execution_monitor.start_task(run_id=run['id'])
     goals = service.task_plans.goals.get(root['id'])
     scope = explicit_review_scope(current['content'], goals, body['first_action']['attachment_id'])
-    if scope is None or not any(a['id'] == scope['source_id'] for a in current['attachments']):
+    if scope is None:
+        # Own one monitored stage through review, receipt commit and publication.
+        # Nested retrieval/model stages reuse it instead of invalidating our fence.
+        from agent.execution.activity import run_stage
+        started = False
+        async def prepared_stage(activity):
+            nonlocal started
+            fresh_root = service.execution_monitor.get_task(root['id'])
+            if fresh_root['revision'] != activity.revision or (not started and fresh_root['revision'] != root['revision']):
+                raise CoreDataError('task_plan_stale', '开始审阅期间任务已变化。')
+            stage_retry, started = started, True
+            return await dispatch_prepared_review(service,run,attempt_id,current,body,budget_ids,fresh_root,goals,stage_retry=stage_retry)
+        return await run_stage('document_review', prepared_stage)
+    if not any(a['id'] == scope['source_id'] for a in current['attachments']):
         return None
     store = SourceInventory(service.repository)
     resolved = store.resolve(root['id'], scope)
@@ -417,6 +736,53 @@ async def dispatch_explicit_review(service, run, attempt_id, current, body, budg
     return answer
 
 
+def reconcile_cached_local_document_goal(service, run, root, current, prior_goals, request_digest):
+    """Repair only unconfirmed, same-request inferred scope; preserve source proofs."""
+    if (not prior_goals or prior_goals.get('provenance') != 'model_inferred'
+            or prior_goals.get('request_digest') != request_digest
+            or not (local_document_question_scope(current['content']) or _review_only_request(current['content']))):
+        return False
+    with service.repository._connect() as db:
+        confirmed = db.execute("SELECT 1 FROM task_goal_requirements WHERE task_id=? AND provenance='user_clarification' LIMIT 1",
+                               (root['id'],)).fetchone()
+        row = db.execute('SELECT * FROM task_goal_execution WHERE task_id=?', (root['id'],)).fetchone()
+    if (confirmed or row is None or row['request_digest'] != request_digest
+            or row['goal_revision'] != prior_goals['revision']):
+        return False
+    draft = json.loads(row['payload_json'])
+    original = json.dumps(draft, sort_keys=True)
+    normalize_document_answer_draft(current['content'], draft, rag_decision=run.get('rag_decision'))
+    if json.dumps(draft, sort_keys=True) == original:
+        return False
+    # Internal result identities survive, but are not model protocol fields.
+    public = {key: value for key, value in draft.items() if not key.startswith('_')}
+    requirements = normalize_goal(public, current.get('attachments', []))
+    if requirements['source_scopes'] == prior_goals['source_scopes']:
+        return False
+    # Identity validation is independent of unresolved semantic membership.
+    validation_goals=json.loads(json.dumps(prior_goals))
+    for scope in validation_goals['source_scopes']:
+        if (scope.get('selector') or {}).get('kind')=='selection_pending':
+            scope.update(scope='metadata',target_ids=[],selector=None)
+    validate_sources(service, run, root['id'], validation_goals)
+    with service.repository._connect() as db:
+        # Goal revision and execution receipt must commit or roll back together.
+        db.execute('BEGIN IMMEDIATE')
+        service.task_plans._active(db, root['id'], (root['revision'], root['attempt']))
+        latest = service.task_plans.goals.get(root['id'], connection=db)
+        if latest['revision'] != prior_goals['revision'] or latest['request_digest'] != request_digest:
+            raise CoreDataError('task_plan_stale', '目标范围在恢复期间已变化。')
+        captured = service.task_plans.goals.capture(db, root['id'], requirements,
+            expected_revision=prior_goals['revision'], reconciled=True)
+        updated = db.execute('UPDATE task_goal_execution SET goal_revision=?,payload_json=? '
+            'WHERE task_id=? AND goal_revision=? AND request_digest=?',
+            (captured['revision'], json.dumps(draft, ensure_ascii=False), root['id'],
+             row['goal_revision'], request_digest))
+        if updated.rowcount != 1:
+            raise CoreDataError('task_plan_stale', '目标执行检查点在恢复期间已变化。')
+    return True
+
+
 async def prepare(service, run, attempt_id, attempt_number, provider, plan, step, current, round_no, budget_ids):
     root=service.execution_monitor.start_task(run_id=run['id'])
     existing=service.task_plans.get(root['id'])
@@ -428,13 +794,16 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
             WHERE g.task_id=? AND g.request_digest=? AND o.run_id=? AND o.status='completed' ''',
             (root['id'], request_digest, run['id'])).fetchone()
     if first_read:
+        reconcile_cached_local_document_goal(service, run, root, current, prior_goals, request_digest)
         return round_no
     attachments=[a for a in current.get('attachments',[]) if any(x.get('kind')=='document.source' for x in a.get('artifacts',[]))]
     if not attachments:return round_no
     await service._emit(run['id'],'run.state_changed',{'status':'generating','phase':'goal_planning'})
     extraction_plan = full_extraction_plan(run, current, attachments) if not prior_goals else None
-    draft = extraction_plan or (plan_named_evidence_review(run, current, attachments) if not prior_goals else None)
+    draft = extraction_plan or ((plan_conditional_evidence_review(run,current,attachments) or plan_named_evidence_review(run,current,attachments)) if not prior_goals else None)
     if draft is not None:
+        if draft.get('answer_kind') == 'review' and draft.get('deliverables'):
+            run['_requires_review_publication'] = True
         requirements = normalize_goal(draft, attachments)
     else:
         payload={'request':current['content'],'rag_mode':run.get('rag_decision',{}).get('requested_mode','auto'),
@@ -462,7 +831,8 @@ async def prepare(service, run, attempt_id, attempt_number, provider, plan, step
                 round_no=round_no,apply_rag_contract=False)
             try:
                 draft=json.loads(text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
-                normalize_document_answer_draft(current['content'], draft, rag_decision=run.get('rag_decision'))
+                normalize_document_answer_draft(current['content'], draft, rag_decision=run.get('rag_decision'),
+                    confirmed_requirements=prior_goals)
                 requirements=normalize_goal(draft,attachments)
                 break
             except (ValueError,TypeError,KeyError,CoreDataError) as error:
@@ -715,14 +1085,12 @@ async def finalize(service,run,attempt_id,attempt_number,provider,plan,step):
             if (draft['answer_kind'] == 'synthesis' and not goals['deliverables']
                     and run['id'] not in service.rag_grounding.runs and not artifacts
                     and re.search(r'一句话|一個句子|一个句子|\bone sentence\b', current['content'], re.I)
-                    and _positive_request(_SUMMARY_REQUEST, current['content'])
+                    and is_local_document_summary_request(current['content'])
                     and not _positive_request(_REVIEW_OR_MODIFICATION, current['content'])
                     and not _positive_request(_EXPORT_REQUEST, current['content'])
                     and all(scope['operation'] == 'read' for scope in goals['source_scopes'])):
                 summary = text.strip()
                 # A one-sentence result may end with any of the user's customary punctuation.
-                if not summary or '\n' in summary or len(re.findall(r'[。！？!?]|\.(?=\s|$)', summary)) > 1:
-                    raise CoreDataError('task_final_answer_invalid', '请用一句话概括已核验的内容。')
                 run['_verified_local_summary_hash'] = sha256(summary.encode()).hexdigest()
                 return summary
             # Other answers still pass the existing semantic goal verifier.

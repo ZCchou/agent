@@ -1,5 +1,8 @@
 const chat = {
   execution: {
+    modelPhases: {"queued":"Waiting for a model slot","preflight":"Preparing the model request","waiting_first_output":"Waiting for the model’s first output","generating":"Model is generating"},
+    phaseTime: "Current phase {{seconds}} s",
+    modelTimings: {"queued":"Queued {{seconds}} s","preflight":"Preparation {{seconds}} s","waiting_first_output":"First output wait {{seconds}} s"},
     completed: "Task completed", completedWithGaps: "Completed with information gaps",
     operations: { read: "Read source", review: "Review source" },
     coverage: "{{total}} items · {{completed}} processed · {{gaps}} with gaps · {{remaining}} remaining",
@@ -13,6 +16,14 @@ const chat = {
     takingLonger: "Processing is taking longer. Execution progress is being monitored.",
     continue: "Continue waiting", retry: "Retry", retryRun: "Keep draft and regenerate", cancel: "Cancel task", settings: "Adjust model settings",
     stages: {
+      retrieval: "Searching project libraries",
+      main_model_loading: "Loading the chat model",
+      rag_probe: "Checking retrieval model availability",
+      intent_identification: "Identifying task intent",
+      document_conversion: "Converting the attachment",
+      document_parsing: "Parsing the attachment",
+      ocr_recognize: "Recognizing text on the page",
+      ocr_render: "Rendering the page",
       goal_planning: "Planning task scope",
       finalizing: "Finalizing the response",
       context_compacting: "Organizing working context",
@@ -47,6 +58,8 @@ const chat = {
   messages: { edit: "Edit message", editQuestion: "Edit question", cancelEdit: "Cancel edit", saveEdit: "Save and regenerate",
     editHint: "Regenerate from this question. The original conversation is kept; completed file and command actions are not undone.",
     original: "View original conversation" },
+  publicOps: { correctionAttempt:"Review call {{value}}", events: {correcting:"Correcting a review item",reading:"Reading attachment", inventory_ready:"Inventory ready",selecting:"Screening positions",checking:"Checking current targets",searching:"Searching for evidence",search_results:"Search results returned",results_saved:"Review results saved"}, hits:"Search returned {{value}} items", integrity:"Verified {{completed}}/{{total}} runtime files", title: "Recent actions", inspect: "Inspect attachment structure", read: "Read attachment", review: "Review document targets", search: "Search project library", source: "Read source evidence", export: "Save document" },
+  docProgress: { rolesReviewed: "Rechecked {{completed}}/{{total}} source roles", title: "Document progress", batches: "{{value}} batches saved", searches: "{{value}} searches", include: "Included", exclude: "Excluded", context: "Context", uncertain: "Uncertain", decisions: "Recent scope decisions", finding: "Latest review finding", citations: "Evidence for this finding" },
   terminal: {"activityActive": "Running project commands", "activityComplete": "Command results", "cwd": "Working directory", "timeout": "Timeout", "authority": "Runs with your Windows user privileges. Commands can access files outside the project.", "reject": "Reject command", "approve": "Run command", "timedOut": "Command timed out", "cancelled": "Command cancelled", "unknown": "Command outcome unknown; verification is not confirmed", "exit": "Exit code: {{code}}", "truncated": "Output truncated"},
   welcome: {
     title:
@@ -117,6 +130,7 @@ const chat = {
   },
   roles: { you: "You", agent: "agent", system: "System" },
   status: {
+    unexecutedTools: "Task incomplete. The model’s tool requests were not executed.",
     stopping: "Stopping…",
     loading: "Loading conversation…", responding: "Thinking…", preparing: "Preparing context", thinking: "Thinking",
     generating: "Generating", workingFiles: "Working with project files", stop: "Stop generating", incomplete: "Incomplete draft",
@@ -235,7 +249,7 @@ const chat = {
     purposeLabel: 'Purpose of {{name}}',
     referencePurpose: 'Reference material',
     templatePurpose: 'Template to fill',
-    processing: { templatePlanning: "Planning template {{completed}}/{{total}}", templateFilling: "Filling template {{completed}}/{{total}}", modelLoading: "Loading document model {{completed}}/{{total}}", reranking: "Reranking document evidence {{completed}}/{{total}}", parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
+    processing: { reportGenerated: "Review report generated {{name}}", reportPublishing: "Saving review report {{name}}", reportVerified: "Local report verified {{name}}", scopeSelection: "Screened {{completed}}/{{total}} template positions", documentReview: "Reviewed {{completed}}/{{total}} target positions", templatePlanning: "Planning template {{completed}}/{{total}}", templateFilling: "Filling template {{completed}}/{{total}}", modelLoading: "Loading document model {{completed}}/{{total}}", reranking: "Reranking document evidence {{completed}}/{{total}}", parsing: "Reading {{name}}", ocr: "OCR page {{page}} of {{total}}" },
     referenceSelection: "Reference selected text",
     reference: "Reference this attachment", referenceNamed: "Reference {{name}}",
     references: "Referenced attachments", fromHistory: "From this conversation",
@@ -281,7 +295,7 @@ const chat = {
     confirm: "Create work",
   },
   rename: { action: "Rename", prompt: "Conversation title" },
-  tools: {
+  tools: { errorReasons: { rag_context_too_small: "Evidence exceeds the current budget", task_plan_invalid: "Invalid plan parameters" }, taskCancelled: "Task cancelled", ragCapacityFailures: "Evidence capacity limit: {{searches}} failed searches, {{reads}} failed reads",
     authorizeDirectory: "Authorize directory",
     changeDirectory: "Change directory",
     authorized: "Authorized: {{path}}",

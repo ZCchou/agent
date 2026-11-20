@@ -37,7 +37,21 @@ export interface TaskWorkItem {
   result: { summary?: string; gaps?: string[]; version_issues?: string[]; error_code?: string } | null;
 }
 export interface TaskItemsPage { items: TaskWorkItem[]; total: number; next_offset: number | null }
+export interface DocumentProgress {
+  event?: string; current?: { target_id: string; excerpt?: string }[]; query?: string; hit_count?: number; bytes_read?: number; correction?: { attempt: number; reason: string };
+  phase?: string; completed?: number | null; total?: number | null;
+  batch_count?: number; search_count?: number;
+  counts?: Partial<Record<"include" | "exclude" | "context" | "uncertain", number>>;
+  recent?: { target_id: string; decision: string; reason: string; excerpt?: string }[];
+  latest_review?: { target_id: string; summary: string; citations?: string[] };
+}
+export function retainDocumentProgress(previous: ExecutionTaskSnapshot | null, next: ExecutionTaskSnapshot) {
+  if (next.document_progress !== undefined || !previous?.document_progress || previous.id !== next.id
+      || previous.attempt !== next.attempt || previous.revision !== next.revision) return next;
+  return { ...next, document_progress: previous.document_progress };
+}
 export interface ExecutionTaskSnapshot {
+  document_progress?: DocumentProgress | null;
   id: string;
   revision: number;
   attempt: number;
@@ -65,6 +79,7 @@ export interface ExecutionTaskSnapshot {
   answered_question_ids?: string[];
   current_stage?: {
     completed?: number | null; total?: number | null; progress_at?: number;
+    queue_waiting?: boolean | number; status?: string;
     details?: Record<string, unknown>; details_json?: string;
   } | null;
 }

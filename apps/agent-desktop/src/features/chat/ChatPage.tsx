@@ -1,3 +1,4 @@
+import { appendDocumentPublicText, type DocumentPublicText } from "./documentPublicText";
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
 import { ArrowDown, Bot, Database, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
@@ -37,7 +38,7 @@ import { resolveSelectedModel, selectableModels } from "../../services/modelSele
 import { ComposerDock } from "./ComposerDock";
 import { ChatInspector } from "./ChatInspector";
 import { ConversationTimeline } from "./ConversationTimeline";
-import { WorkProcessDisclosure } from "./WorkProcessDisclosure";
+import { AssistantMessageBody } from "./markdown/AssistantMessageBody";
 import { AssistantRunMessage } from "./AssistantRunMessage";
 import { useStreamingMarkdownBuffer } from "./useStreamingMarkdownBuffer";
 import { useAttachmentController } from "./useAttachmentController";
@@ -53,6 +54,7 @@ import { RoutingBudgetPrompt } from "./RoutingBudgetPrompt";
 import { ConversationRoutingControl, type RoutingModelOption } from "./ConversationRoutingControl";
 import { applyRunFailure, runErrorTranslationKey } from "./runErrors";
 import { documentProcessingLabel } from "./documentProcessing";
+import { ReviewOperationStream } from "./ReviewOperationStream";
 import { ExecutionTaskCard } from "./ExecutionTaskCard";
 
 const MODEL_RUN_STATUSES = new Set<ModelRun["status"]>([
@@ -81,7 +83,7 @@ export function ChatPage() {
   } = useApp();
   const inspectorStore = useChatInspectorStore();
   const updateInspector = inspectorStore.update;
-  const inspectorKey = activeConversationId ?? `draft-${draft.revision}`;
+  const inspectorKey = activeConversationId ?? draft.scope;
   const inspector = inspectorStore.get(inspectorKey);
   useEffect(() => () => intentTasks.releaseScope(inspectorKey), [inspectorKey]);
   const inspectorRequest = useRef(0);
@@ -140,11 +142,13 @@ export function ChatPage() {
     content: streamingContent,
     append: appendStreamingContent,
     replace: replaceStreamingContent,
+    read: readStreamingContent,
     clear: clearStreamingContent,
   } = useStreamingMarkdownBuffer();
   const [lastRunId, setLastRunId] = useConversationState<string | null>(inspectorKey, null);
   const [knowledgeProposal, setKnowledgeProposal] = useConversationState<{ id: string; title: string; content: string } | null>(inspectorKey, null);
   const runIdRef = useRef<string | null>(null);
+  const [documentPublicText, setDocumentPublicText] = useConversationState<DocumentPublicText | null>(inspectorKey, null);
   const terminalRefreshRevision = useRef(0);
   const [grant, setGrant] = useConversationState<ProjectGrant | null>(inspectorKey, null);
   const [deriveOpen, setDeriveOpen] = useConversationState(inspectorKey, false);
@@ -240,6 +244,7 @@ export function ChatPage() {
       runActionRef.current += 1;
       runIdRef.current = null;
       compactionResumeRef.current = false;
+      setDocumentPublicText(null);
       setLastRunId(null);
       setConversation(null);
       setMessages([]);
@@ -307,12 +312,24 @@ export function ChatPage() {
     const conversationId = activeConversationId;
     if (!conversationId || !coreOnline || toolAuditConversation.current !== conversationId) return;
     const request = ++toolAuditRequest.current;
-    void agentExecutionRepository.listConversationOperations(conversationId).then((items) => {
+    return agentExecutionRepository.listConversationOperations(conversationId).then((items) => {
       if (toolAuditConversation.current === conversationId && toolAuditRequest.current === request) {
         setToolOperations(items);
       }
     }).catch(() => undefined);
   }, [activeConversationId, coreOnline]);
+
+  useEffect(() => {
+    if (!sending || !activeRun?.id || !coreOnline || !activeConversationId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function poll() {
+      await refreshToolOperations();
+      if (!disposed) timer = setTimeout(() => void poll(), 2000);
+    }
+    void poll();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [sending, activeRun?.id, coreOnline, activeConversationId, refreshToolOperations]);
 
   const refreshChangeSets = useCallback(() => {
     refreshToolOperations();
@@ -346,6 +363,9 @@ export function ChatPage() {
         }
       }
       if (event.run_id !== runIdRef.current) return;
+      if (event.event_type === "run.document_processing" || event.event_type === "run.state_changed"
+          || ["run.failed","run.cancelled","run.interrupted","run.completed"].includes(event.event_type))
+        setDocumentPublicText(current => appendDocumentPublicText(current,event,runIdRef.current));
       if (event.event_type === "run.chunk") {
         setRunActivityLabel(tChat("routing.status.generatingAnswer"));
         appendStreamingContent(String(event.data.delta ?? ""));
@@ -422,13 +442,14 @@ export function ChatPage() {
         void refreshWorkspace();
       } else if (event.event_type === "run.failed" || event.event_type === "run.cancelled" || event.event_type === "run.interrupted") {
         const refreshRevision = ++terminalRefreshRevision.current;
-        setActiveRun((current) => current ? applyRunFailure(current, event) : current);
+        setActiveRun((current) => current ? applyRunFailure(current, event, readStreamingContent()) : current);
         setError(event.event_type !== "run.cancelled"); setErrorDetail(null); setSending(false); setRunActivityLabel(null);
         stoppingRef.current = false; setStopping(false);
         void modelRunRepository.get(event.run_id).then((run) => {
           if (runIdRef.current !== event.run_id || terminalRefreshRevision.current !== refreshRevision) return;
-          const failed = applyRunFailure(run, event);
-          setActiveRun(failed); replaceStreamingContent(failed.draft?.content ?? "");
+          const failed = applyRunFailure(run, event, readStreamingContent());
+          setActiveRun(failed);
+          if (failed.draft?.content) replaceStreamingContent(failed.draft.content);
         }).catch(() => { /* Keep the explanatory result from the terminal event. */ });
       } else if (event.event_type === "run.waiting_context") {
         void modelRunRepository.get(event.run_id).then((run) => {
@@ -453,7 +474,7 @@ export function ChatPage() {
     }).then((dispose) => { if (active) unsubscribe = dispose; else dispose(); }).catch(() => { /* Browser test shell has no Tauri event plugin. */ });
     return () => { active = false; unsubscribe?.(); };
   }, [activeConversationId, appendStreamingContent, clearStreamingContent, refreshChangeSets,
-    refreshToolOperations, refreshWebOperations, refreshWorkspace, replaceStreamingContent]);
+    refreshToolOperations, refreshWebOperations, refreshWorkspace, replaceStreamingContent, readStreamingContent]);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -1263,6 +1284,8 @@ export function ChatPage() {
           referenceDisabled={sending}
           onBeginEdit={beginMessageEdit} onEdit={editMessage} editDisabled={!coreOnline || sending || stopping}
           onChangeSetResolved={refreshChangeSets} />
+        {sending && activeRun && <ReviewOperationStream runId={activeRun.id} operations={toolOperations}
+          attachments={messages.find(m => m.id === activeRun.user_message_id)?.attachments ?? []} />}
         <ExecutionTaskCard enabled={coreOnline && currentPage === "chat" && Boolean(monitoredExecution)}
           owner={executionOwner}
           onRunRetry={async (runId) => {
@@ -1272,6 +1295,10 @@ export function ChatPage() {
             if (sendScopeRef.current === scope) await retryRun();
           }}
           onSettings={() => setCurrentPage("models")} />
+        {activeConversationId && documentPublicText && documentPublicText.runId === lastRunId && documentPublicText.streams.map(stream => <AssistantMessageBody key={documentPublicText.runId + stream.id}
+          content={stream.content} state="draft"
+          onProjectFile={effectiveKind === "project_work" ? openProjectFile : undefined}
+          onProjectDirectory={effectiveKind === "project_work" ? openProjectDirectory : undefined} />)}
         {sending && (!monitoredExecution || streamingContent) ? (
           <AssistantRunMessage status={activeRun?.status ?? "queued"} content={streamingContent}
             activityLabel={monitoredExecution ? null : runActivityLabel}
@@ -1282,7 +1309,8 @@ export function ChatPage() {
           <div className="chat-message chat-message--assistant chat-message--draft">
             <span>{tChat("status.incomplete")}</span>
             <strong>{activeRun.error_code ? tChat(runErrorTranslationKey(activeRun.error_code, activeRun.error_message), { defaultValue: activeRun.error_message ?? activeRun.error_code }) : ""}</strong>
-            {activeRun.draft?.content ? <WorkProcessDisclosure content={activeRun.draft.content} state="draft"
+            {activeRun.draft?.content || streamingContent ? <AssistantMessageBody content={activeRun.draft?.content || streamingContent} state="draft"
+              verifiedEvidenceIds={activeRun.draft?.verified_evidence_ids}
               onProjectFile={effectiveKind === "project_work" ? openProjectFile : undefined}
               onProjectDirectory={effectiveKind === "project_work" ? openProjectDirectory : undefined} /> : null}
             {activeRun.error_code?.startsWith("rag_") ? <Button variant="ghost" onClick={() => void showContext()}>{tChat("routing.status.viewEvidence")}</Button> : null}
@@ -1361,12 +1389,13 @@ export function ChatPage() {
         onAccepted={async (started) => {
           const scope = inspectorKey;
           if (sendScopeRef.current !== scope) return false;
-          runIdRef.current = started.run.id;
+          const previousRun = runIdRef.current;
           try {
             const [acceptedConversation, run] = await Promise.all([
               conversationRepository.get(started.conversation.id), modelRunRepository.get(started.run.id),
             ]);
-            if (sendScopeRef.current !== scope || runIdRef.current !== run.id) return false;
+            if (sendScopeRef.current !== scope || runIdRef.current !== previousRun || run.id !== started.run.id) return false;
+            runIdRef.current = run.id;
             setConversation(acceptedConversation); setMessages(acceptedConversation.messages);
             setActiveRun(run); setLastRunId(run.id);
             setSending(!["completed", "failed", "cancelled", "interrupted", "waiting_budget"].includes(run.status));
@@ -1375,6 +1404,7 @@ export function ChatPage() {
             await conversationCreated(acceptedConversation);
             return true;
           } catch (value) {
+            if (/\bconversation_not_found\b/.test(String(value))) return "unavailable";
             if (sendScopeRef.current === scope) { setError(true); setErrorDetail(String(value)); }
             return false;
           }

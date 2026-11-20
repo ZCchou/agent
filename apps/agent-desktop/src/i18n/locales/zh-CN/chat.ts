@@ -1,5 +1,8 @@
 const chat = {
   execution: {
+    modelPhases: {"queued":"正在排队等待模型","preflight":"正在准备模型请求","waiting_first_output":"请求已发出，等待模型首次输出","generating":"模型正在生成"},
+    phaseTime: "本阶段 {{seconds}} 秒",
+    modelTimings: {"queued":"排队 {{seconds}} 秒","preflight":"准备 {{seconds}} 秒","waiting_first_output":"等待首次输出 {{seconds}} 秒"},
     completed: "任务已完成", completedWithGaps: "任务已完成，含资料缺项",
     operations: { read: "读取资料", review: "审阅资料" },
     coverage: "处理对象共 {{total}} 项 · 已处理 {{completed}} 项 · 资料缺项 {{gaps}} 项 · 待处理 {{remaining}} 项",
@@ -13,6 +16,14 @@ const chat = {
     takingLonger: "处理耗时较长，正在持续监控执行进展。",
     continue: "继续等待", retry: "重新尝试", retryRun: "保留草稿并重新生成", cancel: "取消任务", settings: "调整模型设置",
     stages: {
+      retrieval: "正在检索项目资料",
+      main_model_loading: "正在加载对话模型",
+      rag_probe: "正在检查检索模型可用性",
+      intent_identification: "正在识别任务意图",
+      document_conversion: "正在转换附件格式",
+      document_parsing: "正在解析附件",
+      ocr_recognize: "正在识别页面文字",
+      ocr_render: "正在渲染页面",
       goal_planning: "正在规划任务范围",
       finalizing: "正在整理最终答复",
       context_compacting: "正在整理工作上下文",
@@ -47,6 +58,8 @@ const chat = {
   messages: { edit: "编辑消息", editQuestion: "编辑问题", cancelEdit: "取消编辑", saveEdit: "保存并重新生成",
     editHint: "从此问题重新生成，原对话保留；已完成的文件修改和命令操作不会撤销。",
     original: "查看原对话" },
+  publicOps: { correctionAttempt:"第 {{value}} 次审阅调用", events: {correcting:"正在修正审阅项",reading:"正在读取附件",inventory_ready:"附件位置清单已建立",selecting:"正在筛选以下位置",checking:"正在核查以下位置",searching:"正在查询项目资料库",search_results:"检索结果已返回",results_saved:"本批审阅结果已保存"}, hits:"本次检索返回 {{value}} 条结果", integrity:"已校验 {{completed}}/{{total}} 个运行文件", title: "最近的公开操作", inspect: "检查附件结构", read: "读取附件", review: "核查审阅目标", search: "检索项目资料库", source: "读取资料依据", export: "保存文档" },
+  docProgress: { rolesReviewed: "已复核 {{completed}}/{{total}} 个范围判断", title: "文档处理进展", batches: "已保存 {{value}} 批", searches: "检索 {{value}} 次", include: "纳入", exclude: "排除", context: "上下文", uncertain: "待确认", decisions: "最近的范围判断", finding: "最近的审阅结果", citations: "本条依据" },
   terminal: {"activityActive": "正在执行项目命令", "activityComplete": "命令执行结果", "cwd": "工作目录", "timeout": "超时", "authority": "以当前 Windows 用户权限执行。命令可以访问项目外的文件。", "reject": "拒绝命令", "approve": "执行命令", "timedOut": "命令已超时", "cancelled": "命令已取消", "unknown": "命令结果未知，尚未确认验证通过", "exit": "退出代码：{{code}}", "truncated": "输出已截断"},
   welcome: {
     title:
@@ -117,6 +130,7 @@ const chat = {
   },
   roles: { you: "你", agent: "agent", system: "系统" },
   status: {
+    unexecutedTools: "任务未完成。模型生成的工具请求没有执行。",
     stopping: "正在停止…",
     loading: "正在加载对话…", responding: "正在思考…", preparing: "正在准备上下文", thinking: "正在思考",
     generating: "正在生成", workingFiles: "正在处理项目文件", stop: "停止生成", incomplete: "未完成草稿",
@@ -235,7 +249,7 @@ const chat = {
     purposeLabel: '{{name}} 的用途',
     referencePurpose: '参考资料',
     templatePurpose: '待填写模板',
-    processing: { templatePlanning: "正在规划模板 {{completed}}/{{total}}", templateFilling: "正在填充模板 {{completed}}/{{total}}", modelLoading: "正在加载文档模型 {{completed}}/{{total}}", reranking: "正在重排文档证据 {{completed}}/{{total}}", parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
+    processing: { reportGenerated: "审阅报告已生成 {{name}}", reportPublishing: "正在保存报告 {{name}}", reportVerified: "已核验本地报告 {{name}}", scopeSelection: "已筛选 {{completed}}/{{total}} 个模板位置", documentReview: "已审阅 {{completed}}/{{total}} 个目标位置", templatePlanning: "正在规划模板 {{completed}}/{{total}}", templateFilling: "正在填充模板 {{completed}}/{{total}}", modelLoading: "正在加载文档模型 {{completed}}/{{total}}", reranking: "正在重排文档证据 {{completed}}/{{total}}", parsing: "正在读取 {{name}}", ocr: "正在 OCR 第 {{page}}/{{total}} 页" },
     referenceSelection: "引用所选文本",
     reference: "引用此附件", referenceNamed: "引用 {{name}}",
     references: "本轮引用的附件", fromHistory: "来自当前会话",
@@ -281,7 +295,7 @@ const chat = {
     confirm: "创建工作",
   },
   rename: { action: "重命名", prompt: "会话标题" },
-  tools: {
+  tools: { errorReasons: { rag_context_too_small: "证据超出本轮容量", task_plan_invalid: "计划参数无效" }, taskCancelled: "执行任务已取消", ragCapacityFailures: "证据容量不足：搜索失败 {{searches}} 次，读取失败 {{reads}} 次",
     authorizeDirectory: "授权目录",
     changeDirectory: "更换目录",
     authorized: "已授权：{{path}}",

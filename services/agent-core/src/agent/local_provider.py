@@ -91,6 +91,20 @@ class ManagedLocalProvider(ModelProvider):
         async with self._session() as inner:
             yield _LeasedLocalProvider(self.profile, inner, self._measure_request)
 
+    @asynccontextmanager
+    async def tokenizer_session(self):
+        """Count a pinned engine's input without reserving its generation slot."""
+        runtime = self.models._runtime
+        session = runtime.session_id
+        def check_session():
+            profile = self.models.get_profile(self.profile.id)
+            if (self.models._runtime is not runtime or runtime.session_id != session
+                    or (profile.base_url, profile.api_key) != (self.profile.base_url, self.profile.api_key)):
+                raise ProviderError("managed_session_changed", "分词期间本地模型会话已变化。")
+        check_session()
+        yield _LeasedLocalProvider(self.profile, self.inner, self._measure_request)
+        check_session()
+
     async def measure_request(self, prepared):
         async with self._session():
             return await self._measure_request(prepared)

@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { modelPhaseTiming, retrievalStage } from "./modelPhaseTiming";
+import { DocumentProgressPanel } from "./DocumentProgressPanel";
+import { documentProcessingLabel } from "./documentProcessing";
 import { Activity, RotateCcw, Settings, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import type { ModelRunEvent } from "../../types/domain";
 import { Button } from "../../components/ui/Button";
 import { IntentTaskDialog } from "./IntentTaskDialog";
 import type { IntentTask } from "../../services/tauri/intentTasks";
-import { acceptExecutionSnapshot, controlExecutionTask, getExecutionTask, getTaskItems, respondTaskQuestion,
+import { acceptExecutionSnapshot, retainDocumentProgress, controlExecutionTask, getExecutionTask, getTaskItems, respondTaskQuestion,
   type ExecutionOwner, type ExecutionTaskSnapshot, type TaskItemsPage } from "../../services/tauri/executionTasks";
 
 export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onRunRetry }: {
@@ -33,6 +36,7 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     const currentOwner = owner;
     function accept(next: ExecutionTaskSnapshot) {
       if (disposed || !acceptExecutionSnapshot(latest, next, currentOwner)) return false;
+      next = retainDocumentProgress(latest, next);
       latest = next;
       setTask((previous) => acceptExecutionSnapshot(previous, next, currentOwner) ? next : previous);
       return true;
@@ -61,17 +65,21 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     return () => { disposed = true; };
   }, [expanded, task?.id, task?.coverage?.completed, task?.coverage?.gaps, task?.coverage?.remaining]);
   if (!enabled || !owner || !task || !acceptExecutionSnapshot(null, task, owner)
-    || task.status === "cancelled") return null;
+    ) return null;
   const completedTask = task.status === "completed";
-  if (completedTask && !task.verification && !(task.coverage?.total) && !(task.plan && task.plan.steps.length > 1)) return null;
+  if (completedTask && !task.document_progress && !task.verification && !(task.coverage?.total) && !(task.plan && task.plan.steps.length > 1)) return null;
   const details = task.current_stage?.details ?? {};
   const completed = task.current_stage?.completed;
   const total = task.current_stage?.total;
   const paused = task.status === "interrupted" || task.status === "failed";
-  const stage = typeof details.stage === "string" ? details.stage
-    : typeof details.phase === "string" ? details.phase : task.stage ?? "preparingRequest";
-  const label = completedTask ? t((task.coverage?.gaps ?? 0) > 0 ? "execution.completedWithGaps" : "execution.completed")
-    : task.pending_question ? t("execution.waitingInput") : t(`execution.stages.${stage}`, {
+  const retrieval = retrievalStage(task);
+  const stage = retrieval ?? (typeof details.stage === "string" ? details.stage
+    : typeof details.phase === "string" ? details.phase : task.stage ?? "preparingRequest");
+  const progressLabel = documentProcessingLabel({ ...details, phase: stage, document_phase: retrieval ? undefined : details.document_phase, completed, total },
+    (key, values) => t(key, values));
+  const modelTiming = modelPhaseTiming(task);
+  const label = task.status === "cancelled" ? t("tools.taskCancelled") : completedTask ? t((task.coverage?.gaps ?? 0) > 0 ? "execution.completedWithGaps" : "execution.completed")
+    : task.pending_question ? t("execution.waitingInput") : modelTiming ? t(`execution.modelPhases.${modelTiming.phase}`) : progressLabel ?? t(`execution.stages.${stage}`, {
     defaultValue: t(`routing.status.${stage}`, { defaultValue: t("execution.stages.processing") }),
   });
   const clarificationTask: IntentTask | undefined = task.pending_question ? {
@@ -103,14 +111,18 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
     <div className="execution-task-card__heading"><Activity size={16} aria-hidden="true" />
       <strong>{paused ? t("execution.needsAttention") : label}</strong>
       {typeof details.device === "string" ? <span>{details.device.toUpperCase()}</span> : null}
-      {typeof details.model_name === "string" ? <span>{details.model_name}</span> : null}
+      {(!retrieval || details.model_role === "reranker" || details.model_role === "embedding") && typeof details.model_name === "string" ? <span>{details.model_name}</span> : null}
     </div>
     <div role="status" className="execution-task-card__progress">
-      {typeof completed === "number" && typeof total === "number" && total > 0
+      {progressLabel && (paused || completedTask || task.status === "cancelled") ? <span>{progressLabel}</span> : null}
+      {!progressLabel && typeof completed === "number" && typeof total === "number" && total > 0
         ? <span>{t("execution.count", { completed, total })}</span> : null}
       {typeof task.elapsed_seconds === "number" ? <span>{t("execution.elapsed", { seconds: Math.floor(task.elapsed_seconds) })}</span> : null}
-      {typeof task.seconds_since_progress === "number" ? <span>{t("execution.lastProgress", { seconds: Math.floor(task.seconds_since_progress) })}</span> : null}
+      {modelTiming?.phaseSeconds != null ? <span>{t("execution.phaseTime", { seconds: modelTiming.phaseSeconds })}</span> : null}
+      {modelTiming?.timings.map(metric => <span key={metric.phase}>{t(`execution.modelTimings.${metric.phase}`, { seconds: metric.seconds })}</span>)}
+      {(!modelTiming || modelTiming.phase === "generating") && typeof task.seconds_since_progress === "number" ? <span>{t("execution.lastProgress", { seconds: Math.floor(task.seconds_since_progress) })}</span> : null}
     </div>
+    <DocumentProgressPanel progress={task.document_progress} />
     {task.status === "running" && !task.pending_question && (task.elapsed_seconds ?? 0) >= (task.policy?.long_running_notice_seconds ?? 90)
       ? <p>{t("execution.takingLonger")}</p> : null}
     {paused ? <p>{t("execution.retained")}</p> : null}
@@ -149,7 +161,7 @@ export function ExecutionTaskCard({ owner, enabled, onSettings, onRecovered, onR
         onClick={() => void act(task.recovery_action === "run_retry" && onRunRetry ? "run_retry" : "retry")}>{t("execution.retry")}</Button> : null}
       {paused && /model_|resource|memory|vram|runtime_|engine_|access_denied|context_too_small/.test(task.error_code ?? "")
         ? <Button disabled={busy} icon={<Settings />} onClick={onSettings}>{t("execution.settings")}</Button> : null}
-      {!completedTask && task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
+      {!completedTask && task.status !== "cancelled" && task.can_cancel !== false && task.status !== "failed" ? <Button disabled={busy} icon={<X />} onClick={() => void act("cancel")}>{t("execution.cancel")}</Button> : null}
     </div>
     {error ? <p role="alert">{error}</p> : null}
     {clarificationTask ? <IntentTaskDialog scope={clarificationTask.scope} enabled={enabled}

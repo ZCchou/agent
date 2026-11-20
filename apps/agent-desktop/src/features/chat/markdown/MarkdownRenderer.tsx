@@ -36,25 +36,37 @@ class MarkdownErrorBoundary extends Component<
   }
 }
 
-const remarkPlugins: Options["remarkPlugins"] = [remarkGfm, remarkMath];
+// HTML-shaped model prose remains visible, without executing or trusting HTML.
+function preserveHtmlText() {
+  type Node = { type: string; children?: Node[] };
+  return (tree: Node) => {
+    function walk(node: Node) {
+      if (node.type === "html") node.type = "text";
+      node.children?.forEach(walk);
+    }
+    walk(tree);
+  };
+}
+const remarkPlugins: Options["remarkPlugins"] = [remarkGfm, remarkMath, preserveHtmlText];
 const rehypePlugins: Options["rehypePlugins"] = [[rehypeKatex, {
   trust: false, strict: "warn", maxExpand: 1000, throwOnError: false,
 }]];
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, state, onProjectFile, onProjectDirectory }: {
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds }: {
   content: string; state: AssistantMessageState;
+  verifiedEvidenceIds?: readonly string[];
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;
 }) {
   // Stable component types retain code/image/link state as streamed text grows.
   const components = useMemo<Components>(() => ({
-    a: (props) => <MarkdownLink {...props} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />,
+    a: (props) => <MarkdownLink {...props} verifiedEvidenceIds={verifiedEvidenceIds} onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />,
     img: MarkdownImage,
     pre: (props) => <MarkdownCodeBlock {...props} state={state} />,
     table: ({ children, ...props }) => (
       <div className="markdown-table-scroll"><table {...props}>{children}</table></div>
     ),
-  }), [onProjectFile, onProjectDirectory, state]);
+  }), [onProjectFile, onProjectDirectory, state, verifiedEvidenceIds]);
   return (
     <MarkdownErrorBoundary content={content}>
       <div className="markdown-body">

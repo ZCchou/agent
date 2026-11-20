@@ -436,7 +436,7 @@ class ContextEngineService:
                             "context_compaction_unreliable",
                             "The selected model could not produce a valid context checkpoint.",
                         ) from error
-                    correction = content + '\n' + json.dumps({'validation_error': error.details}, sort_keys=True)
+                    correction = json.dumps({'validation_error': error.details}, sort_keys=True)
             self._guard_compaction_dispatch(claim, generation, dispatch_guard)
             result = self.context_repository.commit_checkpoint(
                 attempt_id=claim.attempt_id, claim_token=claim.claim_token,

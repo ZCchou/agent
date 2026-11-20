@@ -172,6 +172,12 @@ class DocumentWorkflow:
         manifest = {**artifact['manifest'], 'review_report': {
             'template_id': report['template_id'], 'template_sha256': report['template_sha256'],
             'coverage': report['coverage'], 'review_status': report['review_status']}}
+        for key in ('grounding_status', 'evidence_participation', 'public_review_sections'):
+            if key in report:
+                manifest['review_report'][key] = report[key]
+        if report.get('scope_gap_count'):
+            manifest['review_report'].update(scope_gap_count=report['scope_gap_count'],
+                                             scope_gap_sha256=report['scope_gap_sha256'])
         with self.repository._connect() as connection:
             connection.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=? AND run_id=?',
                                (json.dumps(manifest, ensure_ascii=False), artifact_id, run_id))

@@ -486,15 +486,15 @@ def test_kimi_native_search_final_response_bypasses_host_tool_scope(
     asyncio.run(scenario())
 
 
-def test_ungrounded_fallback_cannot_claim_fresh_search_evidence() -> None:
+def test_ungrounded_fallback_labels_unverified_prose_and_preserves_text() -> None:
     unsafe = ChatRunService._safe_ungrounded_fallback(
         "根据搜索结果，最新番剧包括……", "搜索最新番剧",
     )
     safe = ChatRunService._safe_ungrounded_fallback(
         "番剧通常按季度播出。", "搜索最新番剧",
     )
-    assert "根据搜索结果" not in unsafe
-    assert "无法安全提供或确认最新事实" in unsafe
+    assert "根据搜索结果" in unsafe
+    assert unsafe.startswith("本次联网请求没有返回可核验来源")
     assert safe.startswith("本次联网请求没有返回可核验来源")
     assert "番剧通常按季度播出" in safe
 

@@ -184,7 +184,7 @@ def test_host_feedback_does_not_hide_real_dispatch_revocation(tmp_path, monkeypa
 @pytest.mark.parametrize("strategy", ["default", "expanded_retry"])
 def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_path, monkeypatch, strategy):
     requests = install_http(monkeypatch, [(list_reply("inspect-original"), "tool_calls"),
-        ({"content": "partial"}, "length"), ({}, "length"),
+        ({"content": "partial"}, "length"),
         (list_reply("inspect-new-explicit-call"), "tool_calls"),
         ({"content": "Explicit retry completed."}, "stop")], goal_checks=True)
 
@@ -203,7 +203,8 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
         with repository._connect() as connection:
             snapshots = [dict(row) for row in connection.execute("SELECT * FROM context_snapshots WHERE run_id=? ORDER BY round_no", (run_id,))]
             invocations = [dict(row) for row in connection.execute("SELECT * FROM invocation_specs WHERE plan_id=? ORDER BY round_no", (parent["execution_plan_id"],))]
-        assert len(invocations) == 3
+        assert parent["draft"]["content"].startswith("partial")
+        assert len(invocations) == 2
         assert len(snapshots) == len(invocations) + 1
         assert service.context.context_repository.preview(run_id)['input_scope'] == 'compiled_request'
         retried = await service.retry(run_id, context_strategy=strategy)
@@ -212,7 +213,7 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
         await service.tasks[retried["id"]]
         current = repository.get_model_run(retried["id"])
         assert current["status"] == "completed", (current["error_code"], current["error_message"])
-        assert len(requests) == (6 if strategy == 'default' else 5)
+        assert len(requests) == 4
         assert current["user_message_id"] == parent["user_message_id"]
         assert (current["id"] == parent["id"]) == (strategy == "default")
         if strategy == "expanded_retry": assert current["parent_run_id"] == parent["id"]
@@ -234,7 +235,7 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
 @pytest.mark.parametrize("strategy", ["default", "expanded_retry", "parent_expanded_retry"])
 def test_explicit_retry_recovers_legacy_child_only_via_bound_ancestor_plan(tmp_path, monkeypatch, strategy):
     requests = install_http(monkeypatch, [(list_reply("inspect-original"), "tool_calls"),
-        ({"content": "partial"}, "length"), ({}, "length"),
+        ({"content": "partial"}, "length"),
         ({"content": "Recovered the explicit retry."}, "stop")])
 
     async def scenario():
@@ -262,13 +263,13 @@ def test_explicit_retry_recovers_legacy_child_only_via_bound_ancestor_plan(tmp_p
         assert recovered["user_message_id"] == parent["user_message_id"]
         assert service.list_tool_operations(parent_id) == original_operations
         assert not service.list_tool_operations(recovered["id"]), "finished ancestor tools must not automatically replay"
-        assert len(requests) == 4
+        assert len(requests) == 3
         assert service.execution_repository.get_for_run(parent_id) == parent_plan
         if strategy == "parent_expanded_retry":
             repeated = await service.retry(parent_id, context_strategy="expanded_retry")
             assert repeated["id"] == recovered["id"] and repeated["status"] == "completed"
             assert repeated["id"] not in service.tasks
-            assert len(requests) == 4, "completed child must remain idempotent"
+            assert len(requests) == 3, "completed child must remain idempotent"
     asyncio.run(scenario())
 
 

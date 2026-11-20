@@ -41,14 +41,23 @@ def structured_messages(
     return [{"role": "system", "content": instruction}, *messages]
 
 
-def parse_structured_output(content: str) -> tuple[str | None, ToolCall | None]:
+def parse_structured_output(content: str, *, accept_public_text: bool = False) -> tuple[str | None, ToolCall | None]:
     try:
         value = json.loads(content)
     except json.JSONDecodeError as error:
+        if accept_public_text and content.strip():
+            # A failed protocol envelope stays private. Prose and fenced examples
+            # belong to the response body even when the adapter also supports tools.
+            import re
+            if not re.match(r'^\s*\{', content) or not re.search(r'"(?:type|arguments|tool_calls)"\s*:', content):
+                return content, None
         raise ProviderError(
             "model_tool_protocol_failed",
             "The model did not return the required structured tool envelope.",
         ) from error
+    if accept_public_text and (not isinstance(value, dict) or
+            value.get('type') not in ('tool_call', 'text') and 'tool_calls' not in value):
+        return content, None
     if not isinstance(value, dict) or set(value) - {"type", "content", "id", "name", "arguments"}:
         raise ProviderError("model_tool_protocol_failed", "The structured tool envelope is invalid.")
     if value.get("type") == "text" and isinstance(value.get("content"), str) \

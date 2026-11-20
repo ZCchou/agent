@@ -25,25 +25,28 @@ def document_batch_schema(task, attachment_ids):
                                    'equipment_parameters': parameters, 'gaps': strings})
     elif task['stage'] == 'review':
         sources = task.get('evidence', [])
-        source_ids = list(dict.fromkeys(source['id'] for source in sources))
-        quote_ids = list(dict.fromkeys(quote['quote_id'] for source in sources
-                                      for quote in source.get('quote_options', [])))
-        if source_ids:
-            citation['properties']['id']['enum'] = source_ids
-        if quote_ids:
-            citation['properties']['quote_id']['enum'] = quote_ids
+        citation_options = []
+        for source in sources:
+            quote_ids = list(dict.fromkeys(quote['quote_id'] for quote in source.get('quote_options', [])))
+            if quote_ids:
+                citation_options.append(object_schema({
+                    'id': {'type': 'string', 'enum': [source['id']]},
+                    'quote_id': {'type': 'string', 'enum': quote_ids}}))
+        if citation_options:
+            citation = citation_options[0] if len(citation_options) == 1 else {'anyOf': citation_options}
         review_strings = {'type': 'array', 'maxItems': 200,
                           'items': {'type': 'string', 'minLength': 1, 'maxLength': 1000}}
         reviewed = object_schema({'target_id': target_id,
             'content_kind': {'type': 'string', 'enum': ['instruction', 'example', 'placeholder', 'content', 'filled_content', 'heading']},
             'status': {'type': 'string', 'enum': ['reviewed', 'pending']},
             'summary': {'type': 'string', 'minLength': 1, 'maxLength': 8000}, 'problems': review_strings,
-            'evidence': {'type': 'array', 'maxItems': 8 if source_ids and quote_ids else 0, 'items': citation},
+            'evidence': {'type': 'array', 'maxItems': 8 if citation_options else 0, 'items': citation},
             'version_issues': review_strings, 'gaps': review_strings})
         if task.get('include_facts'):
             reviewed['properties']['facts'] = {'type': 'array', 'maxItems': 20,
-                'items': object_schema({key: {'type': 'string', 'maxLength': 256}
-                                       for key in ('name', 'value', 'unit', 'condition')})}
+                'items': object_schema({key: {'type': 'string', 'maxLength': 256,
+                    **({'minLength': 1} if key in {'name', 'value'} else {})}
+                    for key in ('name', 'value', 'unit', 'condition')})}
             reviewed['required'].append('facts')
         completed = object_schema({'results': {'type': 'array', 'minItems': len(writable),
                                                'maxItems': len(writable), 'items': reviewed}})

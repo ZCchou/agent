@@ -36,5 +36,6 @@ export function useStreamingMarkdownBuffer() {
 
   useEffect(() => cancelTimer, [cancelTimer]);
 
-  return { content, append, replace, clear, flush };
+  const read = useCallback(() => buffer.current, []);
+  return { content, append, replace, clear, flush, read };
 }

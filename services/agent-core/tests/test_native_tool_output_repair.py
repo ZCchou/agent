@@ -104,7 +104,7 @@ def test_correction_is_bounded_per_tool_round_and_whole_attempt(tmp_path, monkey
 
 
 @pytest.mark.parametrize("failure", ["mixed", "length", "fatal"])
-def test_ambiguous_batch_incomplete_and_fatal_outputs_are_not_corrected(tmp_path, monkeypatch, failure):
+def test_atomic_batch_and_uncertified_outputs_obey_correction_boundary(tmp_path, monkeypatch, failure):
     reply = malformed()
     finish = "tool_calls"
     if failure == "mixed":
@@ -134,6 +134,10 @@ def test_ambiguous_batch_incomplete_and_fatal_outputs_are_not_corrected(tmp_path
         if failure == "fatal":
             assert run["status"] == "failed" and run["error_code"] == expected
             assert "系统执行说明" in run["draft"]["content"]
+        elif failure == "mixed":
+            assert run["status"] == "completed"
+            assert run["assistant_message"]["content"] == "The invalid operation was not executed."
+            assert requests[-1][1].get("tools"), "Certified zero-forward batch uses the existing correction path"
         else:
             assert run["status"] == "completed" and expected in run["assistant_message"]["content"]
             assert not requests[-1][1].get("tools")
@@ -197,7 +201,7 @@ def test_validation_diagnostic_logs_only_fixed_reason(monkeypatch, caplog, proto
     assert error.value.details['text_character_count'] == len(PROGRESS)
     assert error.value.details['partial_text'] is True
     assert set(error.value.details) <= {'tool_validation_reason', 'native_tool_correction_eligible',
-        'text_character_count', 'tool_argument_character_count', 'partial_text', 'finish_reason'}
+        'text_character_count', 'tool_argument_character_count', 'partial_text', 'finish_reason', 'native_tool_diagnostic'}
     diagnostic = json.dumps([record.__dict__ for record in caplog.records], default=str)
     assert "tool_validation_reason" in diagnostic and "invalid_" + kind in diagnostic
     assert SECRET not in diagnostic and PROGRESS not in diagnostic
@@ -209,7 +213,7 @@ def test_validation_diagnostic_logs_only_fixed_reason(monkeypatch, caplog, proto
     for case in ("invalid_first", "invalid_last", "multiple_invalid", "duplicate_identity", "missing_terminal", "unsuccessful_terminal")
 ] + [("openai_chat", "early_fragment")])
 @pytest.mark.parametrize("preface", [False, True])
-def test_uncertified_native_operations_are_not_executed_but_model_can_explain(tmp_path, monkeypatch, protocol, case, preface):
+def test_native_batch_certification_preserves_zero_execution_and_explanation(tmp_path, monkeypatch, protocol, case, preface):
     original = httpx.AsyncClient
     requests = []
     bad = malformed()["tool_calls"][0]
@@ -260,7 +264,19 @@ def test_uncertified_native_operations_are_not_executed_but_model_can_explain(tm
         run_id = await start(service, work)
         run = repository.get_model_run(run_id)
         assert run["status"] == "completed"
-        assert "model_tool_protocol_failed" in run["assistant_message"]["content"]
+        certified = protocol == "openai_chat" and case in {"invalid_first", "invalid_last", "multiple_invalid"}
+        if certified:
+            assert run["assistant_message"]["content"] == "The operation was not executed."
+            assert requests[-1].get("tools")
+        else:
+            assert "model_tool_protocol_failed" in run["assistant_message"]["content"]
+            assert not requests[-1].get("tools")
         assert len(requests) == 2 and not service.list_tool_operations(run_id)
-        assert not requests[-1].get("tools")
+        with repository._connect() as connection:
+            diagnostics = [json.loads(row[0]) for row in connection.execute(
+                'SELECT d.payload_json FROM invocation_diagnostics d JOIN invocation_specs i ON i.id=d.spec_id WHERE i.plan_id=? AND i.status=?',
+                (run['execution_plan_id'], 'failed'))]
+        if certified:
+            assert diagnostics[0]['native_tool_protocol']['certification_reason'] == 'certified_local_batch'
+            assert diagnostics[0]['native_tool_protocol']['runtime_blocked_reason'] == 'eligible'
     asyncio.run(scenario())

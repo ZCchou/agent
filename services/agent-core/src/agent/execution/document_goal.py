@@ -21,6 +21,9 @@ INSTRUCTION = (
     'If chapter/section positions are not known yet, use selected, empty target_ids, '
     'and selector {"kind":"selection_pending","condition":"the requested chapter/section"}; '
     'inspect first and then resolve to actual stable IDs. Never replace an unknown selection with full. '
+    'A short explanation or answer about a cover, named section, title, type, author or document number '
+    'uses synthesis, not exact extraction. Preserve the requested local scope with selection_pending '
+    'until actual source IDs have been selected; the first read limit never defines that scope. '
     'A file deliverable is required only if the user requests one. '
     'The first action only reads an authorized attachment. Do not invent source IDs or output paths.')
 

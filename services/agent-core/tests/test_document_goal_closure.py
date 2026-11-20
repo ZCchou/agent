@@ -153,12 +153,12 @@ def test_incomplete_document_failure_keeps_original_code_and_one_explanation(tmp
     saved = []
     monkeypatch.setattr(svc.repository,'checkpoint_draft',lambda *args:saved.append(args[-1]))
     body = '模型说明：规划未能完成，附件及请求已保留。'
-    with pytest.raises(CoreDataError) as error:
-        asyncio.run(ChatRunService._finish_task_goal(svc,{'id':'run','user_message_id':'message',
-            '_response_failure_code':'task_goal_invalid'},'attempt',body+failure_notice('task_goal_invalid',[]),
-            None,None,None,None,[],(),'native',False))
-    assert error.value.code == 'task_goal_invalid' and error.value.explanation_saved
-    assert saved == [body] and not calls
+    notice = failure_notice('task_goal_invalid', [])
+    actual = asyncio.run(ChatRunService._finish_task_goal(svc, {'id':'run','user_message_id':'message',
+        '_response_failure_code':'task_goal_invalid'},'attempt',body+notice,
+        None,None,None,None,[],(),'native',False))
+    assert actual == body + notice
+    assert not calls
 
 
 def test_unknown_chapter_selection_keeps_the_user_cardinality_for_resolution():
