@@ -162,3 +162,17 @@ it("opens only a matching local report source; the same source number is scoped 
  expect(html).not.toContain('aria-label="审阅出处 2"');
  expect(html).toContain('<summary>[1] 标准 · §4.6.2 · PDF 第 18 页</summary>');
 });
+it("keeps the generated summary an index, preserves its citation and colors verdicts in requested tables", () => {
+ const table="| 问题项及位置 | 判断 | 原文 | 建议 | 证据 |\n|---|---|---|---|---|\n| 减压 | 待补充 | 2h | 说明依据 | [1](#审阅出处-1) |";
+ const report="# 文档审阅正文\n\n## 问题与待核事项汇总\n\n"+table+"\n\n## 减压\n\n**判断**：待补充。\n\n## 用户表格\n\n"+table+
+   "\n\n## 问题与待核事项汇总\n\n| 位置 | 判断 |\n|---|---|\n| 第二处 | 无法判断 |\n\n##### 审阅出处 1\n\n**来源**　标准 · 第 18 页\n\n> 摘录正文。";
+ const html=renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />);
+ const tables=[...html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/g)].map(m=>m[1]);
+ expect(tables).toHaveLength(3);
+ expect(tables[0]).toContain("<td>待补充</td>");
+ expect(tables[0]).not.toContain("review-verdict");
+ expect(tables[0]).toContain('aria-label="审阅出处 1"');
+ expect(tables[1]).toContain('review-verdict--missing');
+ expect(tables[2]).toContain('review-verdict--unknown');
+ expect(html.match(/review-verdict--missing/g)).toHaveLength(2);
+});

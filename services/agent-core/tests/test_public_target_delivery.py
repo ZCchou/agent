@@ -147,6 +147,7 @@ def test_only_unresolved_targets_supplement_once_and_resume_preserves_original(m
         assert result['report']['public_review_sections'][0]['body'] == "Original overview.\n## p-0\nSaved finding."
         assert all(body in result["markdown"] for body in commits)
         assert "Original overview.\n## actual source\nSaved finding." in result["markdown"]
+        assert result['report']['public_review_sections'][0]['review_items'][0]['verdict_status'] == 'unmapped'
         states = {row["target_id"]: row["status"] for row in result["report"]["public_target_delivery"]}
         assert states == {"p-0": "delivered", "p-1": "pending" if cancel or capacity else "delivered"}
         assert result["report"]["coverage"]["reviewed"] == 0

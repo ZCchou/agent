@@ -42,12 +42,14 @@ def test_moves_only_a_single_supported_final_line_in_complete_default_prose(body
         assert text.index(body) < text.index(verdict)
 
 
-def test_missing_unknown_inline_and_quoted_verdicts_do_not_trigger_reordering_or_guessing():
+def test_missing_unknown_inline_and_quoted_verdicts_do_not_create_committed_decisions():
     for text in ('原文有两个数值。','原文有两个数值。\n**判断**：部分满足',
-                 '原文有两个数值。\n> **判断**：符合', '原文有两个数值。\n```\n**判断**：符合',
-                 '原文有两个数值。\n**判断**：符合\n**判断**：符合'):
+                 '原文有两个数值。\n> **判断**：符合', '原文有两个数值。\n```\n**判断**：符合'):
         raw = '## p-3\n\n'+text
-        shown=project(raw)['presented_body']
-        assert shown.endswith(text)
+        result=project(raw)
+        assert result['body'] == raw and result['review_items'][0]['verdict_status'] == 'missing_final'
+        assert '**判断**：无法判断' in result['presented_body'] and '原文有两个数值' in result['presented_body']
+        if '部分满足' in text:
+            assert '模型原文用语：部分满足' in result['presented_body']
     english=project('## p-3\n**Verdict**: Does not conform\nRevised verdict: Conforms.')
     assert english['verdict_conflicts']==['p-3'] and '**Verdict**: Undetermined' in english['presented_body']

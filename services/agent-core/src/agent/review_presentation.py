@@ -221,12 +221,10 @@ _STANDALONE_VERDICT = re.compile(
     r'(?:' + _EN_LABELS + r')(?:\*\*)?\.?[ \t]*$', re.I)
 
 
-def _lead_with_final_verdict(block):
+def _single_verdict(block):
     original = block.splitlines(keepends=True)
     while original and not original[-1].strip():
         original.pop()
-    if len(original) < 2 or not _STANDALONE_VERDICT.fullmatch(original[-1].rstrip('\r\n')):
-        return block
     decisions = []
     fence = None
     for index, line in enumerate(original):
@@ -237,27 +235,113 @@ def _lead_with_final_verdict(block):
                 fence = None
         elif not fence and _STANDALONE_VERDICT.fullmatch(line.rstrip('\r\n')):
             decisions.append(index)
-    if decisions != [len(original)-1]:
-        return block
-    evidence = ''.join(original[:-1]).strip('\r\n')
-    if not evidence.strip():
-        return block
-    return '\n' + original[-1].strip() + '\n\n' + evidence + '\n\n'
+    last = original[-1].strip() if decisions and decisions[-1] == len(original)-1 else None
+    indices = set(decisions)
+    evidence = ''.join(line for i,line in enumerate(original) if i not in indices).strip('\r\n')
+    # Lines quoted as examples or inside a fenced code block do not commit a verdict.
+    return last, evidence, [original[i].strip() for i in decisions]
 
 
-def resolve_conflicting_verdicts(section):
+def _literal_field(text, names):
+    pattern = r'^[ \t]{0,3}(?:[-*] )?(?:\*\*)?(?:' + names + r')(?:\*\*)?\s*[：:]\s*(.+)$'
+    m = re.search(pattern, text, re.M | re.I)
+    if not m:
+        return ''
+    return _MARKER.sub('',m[1]).strip()[:350]
+
+
+def _uncommitted_prose(text):
+    def demote(line):
+        return re.sub(r'^([ \t]{0,3})(?:\*\*)?(判断|判定|结论|Verdict)(?:\*\*)?\s*[：:]',
+                      lambda m: m[1]+('Model wording: ' if m[2].lower()=='verdict' else '模型原文用语：'),
+                      line, flags=re.I)
+    return _map_prose(text, lambda s:s, demote)
+
+
+def _review_projection(section, labels, source_offset, source_fields):
     raw = section['body']
     replacements, conflicts = [], []
+    fields = {f['id']: f for f in source_fields}
+    default = section.get('review_layout') == 'default'
+    records = {}
+    by_key, by_number = {}, {}
+    for number, citation in enumerate(section.get('verified_source_quotes', []), source_offset+1):
+        by_key[citation['id'], citation['quote_id']] = number
+        if citation.get('citation_number'):
+            by_number[str(citation['citation_number'])] = number
+    for key in section.get('target_ids', []):
+        excerpt = (fields.get(key, {}).get('text') or '').strip()[:300]
+        records[key] = dict(target_id=key, title=labels.get(key,key), source_excerpt=excerpt, verdict=None,
+                            verdict_status='unmapped' if default else 'custom', technical_status='unverified',
+                            finding='', recommendation='', source_numbers=[])
+
+    def inspect_item(key, text):
+        clean = re.sub(r'(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^ {0,3}\1[ \t]*(?:\n|$)|\Z)', '', text)
+        numbers = []
+        def find_sources(s):
+            for marker in _MARKER.finditer(s):
+                if marker['extra']:
+                    continue
+                n = (by_number.get(marker['num']) if marker['num'] and marker['num']==marker['dest']
+                     else by_key.get((marker['source'],marker['quote'])))
+                if n and n not in numbers:
+                    numbers.append(n)
+            return s
+        _map_prose(clean, find_sources)
+        records[key]['source_numbers'] = numbers
+        return clean
+
+    # Custom tables can map a row without ID-only headings. Only associate unshared,
+    # exact raw-text spans with their actual target, never a batch-wide reference list.
+    ranges = {}
+    for item in section.get('target_delivery', []):
+        if item['target_id'] not in records or item.get('status') != 'delivered':
+            continue
+        for span in item.get('body_ranges', []):
+            start,end = span['start'],span['end']
+            if 0 <= start < end <= len(raw) and raw[start:end] == span.get('text'):
+                ranges.setdefault((start,end),set()).add(item['target_id'])
+    for key in records:
+        pieces = [raw[start:end] for (start,end), owners in ranges.items() if owners == {key} and not any(
+            start < other_end and other_start < end and other_owners != {key}
+            for (other_start,other_end),other_owners in ranges.items())]
+        if pieces:
+            inspect_item(key,'\n'.join(pieces))
     for _, start, end, key in _review_blocks(section):
         block = raw[start:end]
-        # Preserve offsets but remove fenced samples before interpreting verdicts.
-        checked = re.sub(r'(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^ {0,3}\1[ \t]*(?:\n|$)|\Z)', '', block)
-        if len(_verdict_lines(checked, key)) < 2:
-            if section.get('review_layout') == 'default' and section.get('public_output_state') == 'present':
-                presented = _lead_with_final_verdict(block)
-                if presented != block:
-                    replacements.append((start, end, presented))
+        checked = inspect_item(key, block)
+        values = _verdict_lines(checked,key)
+        record = records[key]
+        if len(values) < 2:
+            if not default:
+                continue
+            last, evidence, labels_seen = _single_verdict(block)
+            english = any(_EN_DECISION.fullmatch(line.replace('**','')) for line in labels_seen) or (
+                not labels_seen and not re.search(r'[\u3400-\u9fff]', checked))
+            if last and section.get('public_output_state') == 'present' and len(values) == 1:
+                record.update(verdict=next(iter(values)), verdict_status='submitted')
+                record['finding'] = _literal_field(checked,'问题|发现|finding|issue')
+                record['recommendation'] = _literal_field(checked,'修改建议|建议|recommendation|suggestion')
+                if not record['recommendation']:
+                    action = re.search(r'(?:^|[。！？]\s*)((?:建议(?:核对|补充|检查|修改)|需核实|需查阅)[^。！？\n]{1,200})', checked,re.M)
+                    if action:
+                        record['recommendation'] = _MARKER.sub('',action[1]).strip()
+                if record['verdict'] == '不符合':
+                    warning = ('This is the model’s assessment. Verify the cited requirement and the specific conflict.'
+                               if english else '这是模型判断。请复核适用依据和具体冲突。')
+                    evidence += '\n\n'+warning
+                presented = '\n'+last+'\n\n'+evidence+'\n\n'
+            else:
+                partial = section.get('public_output_state') != 'present'
+                record.update(verdict='无法判断', verdict_status='partial' if partial else 'missing_final')
+                reason = (('This item was interrupted.' if partial else 'No final verdict was submitted.')
+                          if english else ('本项输出未完成。' if partial else '未收到该位置末行提交的有效判断。'))
+                header = '**Verdict**: Undetermined' if english else '**判断**：无法判断'
+                # Preserve explanations and literal examples, independently of an uncommitted label.
+                presented = '\n'+header+'\n\n'+reason+'\n\n'+_uncommitted_prose(evidence)+'\n\n'
+            replacements.append((start,end,presented))
             continue
+        record.update(verdict='无法判断', verdict_status='conflict')
         english = any(_EN_DECISION.fullmatch(line.strip().replace('**','')) for line in checked.splitlines())
         note = ('\n**Verdict**: Undetermined\n\nThe model gave conflicting verdicts for this item. '
                 'Check the source text and the applicable requirement.' if english else
@@ -269,10 +353,13 @@ def resolve_conflicting_verdicts(section):
         conflicts.append(key)
     for start, end, replacement in reversed(replacements):
         raw = raw[:start] + replacement + raw[end:]
-    return raw, conflicts
+    for record in records.values():
+        if not record['finding'] and record['source_excerpt']:
+            record['finding'] = '附件原文：' + record['source_excerpt']
+    return raw, conflicts, list(records.values())
 
 
-def present_section(section, labels, source_offset=0, *, conflict_ids=None):
+def present_section(section, labels, source_offset=0, *, conflict_ids=None, source_fields=(), review_items=None):
     """Build reader-facing Markdown while leaving raw checkpoint text and offsets untouched."""
     citations = section.get('verified_source_quotes', [])
     by_key = {(c['id'], c['quote_id']): c for c in citations}
@@ -300,9 +387,11 @@ def present_section(section, labels, source_offset=0, *, conflict_ids=None):
         return _MARKER.sub(replace, text)
 
     # Historical public reports preserved unsafe links literally even inside example blocks.
-    body, conflicts = resolve_conflicting_verdicts(section)
+    body, conflicts, records = _review_projection(section, labels, source_offset, source_fields)
     if conflict_ids is not None:
         conflict_ids.extend(conflicts)
+    if review_items is not None:
+        review_items.extend(records)
     body = _INTERNAL_LINK.sub(lambda m: plain_markdown(m[0]), body)
     parts = [_map_prose(body, prose, lambda line: _present_positions(line, labels))]
     for citation in citations:
@@ -315,7 +404,9 @@ def present_section(section, labels, source_offset=0, *, conflict_ids=None):
     return '\n'.join(parts)
 
 
-def prepare_public_section(section, labels, source_offset):
-    conflicts = []
-    section['presented_body'] = present_section(section, labels, source_offset, conflict_ids=conflicts)
+def prepare_public_section(section, labels, source_offset, *, source_fields=()):
+    conflicts, records = [], []
+    section['presented_body'] = present_section(section, labels, source_offset, conflict_ids=conflicts,
+                                               review_items=records, source_fields=source_fields)
     section['verdict_conflicts'] = conflicts
+    section['review_items'] = records

@@ -41,7 +41,7 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
         properties: { id: scope + "-quote-" + number, className: ["review-source"] }, children: [summary, quote] });
     }
   }
-  function visit(node: Element | Root) {
+  function visit(node: Element | Root, followsSummaryHeading = false) {
     if (node.type === "element") {
       if (["pre", "code", "blockquote"].includes(node.tagName)) return;
       if (node.tagName === "a" && typeof node.properties.href === "string") {
@@ -74,8 +74,10 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
       if (committed && node.tagName === "table") {
         const sections = node.children.filter((child): child is Element => child.type === "element");
         const head = sections.find(child => child.tagName === "thead")?.children.find((child): child is Element => child.type === "element" && child.tagName === "tr");
-        const column = head?.children.filter((child): child is Element => child.type === "element" && child.tagName === "th")
-          .findIndex(cell => /^(判断|审阅判断|Verdict)$/i.test(plain(cell.children).trim())) ?? -1;
+        const headers = head?.children.filter((child): child is Element => child.type === "element" && child.tagName === "th")
+          .map(cell => plain(cell.children).trim()) ?? [];
+        const generatedIndex = followsSummaryHeading && headers.join("|") === "问题项及位置|判断|原文|建议|证据";
+        const column = generatedIndex ? -1 : headers.findIndex(label => /^(判断|审阅判断|Verdict)$/i.test(label));
         for (const row of sections.find(child => child.tagName === "tbody")?.children ?? []) {
           if (row.type !== "element" || column < 0) continue;
           const cell = row.children.filter((child): child is Element => child.type === "element" && child.tagName === "td")[column];
@@ -85,7 +87,14 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
         }
       }
     }
-    for (const child of node.children) if (child.type === "element") visit(child);
+    let previous: Element | undefined;
+    for (const child of node.children) {
+      if (child.type !== "element") continue;
+      const followsHeading = node.type === "root" && child.tagName === "table" && previous?.tagName === "h2"
+        && plain(previous.children) === "问题与待核事项汇总";
+      visit(child, followsHeading);
+      previous = child;
+    }
   }
   return (tree: Root) => { if (committed) collectSources(tree); visit(tree); };
 }

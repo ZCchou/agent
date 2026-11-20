@@ -172,7 +172,7 @@ class DocumentWorkflow:
         manifest = {**artifact['manifest'], 'review_report': {
             'template_id': report['template_id'], 'template_sha256': report['template_sha256'],
             'coverage': report['coverage'], 'review_status': report['review_status']}}
-        for key in ('grounding_status', 'evidence_participation', 'public_review_sections'):
+        for key in ('grounding_status', 'evidence_participation', 'public_review_sections', 'issue_summary'):
             if key in report:
                 manifest['review_report'][key] = report[key]
         if report.get('scope_gap_count'):

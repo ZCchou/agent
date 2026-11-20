@@ -321,7 +321,12 @@ def review_evidence_query(request, batch, max_characters):
     return '\n'.join([prefix, *topics])[:max_characters]
 
 
+# A final findings index is rendered by the application, separately from the body layout.
+_ISSUE_TABLE_SUFFIX = re.compile(r'(?:最后|文末|末尾|结尾)(?:再|另)?[^。；\n]{0,16}(?:汇总|表格)[^。；\n]*(?:问题|待核|整改)[^。；\n]*[。；]?\s*$')
+
+
 def _public_review_layout(request):
+    request = _ISSUE_TABLE_SUFFIX.sub('', request)
     if re.search(r'(?:按|输出|列出|整理为)[^。\n]{0,25}[「“]?[^。\n|｜]*[|｜][^。\n|｜]+[|｜]'
                  r'|(?:用|以|生成|输出|列为)[^。\n]{0,8}表格|(?:表格|表单)(?:输出|呈现|列出)'
                  r'|\b(?:as|in|use|using|produce|output) (?:a |an )?(?:markdown )?table\b',
@@ -353,7 +358,12 @@ def review_request(batch, sources, *, structured=True):
         'Under each heading first write one or two public sentences comparing the actual source text with the applicable '
         'evidence. For nonconformity name the concrete contradiction, matching the applicable category, value, unit, '
         'timing or exception where relevant. The presence of a citation alone does not support a judgement. '
-        'If the excerpt cannot establish the claim, mark it unable to determine. Give at most one specific action when needed. '
+        'Read any referenced attachment tables and their applicable category together with the target paragraph. '
+        'Do not report a requirement missing merely because a paragraph relies on its explicit table. '
+        'If the excerpt cannot establish the claim, mark it unable to determine. '
+        'For an issue use **问题**: or **Finding**: for one specific discrepancy or gap. '
+        'When an action is available write **建议**: or **Recommendation**: followed by the action. '
+        'The application builds the final findings index from these items. '
         'End this item with exactly one final verdict on a separate '
         'line, after all evidence and any recommendation. Chinese: **判断**：符合 / 不符合 / 待补充 / 无法判断 (choose one). '
         'In English use **Verdict**: Conforms / Does not conform / Needs information / Undetermined (choose one). '
@@ -767,14 +777,14 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
                    'evidence_available':bool(context.get('evidence')),
                    'grounding_status':'unverified_model_prose', 'public_output_state':output_state}
             saved['target_delivery'] = _public_target_delivery(body, batch['target_ids'], output_state)
-            prepare_public_section(saved, review_target_labels(batch), source_offset)
+            prepare_public_section(saved, review_target_labels(batch), source_offset, source_fields=batch['fields'])
             workflow.path_for(run_id,template['id'])
             if not activity.checkpoint(key,cache_identity,saved):
                 raise CoreDataError('document_review_stale','审阅阶段已变化，旧正文未提交。')
             if on_public_commit:
                 await _invoke(on_public_commit, batch, saved)
         else:
-            prepare_public_section(saved, review_target_labels(batch), source_offset)
+            prepare_public_section(saved, review_target_labels(batch), source_offset, source_fields=batch['fields'])
         source_offset += len(saved.get('verified_source_quotes', []))
         saved['target_delivery'] = _public_target_delivery(saved['body'], batch['target_ids'], saved['public_output_state'])
         sections.append(saved)
@@ -804,7 +814,7 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
                     supplement['verified_source_quotes'] = _batch_references(supplement['body'], context.get('evidence', []))
                     supplement['target_delivery'] = _public_target_delivery(
                         supplement['body'], supplement['target_ids'], supplement['public_output_state'])
-                    prepare_public_section(supplement, review_target_labels(correction), source_offset)
+                    prepare_public_section(supplement, review_target_labels(correction), source_offset, source_fields=correction['fields'])
                     workflow.path_for(run_id, template['id'])
                     if not activity.checkpoint(correction_key, correction_identity, supplement):
                         raise CoreDataError('document_review_stale', '补充正文未提交。')
@@ -816,7 +826,7 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
                         raise CoreDataError('document_review_stale', '补充阶段已变化。')
             supplement['target_delivery'] = _public_target_delivery(
                 supplement['body'], supplement['target_ids'], supplement['public_output_state'])
-            prepare_public_section(supplement, review_target_labels(correction), source_offset)
+            prepare_public_section(supplement, review_target_labels(correction), source_offset, source_fields=correction['fields'])
             source_offset += len(supplement.get('verified_source_quotes', []))
             sections.append(supplement)
             correction_cursor += len(correction['fields'])
@@ -866,6 +876,10 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
         parts.extend(['',f'{len(conflicts)} 个位置出现相互冲突的判断，已列为“无法判断”，需人工复核。'])
     if report['evidence_participation'] != 'retrieved':
         parts.extend(['','本次未取得可用于审阅的资料库片段。'])
+    if review_layout == 'default' or _ISSUE_TABLE_SUFFIX.search(request):
+        from agent.review_issue_summary import issue_rows, issue_table
+        report['issue_summary'] = issue_rows(sections, fields)
+        parts.extend(['', issue_table(report['issue_summary'])])
     workflow.path_for(run_id,template['id'])
     return {'report':report,'markdown':'\n'.join(parts)}
 
