@@ -1,4 +1,23 @@
 const chat = {
+  landing: {
+    "lead": "把问题变成",
+    "emphasis": "清晰答案",
+    "summary": {
+      "title": "内容总结",
+      "description": "提炼关键信息与行动项",
+      "prompt": "请总结以下内容，列出关键信息和行动项："
+    },
+    "plan": {
+      "title": "任务拆解",
+      "description": "梳理步骤和优先级",
+      "prompt": "请将以下任务拆解为步骤，并标出优先级："
+    },
+    "ideas": {
+      "title": "灵感扩展",
+      "description": "比较几种可行方案",
+      "prompt": "围绕以下主题提出几种方案，并比较优缺点："
+    }
+  },
   fileMenu: { location: "打开文件所在位置", copy: "复制文件路径" },
   execution: {
     modelPhases: {"queued":"正在排队等待模型","preflight":"正在准备模型请求","waiting_first_output":"请求已发出，等待模型首次输出","generating":"模型正在生成"},

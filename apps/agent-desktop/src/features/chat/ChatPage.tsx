@@ -3,7 +3,7 @@ import { isTimelineMessage } from "./timelineModel";
 import { createDocumentTextBuffer, type DocumentPublicText } from "./documentPublicText";
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
-import { ArrowDown, Bot, Database, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
+import { ArrowDown, ArrowUpRight, BookOpen, Bot, Database, Lightbulb, ListChecks, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useConversationState } from "./useConversationState";
 import { useScopedAction } from "./useScopedAction";
@@ -1279,10 +1279,23 @@ export function ChatPage() {
         {!loading && messages.length === 0 ? (
           <div className="chat-welcome">
             <div className="chat-welcome__avatar"><Bot size={32} /></div>
-            <h2>{effectiveKind === "standard_chat" ? tChat("welcome.title") : tChat("workWelcome.title")}</h2>
+            <h2 className="chat-welcome__original-title">{effectiveKind === "standard_chat" ? tChat("welcome.title") : tChat("workWelcome.title")}</h2>
+            <h2 className="ragent-welcome-title">{effectiveKind === "standard_chat" ? <>{tChat("landing.lead")}<em>{tChat("landing.emphasis")}</em></> : tChat("workWelcome.title")}</h2>
             <p>{coreOnline
               ? (effectiveKind === "standard_chat" ? tChat("welcome.description") : tChat("workWelcome.description"))
               : tChat("status.offline")}</p>
+            <div className="ragent-prompt-grid">
+              {([{ key: "summary", Icon: BookOpen }, { key: "plan", Icon: ListChecks }, { key: "ideas", Icon: Lightbulb }] as const).map(({ key, Icon }) => (
+                <button type="button" key={key} disabled={!coreOnline || !!input.trim()} onClick={event => {
+                  markDraftChanged();
+                  setInput(tChat(`landing.${key}.prompt`));
+                  event.currentTarget.closest(".chat-page")?.querySelector<HTMLTextAreaElement>(".chat-composer textarea")?.focus();
+                }}>
+                  <Icon size={18} /><strong>{tChat(`landing.${key}.title`)}</strong>
+                  <ArrowUpRight size={14} /><small>{tChat(`landing.${key}.description`)}</small>
+                </button>
+              ))}
+            </div>
           </div>
         ) : null}
         {loading ? <p className="state-message">{tChat("status.loading")}</p> : null}

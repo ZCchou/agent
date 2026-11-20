@@ -1,4 +1,23 @@
 const chat = {
+  landing: {
+    "lead": "Turn questions into ",
+    "emphasis": "clear answers",
+    "summary": {
+      "title": "Summarize",
+      "description": "Extract key points and actions",
+      "prompt": "Summarize the following and list the key points and actions: "
+    },
+    "plan": {
+      "title": "Plan a task",
+      "description": "Identify steps and priorities",
+      "prompt": "Break the following task into steps and identify priorities: "
+    },
+    "ideas": {
+      "title": "Explore ideas",
+      "description": "Compare possible approaches",
+      "prompt": "Suggest approaches to the following topic and compare their tradeoffs: "
+    }
+  },
   fileMenu: { location: "Open file location", copy: "Copy file path" },
   execution: {
     modelPhases: {"queued":"Waiting for a model slot","preflight":"Preparing the model request","waiting_first_output":"Waiting for the model’s first output","generating":"Model is generating"},
