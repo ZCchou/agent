@@ -23,6 +23,11 @@ def test_review_roles_reconcile_with_same_scope_source_observations(tmp_path):
            ('p-620','设备描述暂未明确。','unbound','C:example','C:example'),
            ('p-621','示例：此位置用于描述设备。','unbound','E:example','E:example'),
            ('p-700','本节描述试验目的。','writing','I:mixed','C:guidance'),
+           ('new-consequence','本节描述试验目的。冲击试验用于验证机载传感器系统在冲击载荷下不会发生支承件断裂。','shock','C:guidance','C:guidance'),
+           ('new-recovery','本节描述试验目的。供电切换试验针对采用备用供电的机载设备，检验其在主电源失效时仍能持续输出数据。','supply','I:req','U:ambiguous'),
+           ('new-alignment','本节给出安装配置示意图，试样的固定方式必须与实际装配状态相符。','mount','C:example','U:ambiguous'),
+           ('writing-only','本节给出安装配置示意图，图中应标注试验件安装方向。','drawing','C:guidance','C:guidance'),
+           ('example-objective','本节描述试验目的。示例：冲击试验用于验证机载传感器系统在冲击载荷下不会发生断裂。','example','C:guidance','C:guidance'),
            ('p-2','本章节主要阐述本试验大纲的目的和试验大纲内容的规划。','intro','I:req','I:req'),
            ('p-110','本节描述为保证试验有效性对安装提出的通用要求，比如试验件应尽可能模拟实际装机情况进行安装；以及试验件在试验环境的安装要求及位置关系等。','installation','I:mixed','I:mixed'),
            ('t-1-r0-c0','No.','parts','C:label','C:label'),
@@ -69,7 +74,7 @@ def test_review_roles_reconcile_with_same_scope_source_observations(tmp_path):
     gaps=[]
     selected=asyncio.run(resolve_review_selection(core,root['id'],template,request,fields,generate=generate,
         fits=lambda *_:True,fence=(root['revision'],root['attempt']),model_identity={},scope_gaps=gaps))
-    assert set(selected)=={'p-73','p-83','p-84','p-407','p-484','p-611','p-242','p-243','t-1-r1-c1','t-1-r2-c1'}
+    assert set(selected)=={'new-consequence','new-recovery','new-alignment','p-73','p-83','p-84','p-407','p-484','p-611','p-242','p-243','t-1-r1-c1','t-1-r2-c1'}
     assert {g['target_id'] for g in gaps}=={'p-620','t-8-r0-c0'}
     with core._connect() as db:
         s=json.loads(db.execute('SELECT payload_json FROM task_goal_execution WHERE task_id=?',(root['id'],)).fetchone()[0])['_review_selection']
@@ -83,3 +88,16 @@ def test_review_roles_reconcile_with_same_scope_source_observations(tmp_path):
     assert s['decisions']['p-381']['basis_code']=='C:label'
     assert s['decisions']['t-1-r1-c0']['basis_code']=='C:label'
     assert s['decisions']['t-7-r0-c0']['basis_code']=='E:example'
+
+
+def test_mixed_technical_override_respects_scope_and_source_evidence():
+    from agent.execution.selection_roles import reviewed_role_disposition
+    field = {'id':'original', 'text':'Equipment statement'}
+    result = {'basis_code':'C:guidance', 'decision':'context'}
+    fact = {'explicit_test_purpose': True}
+    request = '审阅附件中已填写的正式内容，跳过空白、占位和示例。'
+    assert reviewed_role_disposition(field,result,fact,request) == 'I:mixed'
+    for restricted in [request+'只看失压章节。', request+'排除空白、冲击和振动。', request+'仅审阅第6章。']:
+        assert reviewed_role_disposition(field,result,fact,restricted) is None
+    assert reviewed_role_disposition(field,result,{**fact,'whole_example_anchor_ids':['anchor']},request) is None
+    assert reviewed_role_disposition(field,{**result,'selection_issue':'unreadable'},fact,request) is None

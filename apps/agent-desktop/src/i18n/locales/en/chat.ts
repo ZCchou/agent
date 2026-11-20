@@ -16,6 +16,7 @@ const chat = {
     takingLonger: "Processing is taking longer. Execution progress is being monitored.",
     continue: "Continue waiting", retry: "Retry", retryRun: "Keep draft and regenerate", cancel: "Cancel task", settings: "Adjust model settings",
     stages: {
+      rerank_degraded: "Reranking unavailable; using initial retrieval results", retrieval_cache_hit: "Reused cached retrieval results",
       retrieval: "Searching project libraries",
       main_model_loading: "Loading the chat model",
       rag_probe: "Checking retrieval model availability",

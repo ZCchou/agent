@@ -26,6 +26,11 @@ describe("model progress displayed in the real task card", () => {
     const last = { model_phase: "generating", model_first_output_ms: 5688, model_role: "main_model" };
     const search = { ...review, current_stage: { details: { ...last, stage: "document_review" } },
       document_progress: { event: "searching" } };
+    for (const stage of ["rerank_degraded", "retrieval_cache_hit"]) {
+      const result = { ...search, current_stage: { details: { ...last, stage } } };
+      expect(retrievalStage(result)).toBe(stage);
+      expect(modelPhaseTiming(result)).toBeNull();
+    }
     expect(retrievalStage(search)).toBe("retrieval");
     expect(modelPhaseTiming(search)).toBeNull();
     const rerank = { ...search, current_stage: { details: { ...last, stage: "reranking", model_role: "reranker" } } };

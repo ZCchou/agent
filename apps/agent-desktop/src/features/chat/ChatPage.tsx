@@ -1,4 +1,4 @@
-import { appendDocumentPublicText, type DocumentPublicText } from "./documentPublicText";
+import { createDocumentTextBuffer, type DocumentPublicText } from "./documentPublicText";
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
 import { ArrowDown, Bot, Database, GitBranch, Pencil, RotateCcw, Upload, X } from "lucide-react";
@@ -149,6 +149,8 @@ export function ChatPage() {
   const [knowledgeProposal, setKnowledgeProposal] = useConversationState<{ id: string; title: string; content: string } | null>(inspectorKey, null);
   const runIdRef = useRef<string | null>(null);
   const [documentPublicText, setDocumentPublicText] = useConversationState<DocumentPublicText | null>(inspectorKey, null);
+  const publicBuffer = useMemo(() => createDocumentTextBuffer(setDocumentPublicText), [setDocumentPublicText]);
+  useEffect(() => () => publicBuffer.dispose(), [publicBuffer]);
   const terminalRefreshRevision = useRef(0);
   const [grant, setGrant] = useConversationState<ProjectGrant | null>(inspectorKey, null);
   const [deriveOpen, setDeriveOpen] = useConversationState(inspectorKey, false);
@@ -363,9 +365,7 @@ export function ChatPage() {
         }
       }
       if (event.run_id !== runIdRef.current) return;
-      if (event.event_type === "run.document_processing" || event.event_type === "run.state_changed"
-          || ["run.failed","run.cancelled","run.interrupted","run.completed"].includes(event.event_type))
-        setDocumentPublicText(current => appendDocumentPublicText(current,event,runIdRef.current));
+      publicBuffer.event(event, runIdRef.current);
       if (event.event_type === "run.chunk") {
         setRunActivityLabel(tChat("routing.status.generatingAnswer"));
         appendStreamingContent(String(event.data.delta ?? ""));
@@ -429,12 +429,13 @@ export function ChatPage() {
         }
         refreshChangeSets();
       } else if (event.event_type === "run.completed") {
-        const message = event.data.message as ChatMessage;
+        const message = event.data.message as ChatMessage | undefined;
+        publicBuffer.receipt(event.run_id, activeConversationId, message);
         const summary = event.data.execution_summary_message as ChatMessage | undefined;
         const progress = (event.data.progress_messages ?? []) as ChatMessage[];
         setMessages((current) => {
           const withProgress = [...current, ...progress.filter((item) => !current.some((existing) => existing.id === item.id))];
-          const next = withProgress.some((item) => item.id === message.id) ? withProgress : [...withProgress, message];
+          const next = !message || withProgress.some((item) => item.id === message.id) ? withProgress : [...withProgress, message];
           return summary && !next.some((item) => item.id === summary.id) ? [...next, summary] : next;
         });
         clearStreamingContent(); setActiveRun(null); runIdRef.current = null; setSending(false); setRunActivityLabel(null);
@@ -473,7 +474,7 @@ export function ChatPage() {
       }
     }).then((dispose) => { if (active) unsubscribe = dispose; else dispose(); }).catch(() => { /* Browser test shell has no Tauri event plugin. */ });
     return () => { active = false; unsubscribe?.(); };
-  }, [activeConversationId, appendStreamingContent, clearStreamingContent, refreshChangeSets,
+  }, [activeConversationId, publicBuffer, appendStreamingContent, clearStreamingContent, refreshChangeSets,
     refreshToolOperations, refreshWebOperations, refreshWorkspace, replaceStreamingContent, readStreamingContent]);
 
   useEffect(() => {
@@ -530,7 +531,14 @@ export function ChatPage() {
           void modelRunRepository.latest(value.id).then((run) => {
             if (cancelled || !run) return;
             setLastRunId(run.id);
-            if (run.status === "completed") return;
+            if (run.status === "completed") {
+              if (run.assistant_message) {
+                const receipt = run.assistant_message;
+                setMessages(items => items.some(item => item.id === receipt.id) ? items : [...items, receipt]);
+                publicBuffer.receipt(run.id, value.id, receipt);
+              }
+              return;
+            }
             setActiveRun(run); runIdRef.current = run.id;
             replaceStreamingContent(run.draft?.content ?? "");
             setSending(["queued", "building_context", "generating", "waiting_tool"].includes(run.status));
@@ -546,7 +554,7 @@ export function ChatPage() {
       .catch(() => { if (!cancelled) setError(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [activeConversationId, clearStreamingContent, coreOnline, draft.revision, refreshToolOperations, replaceStreamingContent]);
+  }, [activeConversationId, publicBuffer, clearStreamingContent, coreOnline, draft.revision, refreshToolOperations, replaceStreamingContent]);
 
   const markDraftChanged = useUpdateDraft({ input, setInput, conversation, loading, attachmentController, references });
 
@@ -772,6 +780,7 @@ export function ChatPage() {
       const current = await modelRunRepository.get(started.run.id);
       if (!isCurrent() || runIdRef.current !== started.run.id) return;
       if (current.status === "completed" && current.assistant_message) {
+        publicBuffer.receipt(current.id, acceptedConversation.id, current.assistant_message);
         setMessages((items) => items.some((item) => item.id === current.assistant_message?.id)
           ? items : [...items, current.assistant_message as ChatMessage]);
         setActiveRun(null); runIdRef.current = null; setSending(false);
@@ -880,6 +889,7 @@ export function ChatPage() {
       if (!isCurrent() || (runIdRef.current !== runId && runIdRef.current !== null)) return;
       terminalRefreshRevision.current += 1;
       if (run.status === "completed" && run.assistant_message) {
+        publicBuffer.receipt(run.id, activeConversationId, run.assistant_message);
         setMessages((current) => current.some((item) => item.id === run.assistant_message?.id)
           ? current : [...current, run.assistant_message as ChatMessage]);
         setActiveRun(null); runIdRef.current = null; clearStreamingContent();

@@ -349,7 +349,7 @@ def _validate_proof(state, identity, fields):
 
 
 async def resolve_review_selection(repository, task_id, template, request, fields, *, generate, fits, fence,
-                                   model_identity, target_ids=None, progress=None, scope_gaps=None, shared_contexts=None):
+                                   model_identity, target_ids=None, progress=None, scope_gaps=None, shared_contexts=None, reuse_environment=None):
     """Complete source-wide decisions before narrowing a semantic review goal."""
     if scope_gaps is not None and not isinstance(scope_gaps,list):
         raise CoreDataError('invalid_params','范围待确认输出必须是列表。')
@@ -394,6 +394,17 @@ async def resolve_review_selection(repository, task_id, template, request, field
     from agent.execution.selection_roles import source_role_observations,needs_role_review,role_review_reasons
     role_facts=source_role_observations(fields, shared_contexts=shared_contexts)
     preexcluded=preclassified_example_tables(fields, request, role_facts)
+    # A prior interruption can leave a cross-task seed in the same task.
+    # Check the live dependencies again before accepting its local checkpoint.
+    reuse_receipt = state.get('reused_selection')
+    if reuse_receipt and (not reuse_environment or reuse_receipt.get('environment_sha256') != sha(reuse_environment)):
+        state = {}
+    seed = None
+    if not state and reuse_environment and bound is None and target_ids is None and scope.get('selector'):
+        from agent.execution.selection_reuse import verified_seed
+        seed = verified_seed(repository, task_id, request, identity, fields, template, reuse_environment, preexcluded)
+        if seed:
+            state = seed
     if not (_validate_proof(state, identity, fields) and _valid_base_batches(state,fields,template,bound,preexcluded=preexcluded)
             and isinstance(state.get('source_role_reviews'),dict)
             and all(state['decisions'][key]==value or isinstance(state['source_role_reviews'].get(key),dict)
@@ -557,6 +568,10 @@ async def resolve_review_selection(repository, task_id, template, request, field
             if progress:progress(len(state['decisions']),len(fields))
             pending=pending[len(batch):]
 
+    if seed and state is seed:
+        _cache(repository,task_id,fence,persist_state)
+        if progress:
+            progress(len(state['decisions']),len(fields))
     await review_source_roles()
 
     ordered=[field for field in fields if field['id'] not in state['decisions']]
@@ -597,6 +612,8 @@ async def resolve_review_selection(repository, task_id, template, request, field
             if not selected:chosen['reason']='已覆盖本次来源筛选，无确定纳入项；逐项待核与排除记录保留在范围证明及报告中。'
             chosen.pop('selector', None)
     def commit(db, row, payload):
+        if state.get('reused_selection') and TaskPlans.current_evidence_generation(db, task_id) != reuse_environment['project_generation']:
+            raise CoreDataError('rag_evidence_stale', '复用范围后项目资料版本已变化，请重新执行筛选。')
         current = plans.goals.get(task_id, connection=db)
         if current['revision'] != goals['revision'] or current['request_digest'] != goals['request_digest']:
             raise CoreDataError('task_goal_revision_changed', '提交筛选前任务要求已变化，不能覆盖。')

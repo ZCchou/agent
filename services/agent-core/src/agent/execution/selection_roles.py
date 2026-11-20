@@ -2,7 +2,7 @@
 import re
 from agent.review_table_context import table_contexts
 
-OBSERVATION_VERSION='source-role-observations-v10'
+OBSERVATION_VERSION='source-role-observations-v11'
 EDITORIAL=re.compile(r'^\s*(?:(?:本(?:章(?:节)?|节|部分|段))|(?:this|the)\s+(?:section|chapter|paragraph))[^。；;\n]{0,48}?(?:阐述|描述|说明|介绍|列出|给出|填写|规划|describ(?:es|e)|explain|list|provide)',re.I)
 INLINE_EXAMPLE=re.compile(r'比如|例如|譬如|\b(?:such as|for example)\b|e\.g\.',re.I)
 OBLIGATION=re.compile(r'(?<![响对反适相回])应(?:当|该|尽可能|尽量)?|必须|不得|\b(?:shall(?:\s+not)?|must|should)\b',re.I)
@@ -50,13 +50,31 @@ def filled_applicability(text):
 
 
 def filled_test_purpose(text):
-    """A declarative, named test with an equipment, operating condition and outcome."""
+    """A named test states what happens to equipment under a specified condition."""
     for part in _editorial_following_sentences(text):
-        if (re.match(r'^[\u3400-\u9fff]{1,14}试验(?:是(?:为了)?|用于|旨在)?(?:考核|验证|确定|检验)',part)
-            and re.search(r'设备|系统|部件|组件|装置',part)
-            and re.search(r'(?:在|经历|经受|处于|条件下)',part)
-            and re.search(r'(?:是否能够|能否|是否可以|能不能)',part)
-            and not re.search(r'^请|撰写|应(?:当)?(?:描述|说明)|什么|何种|相关条件|某种|待定|视情况|可写为|可表述为',part)):
+        if not re.match(r'^[\u3400-\u9fffA-Za-z0-9 -]{1,24}试验', part):
+            continue
+        if (not re.search(r'考核|验证|确定|检验',part) or not re.search(r'设备|系统|部件|组件|装置|试验件',part)
+                or not re.search(r'在|经历|经受|处于|条件下|过程中',part)
+                or re.search(r'撰写|[需应请](?:当)?(?:描述|说明|填写|列举|给出)|什么|何种|相关条件|某种|待定|视情况|可写为|可表述为',part)):
+            continue
+        capability = re.search(r'是否能够|能否|是否可以|能不能|(?:仍(?:然)?能|继续|恢复).{0,32}(?:工作|运行|通信|采集|输出|保持功能)',part)
+        failure = re.search(r'(?:不会|不应|不得|不发生|不出现|不).{0,28}(?:损坏|损伤|失效|脱离|脱落|分离|断裂|停机|复位)',part)
+        if capability or failure or re.search(r'(?:工作|运行)是否正常',part):
+            return True
+    return False
+
+
+def equipment_rule_after_guidance(text):
+    """A subsequent clause regulates the physical equipment rather than the diagram or author."""
+    if not EDITORIAL.match(text):
+        return False
+    if re.search(r'示例|例如|假设|比如|可写为|建议填写|待填|[Xx]{2,}',text):
+        return False
+    for clause in re.split(r'[，,。；;\n]',text)[1:]:
+        if (re.match(r'^\s*(?:受试|被测|参试)?(?:试验件|设备|试样|组件|部件|传感器|样机|样件)',clause)
+                and re.search(r'(?:应当?|必须|须)与[^，。；;]{1,48}(?:保持一致|相同|一致|相符)',clause)
+                and not re.search(r'图中|表中|图例|举例|文字|撰写|填写|注释|标注',clause)):
             return True
     return False
 
@@ -65,6 +83,8 @@ def operational_condition(text):
     """A stated operating rule or permission, separate from instructions to write it down."""
     if re.search(r'示例|例如|假设|比如|建议填写|应填写|可填写|待填|[Xx]{2,}',text):
         return False
+    if equipment_rule_after_guidance(text):
+        return True
     conditional=re.search(r'(?:若|当|如果|除非)[^。；;\n]{2,120}(?:应满足|必须符合|不得|应按照)',text)
     clause=re.search(r'(?:第\s*\d+(?:\.\d+)+\s*[章节条]|§\s*\d+)',text)
     permission=re.search(r'(?:可以|允许)使用(?:不同|多个)[^，。；;]{1,24}[，,]按照[^。；;]{1,32}执行试验',text)
@@ -72,13 +92,23 @@ def operational_condition(text):
     return bool((conditional and clause) or permission or definition)
 
 
+def _has_review_scope_limit(request):
+    if re.search(r'(?:仅限|只限|限于|只看|仅看|仅针对|只针对|关于|仅审阅其中|仅审查其中|[pt]-\d+)'
+                 r'|第\s*[\d一二三四五六七八九十.]+\s*[章节条]|正式内容(?:中|里)(?:有关|涉及|关于)',request,re.I):
+        return True
+    for match in re.finditer(r'(?:跳过|排除|忽略|不要审阅|不审阅|不检查)\s*([^，。；;\n]+)',request):
+        terms = re.split(r'[、和及与或]',match[1].strip())
+        if any(term.strip() not in {'空白','空白项','空项','占位','占位符','示例','案例','未填写内容'} for term in terms):
+            return True
+    return False
+
+
 def reviewed_role_disposition(field,decision,fact,request):
     from agent.execution.document_goal_runtime import _positive_request
     if fact.get('whole_example_anchor_ids') or decision.get('selection_issue'):
         return None
     substantive=any(fact.get(key) for key in ('explicit_applicability_statement','explicit_test_purpose','operational_condition'))
-    broad_formal=(_positive_request(FORMAL_CONTENT,request)
-        and not re.search(r'(?:仅限|只限|只看|仅看|仅针对|只针对|关于|[pt]-\d+)|正式内容(?:中|里)(?:有关|涉及|关于)',request,re.I))
+    broad_formal=_positive_request(FORMAL_CONTENT,request) and not _has_review_scope_limit(request)
     if substantive and broad_formal:
         return 'I:mixed'
     if decision.get('basis_code') in {'C:example','E:example'}:

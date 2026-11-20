@@ -16,6 +16,7 @@ const chat = {
     takingLonger: "处理耗时较长，正在持续监控执行进展。",
     continue: "继续等待", retry: "重新尝试", retryRun: "保留草稿并重新生成", cancel: "取消任务", settings: "调整模型设置",
     stages: {
+      rerank_degraded: "重排不可用，已采用初筛结果", retrieval_cache_hit: "已复用缓存的检索结果",
       retrieval: "正在检索项目资料",
       main_model_loading: "正在加载对话模型",
       rag_probe: "正在检查检索模型可用性",

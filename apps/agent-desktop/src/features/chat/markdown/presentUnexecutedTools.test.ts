@@ -12,7 +12,7 @@ describe("legacy assistant protocol failure presentation", () => {
   });
   it("keeps code examples, quoted examples and ordinary discussion", () => {
     for (const source of [ "```xml\n\n" + envelope + "\n\n```", "~~~\n\n" + envelope + "\n\n~~~",
-      "    " + envelope.replaceAll("\n", "\n    "), "> " + envelope.replaceAll("\n", "\n> "),
+      "    " + envelope.replace(/\n/g, "\n    "), "> " + envelope.replace(/\n/g, "\n> "),
       "示例 <tool_call> 不会启动检索。" ]) {
       const text = source + "\n\n" + outcome;
       expect(presentUnexecutedTools(text,label)).toBe(text);

@@ -316,7 +316,7 @@ async def search_review_units(queries, search, *, generation, cache=None, valida
             result = {'evidence': [], 'generation': generation}
         if result['generation'] != generation:
             raise CoreDataError('rag_evidence_stale', '审阅检索期间资料已变化，请重新核对。')
-        if cache is not None and result['evidence']:
+        if cache is not None and result['evidence'] and not any(item.get('ranking_error_code') for item in result['evidence']):
             cache[(generation, query)] = result['evidence']
             if len(cache) > 64:
                 del cache[next(iter(cache))]

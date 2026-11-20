@@ -11,6 +11,7 @@ export function retrievalStage(task: ExecutionTaskSnapshot) {
   const role = details.model_role;
   const auxiliary = role === "embedding" || role === "reranker";
   const event = task.document_progress?.event;
+  if (current === "rerank_degraded" || current === "retrieval_cache_hit") return current;
   if (current === "retrieval_scope" || current === "rag_retrieval" || current === "retrieval") return "retrieval";
   if (current === "rag_embed" || current === "rag_rerank") return current;
   if (auxiliary && typeof current === "string") {

@@ -6913,7 +6913,14 @@ class ChatRunService:
                     raise CoreDataError('task_source_changed', '原件与已登记的筛选来源不一致，不能覆盖来源后再继续审阅。')
             selection_inventory.register(root['id'], selection_source, template['id'], template['sha256'],
                 all_fields, complete=True, fence=(activity.revision, activity.attempt))
+            reuse_environment = None
+            if evidence_participating and profile.id.startswith('managed:'):
+                reuse_environment = {key:identity[key] for key in (
+                    'project_generation', 'provider_id', 'model_id', 'reasoning_effort', 'sources', 'generation_config')}
+                reuse_environment.update(project_id=state['project_id'], managed_model={
+                    key:value for key,value in self.local_models.runtime_identity(profile.id).items() if key != 'session_id'})
             return await resolve_review_selection(self.repository, root['id'], template, request, all_fields,
+                reuse_environment=reuse_environment,
                 generate=selection_generate, fits=selection_fits, shared_contexts=review_source.table_contexts, fence=(activity.revision, activity.attempt),
                 model_identity={'provider_id': profile.id, 'model_id': run['model_id'],
                     'context_window': window, 'generation_config': identity['generation_config']}, target_ids=target_ids, scope_gaps=scope_gaps,
