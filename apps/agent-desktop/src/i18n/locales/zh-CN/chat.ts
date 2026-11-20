@@ -1,4 +1,5 @@
 const chat = {
+  fileMenu: { location: "打开文件所在位置", copy: "复制文件路径" },
   execution: {
     modelPhases: {"queued":"正在排队等待模型","preflight":"正在准备模型请求","waiting_first_output":"请求已发出，等待模型首次输出","generating":"模型正在生成"},
     phaseTime: "本阶段 {{seconds}} 秒",

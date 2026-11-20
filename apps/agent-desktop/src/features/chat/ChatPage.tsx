@@ -1,3 +1,5 @@
+import { ProjectDirectoryContext } from "./markdown/ProjectFileLink";
+import { isTimelineMessage } from "./timelineModel";
 import { createDocumentTextBuffer, type DocumentPublicText } from "./documentPublicText";
 import { useUpdateDraft } from "../updater/useUpdateDraft";
 import { useAppUpdate } from "../updater/AppUpdateProvider";
@@ -422,8 +424,8 @@ export function ChatPage() {
           expiresAt: String(event.data.expires_at ?? ""),
         });
       } else if (event.event_type === "run.tool_completed") {
-        const message = event.data.message as ChatMessage | undefined;
-        if (message) {
+        const message = event.data.message;
+        if (isTimelineMessage(message)) {
           setMessages((current) => current.some((item) => item.id === message.id)
             ? current : [...current, message]);
         }
@@ -1234,6 +1236,7 @@ export function ChatPage() {
     ?? (!preparingSubmission ? activeRun?.execution_task_id : undefined);
 
   return (
+    <ProjectDirectoryContext.Provider value={grant?.active && grant.project_id === conversation?.project_id ? grant.directory : null}>
     <div className="chat-page">
       {attachmentController.dragPhase !== "idle" ? (
         <div className={`chat-attachment-drop chat-attachment-drop--${attachmentController.dragPhase}`}
@@ -1521,5 +1524,6 @@ export function ChatPage() {
         </div>
       ) : null}
     </div>
+    </ProjectDirectoryContext.Provider>
   );
 }

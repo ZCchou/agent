@@ -1445,10 +1445,11 @@ label.top-select > svg:last-child {
 .chat-message > span { display: block; margin-bottom: 5px; color: var(--color-text-muted); font-size: 11px; font-weight: 600; }
 .chat-message__bubble { min-width: 0; border: 1px solid var(--color-border-soft); border-radius: 14px; padding: 12px 15px; background: var(--color-surface); line-height: 1.6; }
 .chat-message__bubble--plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-message--assistant { width: fit-content; max-width: 92%; }
+.chat-message--assistant { width: 100%; max-width: 100%; }
+.chat-message__bubble--assistant { border: 0; border-radius: 0; padding: 0; background: transparent; }
 .chat-message--user { margin-left: auto; }
 .chat-message--user > span { text-align: right; }
-.chat-message--user > .chat-message__bubble { border-color: transparent; background: var(--color-primary); color: white; }
+.chat-message--user > .chat-message__bubble { width: fit-content; margin-left: auto; border: 0; border-radius: 16px 16px 4px 16px; padding: 10px 16px; background: color-mix(in srgb, var(--color-surface) 95%, var(--color-text)); color: var(--color-text); }
 .chat-error { display: flex; align-items: center; justify-content: center; padding: 10px; font-size: 12px; }
 .chat-error button { display: inline-flex; align-items: center; gap: 5px; }
 .chat-capability-notice { width: min(560px, 100%); margin: 8px auto; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--color-warning) 35%, var(--color-border)); border-radius: 10px; background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface)); color: var(--color-text-secondary); font-size: 11px; line-height: 1.5; }

@@ -1,4 +1,5 @@
 const chat = {
+  fileMenu: { location: "Open file location", copy: "Copy file path" },
   execution: {
     modelPhases: {"queued":"Waiting for a model slot","preflight":"Preparing the model request","waiting_first_output":"Waiting for the model’s first output","generating":"Model is generating"},
     phaseTime: "Current phase {{seconds}} s",

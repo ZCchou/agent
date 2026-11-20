@@ -15,6 +15,16 @@ function changeSet(runId: string): ChangeSet {
 }
 
 describe("buildConversationTimeline", () => {
+  it("ignores bare tool status text while retaining the activity and answer", () => {
+    const status = "首次读取已完成。" as unknown as ChatMessage;
+    const answer = message("answer", "assistant", "审阅完成");
+    const event = message("operation", "system_event", JSON.stringify({
+      tool_name: "document.read", status: "completed", run_id: "run-1", output_bytes: 42,
+    }), "tool_operation");
+    const timeline = buildConversationTimeline([status, event, answer], [], []);
+    expect(timeline.map(item => item.kind)).toEqual(["activity", "message"]);
+    expect(timeline[1]).toMatchObject({ message: answer });
+  });
   it("groups typed public progress with its run before the final answer", () => {
     const progress = message("2", "system_event", JSON.stringify({ version: 1,
       run_id: "run-1", attempt_id: "attempt-1", round_no: 1, content: "Inspecting the project." }), "assistant_progress");

@@ -1,7 +1,8 @@
-import { ExternalLink, FileText, FolderOpen } from "lucide-react";
+import { ExternalLink, FolderOpen } from "lucide-react";
 import { type ComponentPropsWithoutRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { classifyLink, parseProjectDirectoryTarget, parseProjectFileTarget, parseRagEvidenceTarget, type ProjectDirectoryTarget, type ProjectFileTarget } from "./markdownPolicy";
+import { ProjectFileLink } from "./ProjectFileLink";
 import { RagEvidenceLink } from "./RagEvidenceLink";
 
 export function MarkdownLink({ href = "", children, onProjectFile, onProjectDirectory, verifiedEvidenceIds }: ComponentPropsWithoutRef<"a"> & {
@@ -18,8 +19,8 @@ export function MarkdownLink({ href = "", children, onProjectFile, onProjectDire
   }
   const projectTarget = parseProjectFileTarget(href);
   if (projectTarget && onProjectFile) {
-    return <button type="button" className="markdown-link markdown-link--project" title={projectTarget.path}
-      onClick={() => onProjectFile(projectTarget)}><span>{children}</span><FileText size={12} aria-hidden="true" /></button>;
+    return <ProjectFileLink path={projectTarget.path} open={() => onProjectFile(projectTarget)}
+      openDirectory={onProjectDirectory}>{children}</ProjectFileLink>;
   }
   if (classifyLink(href) !== "external") {
     return <span className="markdown-link--blocked">{children}</span>;
