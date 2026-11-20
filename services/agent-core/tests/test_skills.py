@@ -229,3 +229,45 @@ def test_existing_rag_marker_does_not_skip_new_document_skill(tmp_path):
     (tmp_path / 'builtin-rag-skill-v1.installed').write_text('1')
     install_builtin_skill(skills)
     assert skills.load('local-document-work')['enabled']
+
+
+
+@pytest.mark.parametrize('case', ['pristine', 'disabled', 'edited', 'removed', 'missing', 'external'])
+def test_builtin_review_skill_upgrade_respects_ownership(tmp_path, monkeypatch, case):
+    from hashlib import sha256
+    from agent.rag import bootstrap
+    from agent.skills import SkillRegistry
+
+    skills = SkillRegistry(tmp_path / 'skills.json')
+    bootstrap.install_builtin_skill(skills)
+    item = skills.inspect('grounded-document-review')
+    skill = Path(item['path']) / 'SKILL.md'
+    current = skill.read_bytes()
+    previous = current + b'\nOld official review instructions.\n'
+    skill.write_bytes(previous)
+    monkeypatch.setattr(bootstrap, '_GROUNDED_REVIEW_V1', {sha256(previous).hexdigest()})
+    if case == 'edited':
+        skill.write_bytes(previous + b'My edits')
+    if case == 'disabled':
+        skills.set_enabled(item['id'], False)
+    if case == 'missing':
+        skill.unlink()
+    if case in {'removed', 'external'}:
+        skills.remove(item['id'])
+    if case == 'external':
+        external = tmp_path / 'user-skill'
+        external.mkdir()
+        (external / 'SKILL.md').write_bytes(previous)
+        skills.add(str(external))
+    registry_before = skills.path.read_bytes()
+    before = skill.read_bytes() if skill.exists() else None
+    bootstrap.install_builtin_skill(skills)
+    bootstrap.install_builtin_skill(skills)
+    assert skills.path.read_bytes() == registry_before
+    if case in {'pristine', 'disabled'}:
+        assert skill.read_bytes() == current
+        assert skills.inspect('grounded-document-review')['enabled'] == (case == 'pristine')
+    else:
+        assert (skill.read_bytes() if skill.exists() else None) == before
+    if case == 'external':
+        assert (external / 'SKILL.md').read_bytes() == previous

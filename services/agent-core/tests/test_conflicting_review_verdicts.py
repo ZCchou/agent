@@ -40,3 +40,18 @@ def test_only_mapped_explicit_blocks_may_be_condensed_and_partial_unknown_output
     saved = section(raw,['p-1'])
     prepare_public_section(saved,{},0)
     assert saved['verdict_conflicts'] == ['p-1']
+
+
+def test_explicit_inline_revision_in_natural_final_batch_with_bare_target_headings():
+    raw = ('p-55\n\n**判断**：符合\n正文完整。\n\np-63\n\n**判断**：不符合\n'
+           '参数是否一致？原文记录了数值。无直接矛盾。修正判断：**判断**：符合\n\n理由：请核实适用条件。')
+    saved = section(raw,['p-55','p-63'])
+    prepare_public_section(saved,{},0)
+    assert saved['verdict_conflicts'] == ['p-63']
+    assert '正文完整。' in saved['presented_body'] and '修正判断' not in saved['presented_body']
+    assert saved['body'] == raw
+    for phrase in ('引文“结论。修正判断：判断：符合”。', '是否修正判断：判断：符合？',
+                   '如果参数正确，修正判断：判断：符合。', '普通内容。`修正判断：判断：符合`'):
+        sample = section('p-1\n**判断**：不符合\n' + phrase, ['p-1'])
+        prepare_public_section(sample,{},0)
+        assert sample['verdict_conflicts'] == []

@@ -15,8 +15,8 @@ function badge(value: string): Element {
 }
 
 // Only decorate a stated decision, never infer one from a recommendation or a quoted passage.
-export function reviewVerdicts(options: { labels?: Readonly<Record<string, string>>; scope: string }) {
-  const { labels, scope } = options;
+export function reviewVerdicts(options: { labels?: Readonly<Record<string, string>>; scope: string; committed: boolean }) {
+  const { labels, scope, committed } = options;
   const sourceIds = new Set<string>();
   function collectSources(tree: Root) {
     const children = tree.children;
@@ -62,7 +62,7 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
           node.children = [{ type: "text", value: label }];
         }
       }
-      if (node.tagName === "p") {
+      if (committed && node.tagName === "p") {
         const [label, next] = node.children;
         if (label?.type === "element" && label.tagName === "strong"
           && /^(判断|Verdict)[:：]?$/.test(plain(label.children).trim()) && next?.type === "text") {
@@ -71,7 +71,7 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
             { type: "text", value: next.value.slice(match[0].length) });
         }
       }
-      if (node.tagName === "table") {
+      if (committed && node.tagName === "table") {
         const sections = node.children.filter((child): child is Element => child.type === "element");
         const head = sections.find(child => child.tagName === "thead")?.children.find((child): child is Element => child.type === "element" && child.tagName === "tr");
         const column = head?.children.filter((child): child is Element => child.type === "element" && child.tagName === "th")
@@ -87,5 +87,5 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
     }
     for (const child of node.children) if (child.type === "element") visit(child);
   }
-  return (tree: Root) => { collectSources(tree); visit(tree); };
+  return (tree: Root) => { if (committed) collectSources(tree); visit(tree); };
 }

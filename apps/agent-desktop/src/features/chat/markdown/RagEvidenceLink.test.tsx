@@ -130,13 +130,23 @@ describe("chat evidence citations", () => {
 });
 it("decorates explicit document verdicts and approved numeric citations while preserving ordinary chat prose", () => {
  const report = "## p-7\n\n**判断**：无法判断。\n\n> **判断**：不符合\n\n|判断|原文|\n|--|--|\n|待补充|符合|";
- const content = renderToStaticMarkup(<MarkdownRenderer content={report} state="draft" documentReview targetLabels={{"p-7":"低温试验"}} />);
+ const preview = renderToStaticMarkup(<MarkdownRenderer content={report} state="draft" documentReview="preview" targetLabels={{"p-7":"低温试验"}} />);
+ expect(preview).toContain('title="p-7">低温试验');
+ expect(preview).toContain('无法判断');
+ expect(preview).toContain('待补充');
+ expect(preview).not.toContain('review-verdict');
+ const content = renderToStaticMarkup(<MarkdownRenderer content={report} state="draft" documentReview="committed" targetLabels={{"p-7":"低温试验"}} />);
  expect(content).toContain('title="p-7">低温试验');
  expect(content).toContain('review-verdict--unknown');
  expect(content).toContain('review-verdict--missing');
  expect(content).not.toContain('review-verdict--issue');
  expect(content).not.toContain('review-verdict--pass');
  expect(renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />)).not.toContain('review-verdict');
+ const persisted="# 文档审阅正文\n\n"+report;
+ for (const state of ["streaming", "draft"] as const) {
+   expect(renderToStaticMarkup(<MarkdownRenderer content={persisted} state={state} />)).not.toContain("review-verdict");
+ }
+ expect(renderToStaticMarkup(<MarkdownRenderer content={persisted} state="complete" />)).toContain("review-verdict--unknown");
  const id="rag-12345678-1234-1234-1234-123456789012";
  useApp.mockReturnValue({activeConversation:{project_id:"project-a"}});
  const cite=`原文[1](rag-evidence:${id})`;

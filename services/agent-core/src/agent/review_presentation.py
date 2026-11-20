@@ -143,6 +143,15 @@ _REVISED_DECISION = re.compile(r'^(?:(?:因此|所以|综上所述|综上|更正
     r'(?:(?P<subject>本项|该项|本段|p-\d+|t-\d+(?:-r\d+-c\d+-t\d+)*-r\d+-c\d+)\s*的?\s*)?'
     r'(?:最终)?(?:判断|判定|结论)\s*(?:应(?:该|当)?[为是]|更正为|改判为|修正为|调整为)\s*'
     + _VERDICT + r'[。.!！\s]*$')
+_EXPLICIT_REVISION = re.compile(r'^(?:修正|更正|改判后)(?:判断|判定|结论)\s*[：:]\s*'
+                                r'(?:(?:判断|判定|结论)\s*[：:]\s*)?' + _VERDICT + r'[。.!！\s]*$')
+_EN_VERDICTS = {'conforms':'符合', 'does not conform':'不符合', 'undetermined':'无法判断',
+                'compliant':'符合', 'non-compliant':'不符合',
+                'needs information':'待补充', 'unable to determine':'无法判断'}
+_EN_LABELS = '|'.join(map(re.escape, _EN_VERDICTS))
+_EN_DECISION = re.compile(r'^(?:(?:final|revised|corrected)\s+)?verdict:\s*'
+                          r'(' + _EN_LABELS + r')\.?$', re.I)
+_QUOTED_TEXT = re.compile(r'“[^”]*(?:”|$)|「[^」]*(?:」|$)|‘[^’]*(?:’|$)|"[^"]*(?:"|$)|`[^`]*(?:`|$)')
 
 
 def _verdict_lines(body, target):
@@ -151,7 +160,19 @@ def _verdict_lines(body, target):
         # These lines assert the writer's own verdict. Comparisons, conditions,
         # quoted passages, questions and examples are not adjudications.
         clean = line.strip().replace('**', '')
-        if clean.startswith(('>', '`', '“', '「', '如果', '若')) or re.search(r'[？?]', clean):
+        if clean.startswith(('>', '`', '“', '「', '例如', '示例')):
+            continue
+        # A correction may end a long paragraph that started as a question or cited source.
+        # Look only for an explicit, declarative correction in its own unquoted sentence.
+        for sentence in re.split(r'(?<=[。！？!?；;])', _QUOTED_TEXT.sub(' quoted ', clean)):
+            revision = _EXPLICIT_REVISION.fullmatch(sentence.strip())
+            if revision:
+                verdicts.add(revision[1])
+        if clean.startswith(('如果', '若')) or re.search(r'[？?]', clean):
+            continue
+        english = _EN_DECISION.fullmatch(clean)
+        if english:
+            verdicts.add(_EN_VERDICTS[english[1].lower()])
             continue
         match = _DECISION_LINE.match(clean)
         if match:
@@ -193,6 +214,37 @@ def _review_blocks(section):
             for i,(head,start,key) in enumerate(boundaries) if head in delivered.get(key, set())]
 
 
+_STANDALONE_VERDICT = re.compile(
+    r'^[ \t]{0,3}(?:\*\*(?:判断|判定|结论)\*\*|判断|判定|结论)[：:]\s*'
+    r'(?:\*\*)?(?:不符合|符合|待补充|无法判断)(?:\*\*)?[。.]?[ \t]*$'
+    r'|^[ \t]{0,3}(?:\*\*Verdict\*\*|Verdict):[ \t]*(?:\*\*)?'
+    r'(?:' + _EN_LABELS + r')(?:\*\*)?\.?[ \t]*$', re.I)
+
+
+def _lead_with_final_verdict(block):
+    original = block.splitlines(keepends=True)
+    while original and not original[-1].strip():
+        original.pop()
+    if len(original) < 2 or not _STANDALONE_VERDICT.fullmatch(original[-1].rstrip('\r\n')):
+        return block
+    decisions = []
+    fence = None
+    for index, line in enumerate(original):
+        if delimiter := re.match(r'^ {0,3}(`{3,}|~{3,})', line):
+            if not fence:
+                fence = delimiter[1]
+            elif delimiter[1].startswith(fence) and not line[delimiter.end():].strip():
+                fence = None
+        elif not fence and _STANDALONE_VERDICT.fullmatch(line.rstrip('\r\n')):
+            decisions.append(index)
+    if decisions != [len(original)-1]:
+        return block
+    evidence = ''.join(original[:-1]).strip('\r\n')
+    if not evidence.strip():
+        return block
+    return '\n' + original[-1].strip() + '\n\n' + evidence + '\n\n'
+
+
 def resolve_conflicting_verdicts(section):
     raw = section['body']
     replacements, conflicts = [], []
@@ -201,11 +253,18 @@ def resolve_conflicting_verdicts(section):
         # Preserve offsets but remove fenced samples before interpreting verdicts.
         checked = re.sub(r'(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^ {0,3}\1[ \t]*(?:\n|$)|\Z)', '', block)
         if len(_verdict_lines(checked, key)) < 2:
+            if section.get('review_layout') == 'default' and section.get('public_output_state') == 'present':
+                presented = _lead_with_final_verdict(block)
+                if presented != block:
+                    replacements.append((start, end, presented))
             continue
-        note = '\n**判断**：无法判断\n\n模型对同一位置给出了相互冲突的判断。请对照附件原文与适用条款复核。'
+        english = any(_EN_DECISION.fullmatch(line.strip().replace('**','')) for line in checked.splitlines())
+        note = ('\n**Verdict**: Undetermined\n\nThe model gave conflicting verdicts for this item. '
+                'Check the source text and the applicable requirement.' if english else
+                '\n**判断**：无法判断\n\n模型对同一位置给出了相互冲突的判断。请对照附件原文与适用条款复核。')
         handles = list(dict.fromkeys(m[0] for m in _MARKER.finditer(checked)))
         if handles:
-            note += '\n\n本项引用：' + ' '.join(handles)
+            note += ('\n\nReferences: ' if english else '\n\n本项引用：') + ' '.join(handles)
         replacements.append((start, end, note+'\n\n'))
         conflicts.append(key)
     for start, end, replacement in reversed(replacements):

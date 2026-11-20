@@ -12,7 +12,7 @@ export interface AssistantMessageBodyProps {
   content: string;
   state: AssistantMessageState;
   verifiedEvidenceIds?: readonly string[];
-  documentReview?: boolean;
+  documentReview?: "preview" | "committed";
   targetLabels?: Readonly<Record<string, string>>;
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;

@@ -3,7 +3,7 @@ import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { AssistantMessageState } from "./AssistantMessageBody";
+import type { AssistantMessageBodyProps, AssistantMessageState } from "./AssistantMessageBody";
 import { MarkdownCodeBlock } from "./MarkdownCodeBlock";
 import { MarkdownImage } from "./MarkdownImage";
 import { MarkdownLink } from "./MarkdownLink";
@@ -55,7 +55,7 @@ const rehypePlugins: Options["rehypePlugins"] = [[rehypeKatex, {
 
 export const MarkdownRenderer = memo(function MarkdownRenderer({ content, state, onProjectFile, onProjectDirectory, verifiedEvidenceIds, documentReview, targetLabels }: {
   content: string; state: AssistantMessageState;
-  documentReview?: boolean;
+  documentReview?: AssistantMessageBodyProps["documentReview"];
   targetLabels?: Readonly<Record<string, string>>;
   verifiedEvidenceIds?: readonly string[];
   onProjectFile?: (target: ProjectFileTarget) => void;
@@ -79,9 +79,11 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, state,
       <div className="markdown-table-scroll"><table {...props}>{children}</table></div>
     ),
   }), [scope, onProjectFile, onProjectDirectory, state, verifiedEvidenceIds]);
-  const review = documentReview || content.startsWith("# 文档审阅正文\n") || content.startsWith("# 文档审阅报告\n");
+  const savedReport = state === "complete" && (content.startsWith("# 文档审阅正文\n") || content.startsWith("# 文档审阅报告\n"));
+  const review = documentReview ?? (savedReport ? "committed" : undefined);
   const plugins = useMemo<Options["rehypePlugins"]>(() => review
-    ? [...rehypePlugins, [reviewVerdicts, { labels: targetLabels, scope }]] : rehypePlugins, [review, targetLabels, scope]);
+    ? [...rehypePlugins, [reviewVerdicts, { labels: targetLabels, scope, committed: review === "committed" }]] : rehypePlugins,
+    [review, targetLabels, scope]);
   return (
     <MarkdownErrorBoundary content={content}>
       <div className="markdown-body">
