@@ -1,5 +1,5 @@
 const chat = {
-  filePreview: { mode: "显示方式", rendered: "预览", source: "原文" },
+  filePreview: { mode: "显示方式", rendered: "预览", source: "原文", exportHtml: "导出网页", exportWord: "导出 Word", exportError: "导出失败，请重试。" },
   landing: {
     "lead": "把问题变成",
     "emphasis": "清晰答案",

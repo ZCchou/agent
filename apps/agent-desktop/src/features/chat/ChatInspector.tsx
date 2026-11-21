@@ -62,18 +62,78 @@ export function ChatInspector({ entry, onClose, retrying, onExpandedRetry, onRef
   </>;
 }
 
+type ExportPicker = (options: {
+  suggestedName: string; types: { description: string; accept: Record<string, string[]> }[];
+}) => Promise<{ createWritable(): Promise<{
+  write(blob: Blob): Promise<void>; close(): Promise<void>; abort(): Promise<void>;
+}> }>;
+
 function FilePreview({ name, content, startInSource = false, children }: {
   name: string; content: string | null; startInSource?: boolean; children: ReactNode;
 }) {
   const { t } = useTranslation("chat");
   const [source, setSource] = useState(startInSource);
+  const rendered = useRef<HTMLDivElement>(null);
+  const [formatInProgress, setFormatInProgress] = useState<"html" | "docx" | null>(null);
+  const [exportError, setExportError] = useState(false);
+
+  async function download(format: "html" | "docx") {
+    const body = rendered.current?.querySelector<HTMLElement>(".markdown-body");
+    if (formatInProgress) return;
+    if (!body) { setExportError(true); return; }
+    setExportError(false);
+    setFormatInProgress(format);
+    try {
+      const title = (name.split(/[\\/]/).pop() || name).replace(/\.(md|markdown)$/i, "");
+      const filename = title + "." + format;
+      const mime = format === "html" ? "text/html" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      const picker = (window as Window & { showSaveFilePicker?: ExportPicker }).showSaveFilePicker;
+      const handle = picker ? await picker.call(window, { suggestedName: filename,
+        types: [{ description: format === "html" ? "HTML" : "Word", accept: { [mime]: ["." + format] } }] }) : null;
+      const { exportMarkup, exportHtml } = await import("./markdown/exportHtml");
+      const markup = exportMarkup(body);
+      const blob = format === "html" ? exportHtml(markup, title)
+        : await (await import("./markdown/exportWord")).exportWord(markup, title);
+      if (handle) {
+        const stream = await handle.createWritable();
+        try {
+          await stream.write(blob);
+          await stream.close();
+        } catch (error) {
+          await stream.abort().catch(() => undefined);
+          throw error;
+        }
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.append(link);
+      try { link.click(); } finally {
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) setExportError(true);
+    } finally {
+      setFormatInProgress(null);
+    }
+  }
   if (content == null || !/\.(md|markdown)$/i.test(name)) return <>{children}</>;
   return <>
     <div className="file-preview-modes" role="group" aria-label={t("filePreview.mode")}>
       <button type="button" aria-pressed={!source} onClick={() => setSource(false)}>{t("filePreview.rendered")}</button>
       <button type="button" aria-pressed={source} onClick={() => setSource(true)}>{t("filePreview.source")}</button>
+      {!source && <>
+        <button className="file-preview-export" type="button" disabled={!!formatInProgress}
+          onClick={() => void download("html")}>{t("filePreview.exportHtml")}</button>
+        <button type="button" disabled={!!formatInProgress}
+          onClick={() => void download("docx")}>{t("filePreview.exportWord")}</button>
+      </>}
     </div>
-    {source ? children : <MarkdownRenderer state="complete" content={content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n")} />}
+    {exportError && <p role="alert">{t("filePreview.exportError")}</p>}
+    {source ? children : <div ref={rendered}><MarkdownRenderer state="complete" content={content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n")} /></div>}
   </>;
 }
 

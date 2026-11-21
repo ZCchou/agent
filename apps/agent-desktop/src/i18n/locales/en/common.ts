@@ -400,7 +400,7 @@ const common = {
         "unknown": "The update failed. Please retry."
       }
     },
-    interfaceStyle: { label: "Interface style", classic: "Classic", error: "Could not save the interface style." },
+    interfaceStyle: { label: "Interface style", classic: "Classic", gradient: "Gradient", error: "Could not save the interface style." },
     moreSettings: "More settings",
     webSearch: {
       title: "Web & Search", description: "Manage search services, privacy, defaults, and connection status.", open: "Open",

@@ -1,5 +1,5 @@
 const chat = {
-  filePreview: { mode: "Display mode", rendered: "Preview", source: "Source" },
+  filePreview: { mode: "Display mode", rendered: "Preview", source: "Source", exportHtml: "Export HTML", exportWord: "Export Word", exportError: "Export failed. Please try again." },
   landing: {
     "lead": "Turn questions into ",
     "emphasis": "clear answers",

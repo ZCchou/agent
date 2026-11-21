@@ -202,7 +202,7 @@ export function SettingsPage() {
               setStyleSaveError(true);
             }
           }}>
-            <option value="ragent">ragent</option>
+            <option value="ragent">{t("settings.interfaceStyle.gradient")}</option>
             <option value="classic">{t("settings.interfaceStyle.classic")}</option>
           </select>
         </label>
