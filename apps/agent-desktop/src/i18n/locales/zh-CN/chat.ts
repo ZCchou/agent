@@ -1,4 +1,5 @@
 const chat = {
+  filePreview: { mode: "显示方式", rendered: "预览", source: "原文" },
   landing: {
     "lead": "把问题变成",
     "emphasis": "清晰答案",

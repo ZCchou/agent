@@ -1,4 +1,5 @@
 const chat = {
+  filePreview: { mode: "Display mode", rendered: "Preview", source: "Source" },
   landing: {
     "lead": "Turn questions into ",
     "emphasis": "clear answers",

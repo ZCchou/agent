@@ -2121,3 +2121,7 @@ label.top-select > svg:last-child {
 .execution-wait-settings { display: grid; gap: 12px; margin: 12px 0; padding: 14px; border: 1px solid var(--border-subtle); border-radius: 10px; min-width: 0; }
 .execution-wait-settings label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .execution-wait-settings input[type="number"] { width: 110px; }
+
+.file-preview-modes { display: flex; gap: 4px; margin-bottom: 12px; }
+.file-preview-modes button { border: 0; border-radius: 6px; padding: 4px 10px; color: var(--color-text-secondary); background: transparent; cursor: pointer; }
+.file-preview-modes button[aria-pressed="true"] { color: var(--color-primary-hover); background: var(--color-primary-soft); }

@@ -1,8 +1,10 @@
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatInspectorEntry } from "../../contexts/ChatInspectorContext";
 import { ContextDetails } from "../context-inspector/ContextDetails";
+
+import { MarkdownRenderer } from "./markdown/MarkdownRenderer";
 
 interface Props {
   entry: ChatInspectorEntry;
@@ -45,13 +47,33 @@ export function ChatInspector({ entry, onClose, retrying, onExpandedRetry, onRef
           retrying={retrying} onExpandedRetry={onExpandedRetry} /> : null}
         {entry.view.kind === "project_file" ? entry.view.dataUrl
           ? <img className="chat-inspector__image" src={entry.view.dataUrl} alt={entry.view.title} />
-          : <ProjectFileContent content={entry.view.content ?? ""} lineStart={entry.view.lineStart} lineEnd={entry.view.lineEnd} /> : null}
+          : <FilePreview key={JSON.stringify([entry.view.path, entry.view.lineStart, entry.view.lineEnd])} name={entry.view.path}
+              content={entry.view.content} startInSource={entry.view.lineStart !== null}>
+              <ProjectFileContent content={entry.view.content ?? ""} lineStart={entry.view.lineStart} lineEnd={entry.view.lineEnd} />
+            </FilePreview> : null}
         {entry.view.kind === "attachment" ? entry.view.dataUrl
           ? <img className="chat-inspector__image" src={entry.view.dataUrl} alt={entry.view.title} />
-          : <AttachmentTextContent key={entry.view.attachmentId} attachmentId={entry.view.attachmentId}
-            content={entry.view.content} onReference={onReferenceAttachment} referenceDisabled={referenceDisabled} /> : null}
+          : <FilePreview key={entry.view.attachmentId} name={entry.view.title} content={entry.view.content}>
+              <AttachmentTextContent attachmentId={entry.view.attachmentId}
+                content={entry.view.content} onReference={onReferenceAttachment} referenceDisabled={referenceDisabled} />
+            </FilePreview> : null}
       </div>
     </aside>
+  </>;
+}
+
+function FilePreview({ name, content, startInSource = false, children }: {
+  name: string; content: string | null; startInSource?: boolean; children: ReactNode;
+}) {
+  const { t } = useTranslation("chat");
+  const [source, setSource] = useState(startInSource);
+  if (content == null || !/\.(md|markdown)$/i.test(name)) return <>{children}</>;
+  return <>
+    <div className="file-preview-modes" role="group" aria-label={t("filePreview.mode")}>
+      <button type="button" aria-pressed={!source} onClick={() => setSource(false)}>{t("filePreview.rendered")}</button>
+      <button type="button" aria-pressed={source} onClick={() => setSource(true)}>{t("filePreview.source")}</button>
+    </div>
+    {source ? children : <MarkdownRenderer state="complete" content={content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n")} />}
   </>;
 }
 
