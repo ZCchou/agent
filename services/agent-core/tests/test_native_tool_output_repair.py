@@ -34,7 +34,7 @@ def test_progress_malformed_call_recovers_after_completed_file_effect(tmp_path, 
     proposal = call_reply("write-once", "fs_propose_changes", json.dumps({"title": "Create engine",
         "mutations": [{"kind": "create_text", "path": "engine.txt", "content": "completed file"}]}))
     requests = install_http(monkeypatch, [(proposal, "tool_calls"), (malformed(kind), "tool_calls"),
-        (list_reply("corrected"), "tool_calls"), ({"content": "Verified complete."}, "stop")])
+        (list_reply("corrected"), "tool_calls"), ({"content": "Verified complete."}, "stop")], goal_checks=True)
 
     async def scenario():
         events, executed = [], []
@@ -67,13 +67,13 @@ def test_progress_malformed_call_recovers_after_completed_file_effect(tmp_path, 
         assert SECRET not in json.dumps(failed) + caplog.text
         assert PROGRESS not in caplog.text
         assert configuration()["api_key"] not in caplog.text
-        assert len(requests) == 4
+        assert len(requests) == 5
         corrected_messages = requests[2][1]["messages"]
         assert SECRET not in json.dumps(corrected_messages)
         assert any(message.get("role") == "tool" for message in corrected_messages)
         with repository._connect() as connection:
             audit = list(connection.execute("SELECT status,error_code FROM invocation_specs WHERE plan_id=? ORDER BY round_no", (run["execution_plan_id"],)))
-        assert [row[0] for row in audit] == ["completed", "failed", "completed", "completed"]
+        assert [row[0] for row in audit] == ["completed", "failed", "completed", "completed", "completed"]
     asyncio.run(scenario())
 
 
@@ -85,7 +85,7 @@ def test_correction_is_bounded_per_tool_round_and_whole_attempt(tmp_path, monkey
         if separated and index < 3:
             replies.append((list_reply(f"valid-{index}"), "tool_calls"))
     replies.append(({"content": "The invalid operation was not executed; prior results are retained."}, "stop"))
-    requests = install_http(monkeypatch, replies)
+    requests = install_http(monkeypatch, replies, goal_checks=True)
     async def scenario():
         async def sink(event):
             if event["event_type"] == "run.tool_requested":
@@ -98,13 +98,13 @@ def test_correction_is_bounded_per_tool_round_and_whole_attempt(tmp_path, monkey
         assert run["status"] == "completed"
         assert "model_tool_protocol_failed" in run["assistant_message"]["content"]
         assert not requests[-1][1].get("tools")
-        assert len(requests) == (8 if separated else 3)
+        assert len(requests) == (9 if separated else 3)
         assert len(service.list_tool_operations(run_id)) == (3 if separated else 0)
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["mixed", "length", "fatal"])
-def test_ambiguous_batch_incomplete_and_fatal_outputs_are_not_corrected(tmp_path, monkeypatch, failure):
+def test_atomic_batch_and_uncertified_outputs_obey_correction_boundary(tmp_path, monkeypatch, failure):
     reply = malformed()
     finish = "tool_calls"
     if failure == "mixed":
@@ -134,6 +134,10 @@ def test_ambiguous_batch_incomplete_and_fatal_outputs_are_not_corrected(tmp_path
         if failure == "fatal":
             assert run["status"] == "failed" and run["error_code"] == expected
             assert "系统执行说明" in run["draft"]["content"]
+        elif failure == "mixed":
+            assert run["status"] == "completed"
+            assert run["assistant_message"]["content"] == "The invalid operation was not executed."
+            assert requests[-1][1].get("tools"), "Certified zero-forward batch uses the existing correction path"
         else:
             assert run["status"] == "completed" and expected in run["assistant_message"]["content"]
             assert not requests[-1][1].get("tools")
@@ -192,8 +196,12 @@ def test_validation_diagnostic_logs_only_fixed_reason(monkeypatch, caplog, proto
     with pytest.raises(ProviderError) as error:
         asyncio.run(ModelInvocationService().complete_prepared(provider, spec, prepared))
     assert error.value.code == "model_tool_protocol_failed"
-    assert error.value.details == {"tool_validation_reason": "invalid_" + kind,
-        "native_tool_correction_eligible": True}
+    assert error.value.details['tool_validation_reason'] == 'invalid_' + kind
+    assert error.value.details['native_tool_correction_eligible'] is True
+    assert error.value.details['text_character_count'] == len(PROGRESS)
+    assert error.value.details['partial_text'] is True
+    assert set(error.value.details) <= {'tool_validation_reason', 'native_tool_correction_eligible',
+        'text_character_count', 'tool_argument_character_count', 'partial_text', 'finish_reason', 'native_tool_diagnostic'}
     diagnostic = json.dumps([record.__dict__ for record in caplog.records], default=str)
     assert "tool_validation_reason" in diagnostic and "invalid_" + kind in diagnostic
     assert SECRET not in diagnostic and PROGRESS not in diagnostic
@@ -205,7 +213,7 @@ def test_validation_diagnostic_logs_only_fixed_reason(monkeypatch, caplog, proto
     for case in ("invalid_first", "invalid_last", "multiple_invalid", "duplicate_identity", "missing_terminal", "unsuccessful_terminal")
 ] + [("openai_chat", "early_fragment")])
 @pytest.mark.parametrize("preface", [False, True])
-def test_uncertified_native_operations_are_not_executed_but_model_can_explain(tmp_path, monkeypatch, protocol, case, preface):
+def test_native_batch_certification_preserves_zero_execution_and_explanation(tmp_path, monkeypatch, protocol, case, preface):
     original = httpx.AsyncClient
     requests = []
     bad = malformed()["tool_calls"][0]
@@ -256,7 +264,19 @@ def test_uncertified_native_operations_are_not_executed_but_model_can_explain(tm
         run_id = await start(service, work)
         run = repository.get_model_run(run_id)
         assert run["status"] == "completed"
-        assert "model_tool_protocol_failed" in run["assistant_message"]["content"]
+        certified = protocol == "openai_chat" and case in {"invalid_first", "invalid_last", "multiple_invalid"}
+        if certified:
+            assert run["assistant_message"]["content"] == "The operation was not executed."
+            assert requests[-1].get("tools")
+        else:
+            assert "model_tool_protocol_failed" in run["assistant_message"]["content"]
+            assert not requests[-1].get("tools")
         assert len(requests) == 2 and not service.list_tool_operations(run_id)
-        assert not requests[-1].get("tools")
+        with repository._connect() as connection:
+            diagnostics = [json.loads(row[0]) for row in connection.execute(
+                'SELECT d.payload_json FROM invocation_diagnostics d JOIN invocation_specs i ON i.id=d.spec_id WHERE i.plan_id=? AND i.status=?',
+                (run['execution_plan_id'], 'failed'))]
+        if certified:
+            assert diagnostics[0]['native_tool_protocol']['certification_reason'] == 'certified_local_batch'
+            assert diagnostics[0]['native_tool_protocol']['runtime_blocked_reason'] == 'eligible'
     asyncio.run(scenario())

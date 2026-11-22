@@ -10,11 +10,18 @@ from pathlib import Path
 from agent.storage import CoreDataError
 from .paths import checked_path
 
-# ggml type -> (elements per block, encoded bytes per block).
+# GGML type -> (elements per block, encoded bytes per block), from llama.cpp
+# cd959bae99ff4bed22bef2604f45241c09bbb8c8 ggml.h, ggml.c and ggml-common.h.
+# Removed/repacked-only type IDs deliberately have no on-disk representation.
 _TYPES = {0: (1, 4), 1: (1, 2), 2: (32, 18), 3: (32, 20),
-          6: (32, 22), 7: (32, 24), 8: (32, 34), 9: (32, 40),
+          6: (32, 22), 7: (32, 24), 8: (32, 34), 9: (32, 36),
           10: (256, 84), 11: (256, 110), 12: (256, 144),
-          13: (256, 176), 14: (256, 210), 15: (256, 292), 30: (1, 2)}
+          13: (256, 176), 14: (256, 210), 15: (256, 292),
+          16: (256, 66), 17: (256, 74), 18: (256, 98), 19: (256, 50),
+          20: (32, 18), 21: (256, 110), 22: (256, 82), 23: (256, 136),
+          24: (1, 1), 25: (1, 2), 26: (1, 4), 27: (1, 8), 28: (1, 8),
+          29: (256, 56), 30: (1, 2), 34: (256, 54), 35: (256, 66),
+          39: (32, 17), 40: (64, 36), 41: (128, 18), 42: (64, 18), 43: (1, 1)}
 _SCALARS = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i",
             6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
 _QUANTIZATIONS = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0",
@@ -77,6 +84,10 @@ class _Reader:
             self.elements += count
             if subtype == 9 or subtype not in {*_SCALARS, 8} or self.elements > 2_000_000:
                 raise ValueError("Invalid or oversized GGUF metadata array.")
+            if retain:
+                if count > 65536:
+                    raise ValueError("GGUF layer metadata array exceeds its size limit.")
+                return [self.value(subtype, retain=False) for _ in range(count)]
             # Token vocabularies can be large. Validate each entry without keeping it.
             for _ in range(count):
                 self.value(subtype, retain=False)
@@ -101,10 +112,12 @@ def _read_shard(path, *, budget, cancel):
             if not key or key in keys:
                 raise ValueError("Duplicate or empty GGUF metadata key.")
             keys.add(key)
-            value = reader.value(reader.number("I"))
+            value = reader.value(reader.number("I"), retain=key.endswith(".attention.recurrent_layers"))
             if key.startswith(("general.", "split.")) or key.endswith((".context_length", ".chat_template",
                     ".block_count", ".embedding_length", ".attention.head_count", ".attention.head_count_kv",
-                    ".attention.key_length", ".attention.value_length")):
+                    ".attention.key_length", ".attention.value_length", ".attention.recurrent_layers",
+                    ".full_attention_interval", ".ssm.conv_kernel", ".ssm.inner_size",
+                    ".ssm.state_size", ".ssm.group_count", ".nextn_predict_layers")):
                 metadata[key] = value
         if metadata.get("split.count", 1) != 1:
             total = metadata.get("split.tensors.count")
@@ -137,6 +150,58 @@ def _read_shard(path, *, budget, cancel):
                 raise ValueError("GGUF tensor overlaps or exceeds the file boundary.")
             previous = end
     return metadata, names, size
+
+
+def _memory_estimate(metadata, architecture):
+    """Default FP16 attention KV and FP32 recurrent state for one server slot."""
+    prefix = architecture + "."
+    layers = metadata.get(prefix + "block_count")
+    full_layers = layers if type(layers) is int and 1 <= layers <= 65536 else None
+    recurrent_layers, recurrent_bytes = 0, 0
+    if architecture == "qwen35":
+        mtp_layers = metadata.get(prefix + "nextn_predict_layers", 0)
+        if type(mtp_layers) is not int or mtp_layers < 0 or (full_layers is not None and mtp_layers > layers):
+            raise ValueError("Invalid GGUF next-token prediction layer count.")
+        trunk_layers = layers - mtp_layers if full_layers is not None else None
+        layout = metadata.get(prefix + "attention.recurrent_layers")
+        interval = metadata.get(prefix + "full_attention_interval", 4)
+        if layout is None:
+            if type(interval) is not int or not 1 <= interval <= 65536:
+                raise ValueError("Invalid GGUF full attention interval.")
+            full_layers = trunk_layers // interval if trunk_layers is not None else None
+        elif full_layers is not None:
+            layout = layout if isinstance(layout, list) else [layout] * full_layers
+            if len(layout) != full_layers or any(type(value) not in (bool, int) or value not in (0, 1) for value in layout):
+                raise ValueError("Invalid GGUF recurrent layer layout.")
+            full_layers = trunk_layers - sum(layout[:trunk_layers])
+        recurrent_layers = trunk_layers - full_layers if full_layers is not None else None
+        recurrent_bytes = None
+        conv, inner, state, groups = (metadata.get(prefix + "ssm." + name)
+                                     for name in ("conv_kernel", "inner_size", "state_size", "group_count"))
+        if recurrent_layers == 0:
+            recurrent_bytes = 0
+        elif recurrent_layers is not None and all(type(value) is int and 1 <= value <= 65536
+                                                  for value in (conv, inner, state, groups)):
+            # llama-hparams.cpp n_embd_r()/n_embd_s(), llama-model.cpp F32
+            # hybrid cache, --parallel 1 and default n_rs_seq=0.
+            recurrent_bytes = 4 * recurrent_layers * ((conv - 1) * (inner + 2 * groups * state) + state * inner)
+    embedding = metadata.get(prefix + "embedding_length")
+    heads = metadata.get(prefix + "attention.head_count")
+    kv_heads = metadata.get(prefix + "attention.head_count_kv", heads)
+    kv_bytes = None
+    if full_layers == 0:
+        kv_bytes = 0
+    elif full_layers is not None and all(type(value) is int and 1 <= value <= 65536
+                                         for value in (embedding, heads, kv_heads)):
+        key = metadata.get(prefix + "attention.key_length", embedding // heads)
+        value = metadata.get(prefix + "attention.value_length", embedding // heads)
+        if all(type(length) is int and 1 <= length <= 65536 for length in (key, value)):
+            kv_bytes = 2 * full_layers * kv_heads * (key + value)
+    unknowns = [name for name, value in (("kv_bytes_per_token", kv_bytes),
+                ("recurrent_state_bytes", recurrent_bytes)) if value is None]
+    return {"kv_bytes_per_token": kv_bytes, "recurrent_state_bytes": recurrent_bytes,
+            "full_attention_layers": full_layers, "recurrent_layers": recurrent_layers,
+            "memory_estimate_unknowns": unknowns}
 
 
 def inspect_gguf(path: Path | str, *, cancel=lambda: None) -> dict:
@@ -175,8 +240,8 @@ def inspect_gguf(path: Path | str, *, cancel=lambda: None) -> dict:
         elif metadata.get("split.no", 0) != 0:
             raise ValueError("Invalid single GGUF split index.")
         architecture = metadata.get("general.architecture")
-        if architecture not in {"qwen2", "qwen3"}:
-            raise CoreDataError("unsupported_architecture", "Supported text architectures are qwen2 and qwen3.")
+        if architecture not in {"qwen2", "qwen3", "qwen35"}:
+            raise CoreDataError("unsupported_architecture", "Supported text architectures are qwen2, qwen3 and qwen35.")
         template = metadata.get("tokenizer.chat_template")
         if not isinstance(template, str) or not template.strip():
             raise CoreDataError("unsupported_template", "The GGUF must contain its actual chat template.")
@@ -187,22 +252,12 @@ def inspect_gguf(path: Path | str, *, cancel=lambda: None) -> dict:
         quantization = metadata.get("general.file_type")
         if quantization not in _QUANTIZATIONS:
             raise ValueError("Unsupported GGUF quantization profile.")
-        layers = metadata.get(f"{architecture}.block_count")
-        embedding = metadata.get(f"{architecture}.embedding_length")
-        heads = metadata.get(f"{architecture}.attention.head_count")
-        kv_heads = metadata.get(f"{architecture}.attention.head_count_kv", heads)
-        kv_bytes = None
-        if all(type(value) is int and 1 <= value <= 65536 for value in (layers, embedding, heads, kv_heads)):
-            key_length = metadata.get(f"{architecture}.attention.key_length", embedding // heads)
-            value_length = metadata.get(f"{architecture}.attention.value_length", embedding // heads)
-            if all(type(value) is int and 1 <= value <= 65536 for value in (key_length, value_length)):
-                kv_bytes = 2 * layers * kv_heads * (key_length + value_length)
         return {"name": metadata.get("general.name") or path.stem, "architecture": architecture,
                 "format": "gguf", "role": "generation", "quantization": _QUANTIZATIONS[quantization],
                 "context_length": context, "declared_context_length": declared_context, "chat_template": template,
                 "template_digest": hashlib.sha256(template.encode("utf-8")).hexdigest(),
                 "size_bytes": size, "tensor_count": len(names), "files": [str(item) for item in files],
-                "kv_bytes_per_token": kv_bytes}
+                **_memory_estimate(metadata, architecture)}
     except CoreDataError:
         raise
     except (OSError, ValueError, OverflowError, struct.error) as exc:

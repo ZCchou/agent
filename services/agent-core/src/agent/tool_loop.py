@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
 
+from agent.providers import ProviderError
 from agent.storage import CoreDataError
 from agent.tool_contracts import ToolCall, canonical_arguments, search_completeness
 from agent.tool_repository import ACTIVE_TOOL_STATES, ToolRepository
@@ -30,6 +31,11 @@ class ToolLoopService:
     MAX_WEB_SEARCHES = 3
     MAX_WEB_OPENS = 8
     MAX_WEB_RESULT_CHARACTERS = 120_000
+
+    @property
+    def uses_builtin_read_segments(self):
+        # Custom project/model budgets are authority limits, not continuation boundaries.
+        return self.MAX_ROUNDS == 256 and self.MAX_READ_OPERATIONS == 200
 
     def __init__(self, repository: ToolRepository, event_sink: EventSink) -> None:
         self.repository = repository
@@ -77,8 +83,17 @@ class ToolLoopService:
                             executor_task.cancel()
                     waiter.add_done_callback(cancel_executor)
                     output = await executor_task
+                except asyncio.CancelledError:
+                    if call.name == 'document.review_targets' and self.repository.get(operation["id"])["status"] == 'executing':
+                        self.repository.transition(operation["id"], {'executing'}, 'interrupted',
+                                                   error_code='tool_execution_interrupted')
+                    raise
                 except CoreDataError as error:
-                    self.resolve(operation["id"], success=False, output=error.message, error_code=error.code)
+                    output = json.dumps({'status': 'error', 'code': error.code,
+                        'message': error.message, 'details': error.details}, ensure_ascii=False) if error.details else error.message
+                    self.resolve(operation["id"], success=False, output=output, error_code=error.code)
+                except ProviderError as error:
+                    self.resolve(operation["id"], success=False, output="模型调用未完成。错误码：" + error.code, error_code=error.code)
                 except Exception:
                     code = "document_operation_failed" if call.name.startswith('document.') else "rag_operation_failed" if async_executor else "skill_unavailable"
                     self.resolve(operation["id"], success=False, output="Local operation failed. Check its state before retrying.", error_code=code)
@@ -143,6 +158,7 @@ class ToolLoopService:
         completed = self.repository.transition(
             operation_id, {operation["status"]}, target,
             result_summary=summary, result_hash=sha256(encoded).hexdigest(), error_code=error_code,
+            result_body=output,
         )
         waiter.set_result(ToolResolution(success, output, error_code))
         return completed
@@ -188,6 +204,9 @@ class ToolLoopService:
         operations = self.repository.list_for_run(run_id)
         charged_ids = {attempt_id, *budget_attempt_ids}
         current = [item for item in operations if item["attempt_id"] in charged_ids]
+        with self.repository._connect() as db:
+            segment = db.execute('SELECT call_offset,read_offset FROM run_tool_segments WHERE run_id=? AND attempt_id=?', (run_id, attempt_id)).fetchone()
+        call_offset, read_offset = (segment['call_offset'], segment['read_offset']) if segment else (0, 0)
         mutations = sum(
             len(item["arguments"].get("mutations", [])) for item in operations
             if item["tool_name"] == "fs.propose_changes" and item["status"] != "rejected"
@@ -197,14 +216,29 @@ class ToolLoopService:
             return {"limit": limit, "used": used, "remaining": max(0, limit-used), "scope": scope}
         mutations += sum(item["tool_name"] in {"skills.save", "document.fill_template", "document.export"} for item in operations if item["status"] != "rejected")
         return {
-            "calls": quota(self.MAX_ROUNDS, len(current), "attempt"),
-            "reads": quota(self.MAX_READ_OPERATIONS, sum(item["tool_name"] in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment"} for item in current), "attempt"),
+            "calls": quota(self.MAX_ROUNDS, max(0, len(current)-call_offset), "segment" if segment else "attempt"),
+            "reads": quota(self.MAX_READ_OPERATIONS, max(0, sum(item["tool_name"] in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment", "tools.read_result", "tools.search_result"} for item in current)-read_offset), "segment" if segment else "attempt"),
             "mutations": quota(self.MAX_FILE_MUTATIONS, mutations, "run"),
             "web_searches": quota(self.MAX_WEB_SEARCHES, sum(item["tool_name"] == "web.search" for item in operations), "run"),
             "web_opens": quota(self.MAX_WEB_OPENS, sum(item["tool_name"] == "web.open" for item in operations), "run"),
             "web_characters": quota(self.MAX_WEB_RESULT_CHARACTERS, self.web_result_characters.get(run_id, 0), "run"),
             "max_result_bytes": self.MAX_RESULT_BYTES,
         }
+
+    def advance_read_segment(self, run_id, attempt_id, *, budget_attempt_ids=()):
+        """Runtime calls only after verified read progress; mutation audit never resets."""
+        ids = {attempt_id, *budget_attempt_ids}
+        operations = [o for o in self.repository.list_for_run(run_id) if o['attempt_id'] in ids]
+        if not operations or any(o['status'] in ACTIVE_TOOL_STATES for o in operations):
+            raise CoreDataError('tool_segment_incomplete', '工具操作尚未结束，不能推进处理阶段。')
+        readonly = {'fs.list', 'fs.read', 'fs.search', 'skills.load', 'skills.read_resource', 'rag.search', 'rag.read',
+                    'document.inspect_template', 'document.read_attachment', 'tools.read_result', 'tools.search_result'}
+        if operations[-1]['status'] != 'completed' or operations[-1]['tool_name'] not in readonly:
+            raise CoreDataError('tool_segment_no_progress', '尚无已完成的读取步骤，不能推进处理阶段。')
+        with self.repository._connect() as db:
+            db.execute('''INSERT INTO run_tool_segments VALUES (?,?,?,?) ON CONFLICT(run_id,attempt_id)
+                DO UPDATE SET call_offset=excluded.call_offset,read_offset=excluded.read_offset''',
+                (run_id, attempt_id, len(operations), sum(o['tool_name'] in readonly for o in operations)))
 
     def _enforce_limits(
         self, run_id: str, attempt_id: str, call: ToolCall,
@@ -217,7 +251,7 @@ class ToolLoopService:
                 f"This attempt reached its {self.MAX_ROUNDS}-call tool limit. Retry starts a new allowance.",
                 {key: budget["calls"][key] for key in ("limit", "used", "scope")},
             )
-        if call.name in {"fs.list", "fs.search", "fs.read", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment"} and not budget["reads"]["remaining"]:
+        if call.name in {"fs.list", "fs.search", "fs.read", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment", "tools.read_result", "tools.search_result"} and not budget["reads"]["remaining"]:
             raise CoreDataError(
                 "tool_read_limit_exceeded",
                 f"This attempt reached its {self.MAX_READ_OPERATIONS}-operation read/search limit.",

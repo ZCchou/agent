@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -9,6 +10,8 @@ from agent.execution.domain import InvocationSpec
 from agent.provider_tool_adapter import structured_messages
 from agent.providers import GenerationOptions
 from agent.storage import CoreDataError
+from agent.message_assembly import validate_system_message_prefix
+from agent.infrastructure.logging import log_event
 from agent.tool_contracts import TOOL_CONTRACT_VERSION, ToolContractRegistry
 
 
@@ -127,7 +130,7 @@ class PreparedRequest:
     tool_schema_hash: str
     options: GenerationOptions
     request_fingerprint: str
-    input_budget: dict[str, int] | None = None
+    input_budget: dict[str, Any] | None = None
 
 
 class InvocationCompiler:
@@ -135,7 +138,7 @@ class InvocationCompiler:
 
     def compile_model(
         self, spec: InvocationSpec, messages: list[dict[str, Any]],
-        *, context_window: int | None = None,
+        *, context_window: int | None = None, measured_input_tokens: int | None = None,
     ) -> PreparedRequest:
         if spec.kind != "model" or not spec.model_id:
             raise CoreDataError("invocation_spec_invalid", "A model invocation requires a model.")
@@ -198,6 +201,14 @@ class InvocationCompiler:
             structured_messages(messages, set(spec.allowed_tool_names))
             if spec.tool_transport == "structured_json" else messages
         )
+        try:
+            validate_system_message_prefix(compiled_messages)
+        except CoreDataError as error:
+            log_event(logging.getLogger('agent.core'), logging.WARNING, 'model_request_rejected',
+                'Model request message order is invalid', spec_id=spec.spec_id,
+                plan_id=spec.plan_id, step_id=spec.step_id, model_id=spec.model_id,
+                error_code=error.code, **error.details)
+            raise
         options = GenerationOptions(
             purpose=spec.endpoint_role,
             max_output_tokens=spec.max_output_tokens,
@@ -218,9 +229,12 @@ class InvocationCompiler:
             envelope = {'model': spec.model_id, 'messages': compiled_messages,
                         'response_schema': options.response_schema,
                         'tools': ToolContractRegistry.definitions(spec.allowed_tool_names) if has_function_tools else []}
-            request_tokens = estimate_tokens(envelope)
+            if measured_input_tokens is not None and (type(measured_input_tokens) is not int or measured_input_tokens < 0):
+                raise CoreDataError('invocation_payload_invalid', 'The measured input token count is invalid.')
+            request_tokens = measured_input_tokens + 64 if measured_input_tokens is not None else estimate_tokens(envelope)
             message_tokens = estimate_tokens(compiled_messages)
             input_budget = {'context_window': window, 'output_reserve': reserve, 'input_hard_limit': input_limit,
+                            'measurement': 'engine_template_tokenizer' if measured_input_tokens is not None else 'estimated',
                             'request_tokens': request_tokens, 'message_tokens': message_tokens,
                             'input_overhead_tokens': max(0, request_tokens - estimate_tokens(messages)),
                             'remaining_input_tokens': input_limit - request_tokens}

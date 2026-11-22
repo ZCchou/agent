@@ -29,12 +29,14 @@ def primary_memory_preflight(inspection, context_length, memory=None):
     memory = system_memory() if memory is None else memory
     per_token = inspection.get("kv_bytes_per_token")
     kv = per_token * context_length if per_token is not None else None
+    recurrent = inspection.get('recurrent_state_bytes', 0 if inspection.get('architecture') != 'qwen35' else None)
     workspace = 1024**3
-    commit_required = kv + workspace if kv is not None else None
+    commit_required = kv + recurrent + workspace if kv is not None and recurrent is not None else None
     if commit_required is not None and memory.get("available_commit_bytes", commit_required) < commit_required:
         raise CoreDataError("insufficient_ram", "主模型 KV 缓存和工作区所需提交内存不足。请减小上下文长度或释放内存。")
-    resident = inspection["size_bytes"] + kv + workspace if kv is not None else None
+    resident = inspection["size_bytes"] + commit_required if commit_required is not None else None
     return {"weights_bytes": inspection["size_bytes"], "kv_cache_bytes": kv,
+            'recurrent_state_bytes': recurrent, 'memory_estimate_unknowns': inspection.get('memory_estimate_unknowns', []),
             "workspace_estimate_bytes": workspace, "resident_estimate_bytes": resident,
             "physical_memory_pressure": resident is not None and memory.get("available_physical_bytes", resident) < resident,
             **memory}

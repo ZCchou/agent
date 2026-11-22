@@ -11,9 +11,11 @@ import {
 } from "./i18n";
 
 
+import { initializeInterfaceStyle } from "./features/settings/interfaceStyle";
 import "./styles/tokens.css";
 import "./styles/global.css";
 import "./styles/components.css";
+import "./styles/ragent.css";
 import "katex/dist/katex.min.css";
 
 
@@ -22,6 +24,7 @@ async function bootstrap() {
    * 在 React 首次渲染以前完成语言解析，
    * 避免启动时先闪一下英文再切换中文。
    */
+  initializeInterfaceStyle();
   await initializeI18n();
 
 

@@ -312,7 +312,8 @@ def test_diagnostic_error_preserves_original_operation_until_cancel(foundation):
             await asyncio.sleep(0)
         assert drained == []
         current = monitor.get_task(root['id'])
-        assert current['status'] == 'running'
+        assert current['status'] == 'waiting_recovery'
+        assert current['can_continue'] is True
         assert current['current_stage']['details']['wait_reason'] == 'execution_diagnostic_unavailable'
         monitor.control(root['id'], 'cancel', revision=current['revision'], idempotency_key='cancel')
         with pytest.raises(asyncio.CancelledError):

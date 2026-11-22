@@ -38,6 +38,11 @@ test("a failure event preserves its explanation when run refresh fails", async (
   await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible();
   await page.evaluate(() => window.__emitFailure("run.response_recovering", { error_code: "internal_error" }));
   await expect(page.locator(".chat-run-message__status")).toContainText("explaining the execution issue");
+  await page.evaluate(() => window.__emitFailure("run.response_recovering", {
+    error_code: "document_template_changed", message: "The template changed while processing.", explanation: true,
+  }));
+  await expect(page.locator(".chat-error")).toContainText(/template/i);
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible();
   await page.evaluate(() => window.__emitFailure("run.failed", {
     error_code: "internal_error", message: "The execution encountered an error.",
     fallback_content: "Partial model output.\n\nSystem execution explanation: the internal tool failed; completion is unverified.",
@@ -96,6 +101,35 @@ function run(conversationId, status, draft = null) {
     draft: draft ? { content: draft, updated_at: "2026-09-16T00:00:00+00:00" } : null,
     assistant_message: null,
   };
+}
+
+for (const targetStatus of [null, "completed"]) {
+  test(`switching from a failed chat clears the error for a ${targetStatus ?? "never-run"} chat`, async ({ page }) => {
+    const now = "2026-11-17T00:00:00Z";
+    const failedChat = conversation(now);
+    const cleanChat = { ...conversation(now), id: "clean-report", title: "Saved chapter report" };
+    const failedRun = { ...run(failedChat.id, "failed", "Preserved failure explanation"),
+      error_code: "task_goal_invalid", error_message: "The requested scope could not be resolved." };
+    const cleanRun = targetStatus ? run(cleanChat.id, targetStatus) : null;
+    await installTauriMock(page, { list_conversations: [failedChat, cleanChat] });
+    await page.addInitScript(({ failedChat, cleanChat, failedRun, cleanRun }) => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+        const clean = args?.conversationId === cleanChat.id;
+        if (command === "get_conversation") return clean ? cleanChat : failedChat;
+        if (command === "get_conversation_model_run") return { run: clean ? cleanRun : failedRun };
+        return invoke(command, args);
+      };
+    }, { failedChat, cleanChat, failedRun, cleanRun });
+    await page.goto("http://127.0.0.1:5173");
+    await page.getByRole("button", { name: failedChat.title, exact: true }).click();
+    await expect(page.locator(".chat-error")).toBeVisible();
+    await page.getByRole("button", { name: cleanChat.title, exact: true }).click();
+    await expect(page.locator(".chat-message--draft")).toHaveCount(0);
+    await expect(page.locator(".chat-error")).toHaveCount(0);
+    await page.getByRole("button", { name: failedChat.title, exact: true }).click();
+    await expect(page.locator(".chat-error")).toBeVisible();
+  });
 }
 
 test("an empty generating run uses the compact thinking status instead of markdown", async ({ page }) => {

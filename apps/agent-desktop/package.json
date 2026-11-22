@@ -1,7 +1,7 @@
 {
   "name": "agent-desktop",
   "private": true,
-  "version": "0.17.0-preview.1",
+  "version": "0.17.0-preview.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,6 +22,7 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-shell": "^2.3.6",
+    "docx": "^9.16.0",
     "dompurify": "^3.4.17",
     "i18next": "^26.4.2",
     "katex": "^0.18.7",
@@ -43,6 +44,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.2",
+    "fflate": "^0.8.3",
     "typescript": "~6.0.3",
     "vite": "^8.3.5",
     "vitest": "^5.0.5"

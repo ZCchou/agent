@@ -357,7 +357,7 @@ def test_core_migrates_rag_and_management_protocol(tmp_path):
     async def scenario():
         repository = CoreRepository(tmp_path / "agent.db")
         with repository._connect() as connection:
-            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 33
+            assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 37
         async def sink(event):
             pass
         service = ChatRunService(repository, sink)
@@ -501,3 +501,71 @@ def test_parent_read_context_is_admitted_only_after_hash_validation(valid_hash):
     with pytest.raises(CoreDataError) as error:
         g.finalize('run-1', selected)
     assert error.value.code == 'rag_quote_invalid'
+
+
+
+def test_tool_search_cannot_replace_explicit_original_clause():
+    from agent.rag.grounding import RagGrounding
+    from agent.storage import CoreDataError
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    query = '请查DO-160F第8.2.1.3条'
+    svc = SimpleNamespace(assert_generation=lambda *args: None, search=AsyncMock(return_value={'evidence': []}))
+    grounding = RagGrounding(svc)
+    grounding.runs['run'] = {'query': query, 'project_id': 'project', 'generation': 1,
+                             'budget': 8000, 'used_tokens': 0}
+    with pytest.raises(CoreDataError):
+        asyncio.run(grounding.execute('run', 'rag.search', {'query': '请查DO-160E第7.3.3条'}, 2000))
+    assert svc.search.await_args.args[:2] == ('project', query)
+
+
+
+def test_exact_clause_can_close_without_exposing_repeat_tools():
+    import hashlib
+    from types import SimpleNamespace
+    from agent.rag.grounding import RagGrounding
+
+    text = 'Exact source text.'
+    parent = 'Verified parent text.'
+    service = SimpleNamespace(assert_generation=lambda *args: None)
+    service.read_evidence = lambda *args, **kwargs: {
+        'parent_context': {'text': parent, 'text_hash': hashlib.sha256(parent.encode()).hexdigest(),
+                           'has_more': False}}
+    grounding = RagGrounding(service)
+    grounding.runs['run'] = {'query': 'DO-160F clause 8.2.1.3', 'project_id': 'project', 'generation': 1,
+                            'budget': 6000, 'used_tokens': 0, 'admitted': {'id': text}, 'quote_options': {},
+                            'evidence': {'id': {'id': 'id', 'text': text, 'clause_number': '8.2.1.3',
+                                                'locator': {'context_required': True}}}}
+    messages = grounding.prepare_exact_clause_answer('run')
+    assert parent in messages[0]['content']
+    assert parent in grounding.runs['run']['admitted']['id']
+    service.read_evidence = lambda *args, **kwargs: {
+        'parent_context': {'text': parent, 'text_hash': hashlib.sha256(parent.encode()).hexdigest(),
+                           'has_more': True}}
+    assert grounding.prepare_exact_clause_answer('run') is None
+
+
+
+def test_public_rag_numbers_only_verified_sources_and_retains_text():
+    g = grounding()
+    prepare(g)
+    state = g.runs['run-1']
+    first = 'rag-aaaaaaaa-1111-4444-8888-111111111111'
+    second = 'rag-bbbbbbbb-2222-4444-8888-222222222222'
+    state['admitted'] = {first, second}
+    state['evidence'] = {key: evidence() for key in (first, second)}
+    state['quote_options'] = {key: {'q-one': 'actual quote'} for key in (first, second)}
+    text, verified = g.public_answer('run-1',
+        f'已知 [{second}|q-one]。待核 [unknown|q-one]。补充 [rag-aaaaaaaa|q-one]。'
+        f'再次引用 [{second}|q-one]。模型自建 [虚构](rag-evidence:{second})。')
+    assert text == (f'已知 [1](rag-evidence:{second})。待核 〔引文未核验〕。补充 [2](rag-evidence:{first})。'
+                    f'再次引用 [1](rag-evidence:{second})。模型自建 虚构〔引文未核验〕。')
+    assert verified == {first, second}
+    state['admitted'].add(first.replace('1111', 'ffff'))
+    assert g.public_answer('run-1', '文字 [rag-aaaaaaaa|q-one]') == ('文字 〔引文未核验〕', set())
+    payload = {'response': {'claims': [{'text': 'Fact', 'evidence': [{'id': second, 'quote': 'actual quote'}]},
+                                       {'text': 'More', 'evidence_gap': 'Missing data'}]}}
+    assert g.public_answer('run-1', json.dumps(payload)) == (
+        f'Fact [1](rag-evidence:{second})\n\nMore\n\nMissing data', {second})
+    assert g.public_answer('run-1', '可直接展示的回答') == ('可直接展示的回答', set())

@@ -87,7 +87,7 @@ class ToolRepository:
     def transition(
         self, operation_id: str, expected: set[str], status: str, *,
         result_summary: str | None = None, result_hash: str | None = None,
-        error_code: str | None = None,
+        error_code: str | None = None, result_body: str | None = None,
     ) -> dict[str, Any]:
         allowed = ACTIVE_TOOL_STATES | TERMINAL_TOOL_STATES
         if status not in allowed or not expected:
@@ -104,6 +104,11 @@ class ToolRepository:
             if result_summary is not None else None
         )
         with self._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            if result_body is not None:
+                from agent.execution.results import ResultStore
+                ResultStore(self.database_path).save(operation_id, result_body,
+                    success=status == 'completed', connection=connection)
             cursor = connection.execute(
                 f"""UPDATE tool_operations SET status = ?, result_summary = ?, result_hash = ?,
                            error_code = ?, finished_at = ?

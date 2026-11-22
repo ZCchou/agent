@@ -40,15 +40,19 @@ def resolve_attachment_roles(attachments, requested=None):
     selected = {item['id'] for item in attachments}
     if not isinstance(requested, dict) or set(requested) - selected or any(not isinstance(role, str) or role not in {'template', 'reference'} for role in requested.values()):
         raise CoreDataError('attachment_purpose_invalid', '附件用途须对应本轮已授权的附件。')
-    return {item['id']: requested.get(item['id'], item.get('purpose') or ('template' if item['name'].lower().endswith('.docx')
-        and re.search(r'模板|template', item['name'], re.I) else 'reference')) for item in attachments}
+    # Stored purposes and old clients supply compatibility hints only.
+    return {item['id']: role for item in attachments
+            if (role := requested.get(item['id'], item.get('purpose'))) in {'template', 'reference'}}
 
 
 def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evidence=False, skill_required=False):
     if mode not in {'auto', 'required'}:
         raise CoreDataError('invalid_rag_mode', 'Choose auto or required RAG mode.')
     normalized = text.strip().rstrip('。.!！?？').strip()
-    export = bool(EXPORT.search(text) or re.search(r'(?:填写|回填|填好).{0,30}模板', text))
+    def positive_hint(pattern):
+        return any(not re.search(r'(?:不要|无需|不必|禁止|不需要|不做|不)(?:再|进行)?\s*$', text[max(0, match.start()-8):match.start()])
+                   for match in pattern.finditer(text))
+    export = positive_hint(EXPORT) or positive_hint(re.compile(r'(?:填写|回填|填好).{0,30}模板'))
     continuation = bool(CONTINUATION.fullmatch(text.strip()) or FOLLOWUP.fullmatch(normalized))
     business = bool(BUSINESS.search(text) or PROFESSIONAL.search(text))
     software_help = bool(SOFTWARE_CONTEXT.search(text) and SOFTWARE_ACTION.search(text) and not PROFESSIONAL_ACTION.search(text))
@@ -70,7 +74,8 @@ def decide_evidence(text, *, mode='auto', previous_evidence=False, pending_evide
     refers_to_answer = bool(re.search(r'刚才|上面|上述|这段|这个回答|previous|above|that answer', text, re.I))
     return {'requested_mode': mode, 'required': required, 'reason': reason,
             'reuse_evidence': required and previous_evidence and (continuation or contextual_question or (export and refers_to_answer and not business)),
-            'task_type': 'document_export' if export else 'evidence_answer' if required else 'chat'}
+            'operation_hint': 'export' if export else None,
+            'task_type': 'evidence_answer' if required else 'chat'}
 
 
 def explicit_document_scope(text):
@@ -113,7 +118,7 @@ def merge_evidence_intent(decision, intent, *, error_code=None):
     requirement = intent.get('rag_requirement', 'uncertain')
     result['source'] = 'advisor'
     result['semantic_requirement'] = requirement
-    protected = (decision['reason'] in {'user_required', 'skill_required', 'template_fill'}
+    protected = (decision['reason'] in {'user_required', 'skill_required'}
                  or decision.get('reuse_evidence') or decision.get('continued_run_id'))
     if not protected:
         if requirement == 'uncertain':
@@ -152,7 +157,7 @@ def routing_intent_schema(attachment_ids, *, pending_action=False):
     read = next(item['function']['parameters'] for item in DOCUMENT_DEFINITIONS
                 if item['function']['name'] == 'document.read_attachment')
     read_properties = {key: {**value, 'type': [value['type'], 'null']}
-                       for key, value in read['properties'].items() if key != 'attachment_id'}
+                       for key, value in read['properties'].items() if key not in {'attachment_id', 'cursor'}}
     read_properties = {'attachment_id': identity, **read_properties}
     question = object_schema({'id': {'type': 'string', 'minLength': 1, 'maxLength': 80},
         'question': {'type': 'string', 'minLength': 1, 'maxLength': 160},
@@ -211,32 +216,35 @@ def intent_payload(content, attachments, recent_messages, conversation_kind, *, 
 
     for attachment in attachments:
         entry = {'id': attachment.get('id', ''),
-                 'name': attachment.get('name', 'attachment'),
-                 'purpose': attachment.get('purpose', 'reference')}
-        for key in ('media_type', 'byte_size'):
+                 'name': attachment.get('name', 'attachment')}
+        for key in ('media_type', 'byte_size', 'purpose'):
             if key in attachment:
                 entry[key] = attachment[key]
         value['attachments'].append(entry)
-    # Complete authorized metadata and appended clarification answers precede history.
-    request, separator, answers = content.partition('\n\n补充信息\n')
-    essential_tail = separator + answers
-    minimum = request[:128] + essential_tail
-    value['request'] = minimum
-    if measure(render()) > budget:
-        raise CoreDataError('routing_intent_context_too_small',
-            '当前模型上下文不足以保留附件标识与补充回答，请扩大上下文、减少附件或缩短补充信息后重试。')
     value['request'] = content
-    retained = len(request)
-    while measure(render()) > budget:
-        retained = max(min(len(request), 128), retained - max(32, retained // 10))
-        if essential_tail:
-            value['request'] = request[:retained] + '\n[request middle truncated]\n' + essential_tail
-        else:
-            value['request'] = request[:retained // 2] + '\n[request middle truncated]\n' + request[-(retained - retained // 2):]
-        value['request_truncated'] = True
-        if retained <= min(len(request), 128) and measure(render()) > budget:
-            value['request'] = minimum
-            break
+    if measure(render()) > budget:
+        from agent.execution.input_sources import input_descriptor
+        value.update(request='', request_truncated=True,
+                     input_source={**input_descriptor(content), 'defer_interpretation': True,
+                                   'routing_hint': {'files': 'available', 'tools': 'available', 'reason': 'raw_input_read_required'}})
+        # A projection is insufficient to classify all requirements or scope.
+        value.pop('task_scope_constraint', None)
+        if measure(render()) > budget:
+            raise CoreDataError('routing_intent_context_too_small',
+                '当前模型上下文不足以保留附件标识与原始输入回读信息，请扩大上下文或减少附件后重试。')
+        request, separator, answers = content.partition('\n\n补充信息\n')
+        essential_tail = separator + answers
+        retained = len(content)
+        while True:
+            if essential_tail and len(essential_tail) < retained // 2:
+                preview = request[:retained - len(essential_tail)] + '\n[original input requires reading]\n' + essential_tail
+            else:
+                half = retained // 2
+                preview = content[:half] + '\n[original input requires reading]\n' + content[-(retained - half):] if retained else ''
+            value['request'] = preview
+            if measure(render()) <= budget:
+                break
+            retained //= 2
     for message in reversed(recent_messages[-6:]):
         entry = {'role': message['role'], 'content': clip(message.get('content', ''), 256)}
         value['recent_conversation'].insert(0, entry)
@@ -244,3 +252,55 @@ def intent_payload(content, attachments, recent_messages, conversation_kind, *, 
             value['recent_conversation'].pop(0)
             break
     return render()
+
+_ATTACHMENT_OPERATION = re.compile(
+    r'提取|摘录|抄录|转录|摘要|概括|总结|改写|翻译|校对|错别字|格式转换|列出.{0,12}(?:非空|字段|标题)'
+    r'|\b(?:extract|transcribe|summari[sz]e|translate|proofread|convert|reformat)\b', re.I)
+_PROJECT_SOURCE = re.compile(r'资料库|知识库|项目证据|project (?:evidence|library)|knowledge base', re.I)
+_SOURCE_NEGATION = re.compile(
+    r'(?:不要|无需|不必|禁止|不需要|不使用|不查|不依赖)[^，。；、,.;]{0,20}$'
+    r'|\b(?:do not|don.t|without|no need to)\b[^,.;]{0,35}$', re.I)
+_LOCAL_SOURCE = re.compile(
+    r'(?:仅|只|仅限)(?:能|可以|需|使用|根据|依据|基于|参考|读取|处理|提取|审阅|校对|对照|\s){0,5}(?:本|这份|当前|所附|提供的)?(?:附件|模板|原文)'
+    r'|\b(?:only|solely)\b[^;.!?]{0,45}\b(?:attach(?:ed|ment)|provided document)\b', re.I)
+_EXTERNAL_CHECK = re.compile(
+    r'(?:依据|按照|根据|对照|参照|按)[^，。；、,.;]{0,50}(?:条款|法规|标准|规章|DO\s*[-－]?\s*160|CCAR|RTCA)'
+    r'|\b(?:against|according to)\b[^,.;]{0,65}(?:standard|regulation|DO\s*-?\s*160|CCAR|RTCA)', re.I)
+
+
+def project_evidence_policy(decision, request, *, has_attachments, confirmed=False):
+    """Decide the role of project evidence from the request and trusted settings."""
+    reason = decision.get('reason')
+    hint_reason = (decision.get('rule_hint') or {}).get('reason')
+    if decision.get('requested_mode') == 'required' or 'user_required' in {reason, hint_reason}:
+        return 'required'
+
+    def requested(pattern):
+        return any(not _SOURCE_NEGATION.search(request[max(0, match.start()-40):match.start()])
+                   for match in pattern.finditer(request))
+
+    from agent.rag.retrieval import explicit_clause_numbers
+
+    local_only = bool(_LOCAL_SOURCE.search(request)) and has_attachments
+    project_mentioned = bool(_PROJECT_SOURCE.search(request))
+    explicit_project = requested(_PROJECT_SOURCE)
+    if local_only or (project_mentioned and not explicit_project):
+        return 'attachment_only' if has_attachments else 'none'
+    if 'skill_required' in {reason, hint_reason}:
+        return 'required'
+    attachment_task = has_attachments and bool(_ATTACHMENT_OPERATION.search(request))
+    external_requirement = bool(explicit_clause_numbers(request)) or requested(_EXTERNAL_CHECK)
+    if explicit_project or external_requirement:
+        return 'mixed' if attachment_task else 'required'
+    if attachment_task:
+        return 'attachment_only'
+    if 'evidence_continuation' in {reason, hint_reason} and (
+        decision.get('reuse_evidence') or decision.get('continued_run_id')
+        or CONTINUATION.fullmatch(request.strip()) or FOLLOWUP.fullmatch(request.strip())
+    ):
+        return 'required'
+    if reason == 'semantic_evidence' and not has_attachments:
+        return 'required'
+    if reason in {'business_evidence', 'semantic_evidence'} or hint_reason == 'business_evidence':
+        return 'required' if confirmed and not has_attachments else 'optional'
+    return 'none'

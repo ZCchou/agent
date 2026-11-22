@@ -19,11 +19,28 @@ const page = {
 
 describe("chat evidence citations", () => {
   it("renders a persisted markdown citation as a source button", () => {
-    const html = renderToStaticMarkup(<MarkdownRenderer content={`[AC source](rag-evidence:${evidenceId})`} state="complete" />);
+    const html = renderToStaticMarkup(<MarkdownRenderer content={`[AC source](rag-evidence:${evidenceId})`} state="complete" verifiedEvidenceIds={[evidenceId]} />);
     expect(html).toContain("AC source");
     expect(html).toContain('class="markdown-link markdown-link--evidence"');
     expect(html).toContain('aria-haspopup="dialog"');
     expect(html).not.toContain('href="rag-evidence:');
+  });
+
+  it("keeps unverified and other-message citation text inert without deleting prose", () => {
+    const content = `Public answer [source](rag-evidence:${evidenceId}) remains visible.`;
+    const unverified = renderToStaticMarkup(<MarkdownRenderer content={content} state="complete" />);
+    expect(unverified).toContain("Public answer");
+    expect(unverified).toContain("remains visible");
+    expect(unverified).not.toContain('aria-haspopup="dialog"');
+    const other = renderToStaticMarkup(<MarkdownRenderer content={content} state="complete" verifiedEvidenceIds={["rag-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]} />);
+    expect(other).not.toContain('aria-haspopup="dialog"');
+  });
+
+  it("shows HTML-shaped public prose as inert text rather than deleting it", () => {
+    const html = renderToStaticMarkup(<MarkdownRenderer content={"<div>Public HTML-shaped paragraph</div>"} state="complete" />);
+    expect(html).toContain("Public HTML-shaped paragraph");
+    expect(html).toContain("&lt;div&gt;");
+    expect(html).not.toContain("<div>Public HTML");
   });
 
   it("keeps ordinary links rendering independently from evidence context", () => {
@@ -110,4 +127,63 @@ describe("chat evidence citations", () => {
     previewEvidence.mockRejectedValueOnce(new Error("rag_evidence_invalid"));
     await expect(loadRagEvidencePage("project-a", evidenceId, 0, new AbortController().signal)).rejects.toThrow("rag_evidence_invalid");
   });
+});
+it("decorates explicit document verdicts and approved numeric citations while preserving ordinary chat prose", () => {
+ const report = "## p-7\n\n**判断**：无法判断。\n\n> **判断**：不符合\n\n|判断|原文|\n|--|--|\n|待补充|符合|";
+ const preview = renderToStaticMarkup(<MarkdownRenderer content={report} state="draft" documentReview="preview" targetLabels={{"p-7":"低温试验"}} />);
+ expect(preview).toContain('title="p-7">低温试验');
+ expect(preview).toContain('无法判断');
+ expect(preview).toContain('待补充');
+ expect(preview).not.toContain('review-verdict');
+ const content = renderToStaticMarkup(<MarkdownRenderer content={report} state="draft" documentReview="committed" targetLabels={{"p-7":"低温试验"}} />);
+ expect(content).toContain('title="p-7">低温试验');
+ expect(content).toContain('review-verdict--unknown');
+ expect(content).toContain('review-verdict--missing');
+ expect(content).not.toContain('review-verdict--issue');
+ expect(content).not.toContain('review-verdict--pass');
+ expect(renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />)).not.toContain('review-verdict');
+ const persisted="# 文档审阅正文\n\n"+report;
+ for (const state of ["streaming", "draft"] as const) {
+   expect(renderToStaticMarkup(<MarkdownRenderer content={persisted} state={state} />)).not.toContain("review-verdict");
+ }
+ expect(renderToStaticMarkup(<MarkdownRenderer content={persisted} state="complete" />)).toContain("review-verdict--unknown");
+ const id="rag-12345678-1234-1234-1234-123456789012";
+ useApp.mockReturnValue({activeConversation:{project_id:"project-a"}});
+ const cite=`原文[1](rag-evidence:${id})`;
+ expect(renderToStaticMarkup(<MarkdownRenderer content={cite} state="complete" verifiedEvidenceIds={[id]} />)).toContain('markdown-link--citation');
+ expect(renderToStaticMarkup(<MarkdownRenderer content={cite} state="complete" />)).not.toContain('markdown-link--citation');
+});
+it("opens only a matching local report source; the same source number is scoped to its own message", () => {
+ const report="# 文档审阅正文\n\n正文[1](#审阅出处-1)[2](#审阅出处-2)\n\n##### 审阅出处 1\n\n**来源**　标准 · §4.6.2 · PDF 第 18 页\n\n> 减压在 15s 内完成。";
+ const html=renderToStaticMarkup(<><MarkdownRenderer content={report} state="complete" /><MarkdownRenderer content={report} state="complete" /></>);
+ const ids=[...html.matchAll(/<details id="([^"]+)"/g)].map(m=>m[1]);
+ expect(new Set(ids).size).toBe(2);
+ for(const id of ids) expect(html).toContain('aria-controls="'+id+'"');
+ expect(html).not.toContain('aria-label="审阅出处 2"');
+ expect(html).toContain('<summary>[1] 标准 · §4.6.2 · PDF 第 18 页</summary>');
+});
+it("keeps the generated summary an index, preserves its citation and colors verdicts in requested tables", () => {
+ const table="| 问题项及位置 | 判断 | 原文 | 建议 | 证据 |\n|---|---|---|---|---|\n| 减压 | 待补充 | 2h | 说明依据 | [1](#审阅出处-1) |";
+ const report="# 文档审阅正文\n\n## 问题与待核事项汇总\n\n"+table+"\n\n## 减压\n\n**判断**：待补充。\n\n## 用户表格\n\n"+table+
+   "\n\n## 问题与待核事项汇总\n\n| 位置 | 判断 |\n|---|---|\n| 第二处 | 无法判断 |\n\n##### 审阅出处 1\n\n**来源**　标准 · 第 18 页\n\n> 摘录正文。";
+ const html=renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />);
+ const tables=[...html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/g)].map(m=>m[1]);
+ expect(tables).toHaveLength(3);
+ expect(tables[0]).toContain("<td>待补充</td>");
+ expect(tables[0]).not.toContain("review-verdict");
+ expect(tables[0]).toContain('aria-label="审阅出处 1"');
+ expect(tables[1]).toContain('review-verdict--missing');
+ expect(tables[2]).toContain('review-verdict--unknown');
+ expect(html.match(/review-verdict--missing/g)).toHaveLength(2);
+});
+
+it("recognizes grouped summary tables only inside the report summary", () => {
+ const table = "| 问题项及位置 | 判断 | 原文 | 建议 | 证据 |\n|---|---|---|---|---|\n| 位置 | 不符合 | 原文 | 建议 | 依据 |";
+ const report = ["# 文档审阅正文", "## 问题与待核事项汇总", "已确认问题 1 项 · 待补充材料 0 项 · 无法判断 0 项",
+   "### 已确认问题", table, "## 自定义审阅", "### 已确认问题", table].join("\n\n");
+ const html = renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />);
+ const tables = [...html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/g)].map(m => m[1]);
+ expect(tables).toHaveLength(2);
+ expect(tables[0]).toContain("<td>不符合</td>");
+ expect(tables[1]).toContain("review-verdict--issue");
 });

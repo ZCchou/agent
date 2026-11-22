@@ -26,7 +26,8 @@ function ScopedChat() {
     <nav aria-label="Test scope navigation">
       <button onClick={() => { setOriginalDraft(false); app.openConversation("work-1"); }}>Other scope</button>
       <button onClick={() => setOriginalDraft(true)}>Original draft</button>
-      <output aria-label="Current scope">{scoped.activeConversationId ?? `draft-${app.draft.revision}`}</output>
+      <button onClick={() => { setOriginalDraft(true); app.startNewWork("project-1"); }}>New work draft</button>
+      <output aria-label="Current scope">{scoped.activeConversationId ?? app.draft.scope}</output>
     </nav>
     <RemoteContentPermissionProvider><ChatInspectorStateProvider><ResourceActionsProvider><AppUpdateProvider>
       <ChatPage />

@@ -738,7 +738,7 @@ pub async fn execution_request(
 ) -> Result<Value, String> {
     if !matches!(
         action.as_str(),
-        "status" | "continue" | "retry" | "cancel" | "diagnostics"
+        "status" | "continue" | "retry" | "cancel" | "diagnostics" | "plan" | "items" | "respond"
     ) {
         return Err("execution_action_invalid".into());
     }
@@ -756,10 +756,7 @@ pub async fn execution_request(
 
 #[tauri::command]
 pub async fn open_log_directory(app: AppHandle) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_log_dir()
-        .map_err(|error| error.to_string())?;
+    let path = crate::profile_paths::log_dir(&app).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|error| error.to_string())
 }
@@ -772,9 +769,7 @@ pub async fn export_execution_diagnostics(
 ) -> Result<String, String> {
     let report = request_core(&app, &manager, "execution.request",
         json!({"action":"diagnostics","params":task_id.map_or_else(|| json!({}), |id| json!({"task_id":id}))})).await?;
-    let directory = app
-        .path()
-        .app_log_dir()
+    let directory = crate::profile_paths::log_dir(&app)
         .map_err(|error| error.to_string())?
         .join("diagnostics");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -1497,9 +1492,9 @@ mod routing_serialization_tests {
             crate::core_bridge::PROTOCOL_VERSION
         );
         assert_eq!(contract["settings_schema_version"], 20);
-        assert_eq!(contract["core_schema_version"], 33);
+        assert_eq!(contract["core_schema_version"], 37);
         assert_eq!(contract["core_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(contract["build_id"], "schema33-agent-unified-v1");
+        assert_eq!(contract["build_id"], "schema37-agent-unified-v1");
 
         let expected = invocation_routes_for_profile("deepseek", "https://api.deepseek.com", None);
         let contract_adapters = contract["adapters"].as_array().unwrap();

@@ -130,6 +130,40 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn('$WINDIR\\Sysnative\\WindowsPowerShell', text)
         self.assertNotIn('http', text.lower())
 
+    def test_bundled_ocr_hook_preserves_the_existing_installer_owner(self):
+        manifest = self.root / 'payload-manifest.json'
+        manifest.write_text('{}')
+        hook = self.root / 'hooks.nsh'
+        self.delivery.installer_hook(manifest, hook, application_manifest=self.app_manifest, bundled_ocr=True)
+        text = hook.read_text(encoding='utf-8-sig')
+        for action in ('Install', 'Commit', 'Recover', 'Uninstall'):
+            self.assertIn('-BundledOcr -Action ' + action, text)
+        self.assertNotIn('-IncludeOcr', text)
+
+    def test_ocr_package_rejects_a_role_with_missing_weights(self):
+        from unittest.mock import patch
+        import sys
+        with patch.object(sys, 'path', [str(TOOLS), *sys.path]):
+            from prepare_ocr_models import MODELS
+            models = self.root / 'models'
+            roles = {role: {'name': name, 'directory': 'models/' + name} for role, name in MODELS.items()}
+            files = {}
+            for name in set(MODELS.values()):
+                relative = f'models/{name}/inference.pdiparams'
+                path = models / relative
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b'weights')
+                files[relative] = self.delivery.sha256(path)
+            manifest = {'schema_version': 1, 'profile': 'pp-structure-v3', 'models': roles, 'files': files}
+            (models / 'ocr-model.json').write_text(json.dumps(manifest))
+            with patch('build_ocr_runtime.verify_existing'):
+                self.delivery.verify_ocr(self.root, models)
+                path.unlink()
+                del files[relative]
+                (models / 'ocr-model.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, 'weights mismatch'):
+                    self.delivery.verify_ocr(self.root, models)
+
     def test_application_manifest_refresh_tracks_host_mutation_and_rejects_core_mutation(self):
         import re
         script = (TOOLS / 'build-offline-windows.ps1').read_text(encoding='utf-8')
@@ -151,6 +185,18 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         result = subprocess.run(command, capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
         before = self.app_manifest.read_bytes()
+        staging = b'MZ__TAURI_BUNDLE_TYPE_VAR_UNK bundled host'
+        installed = staging.replace(b'__TAURI_BUNDLE_TYPE_VAR_UNK', b'__TAURI_BUNDLE_TYPE_VAR_NSS')
+        host.write_bytes(staging)
+        result = subprocess.run(command, capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
+        predicted = json.loads(self.app_manifest.read_text(encoding='utf-8-sig'))
+        self.assertEqual(predicted['files']['agent-desktop.exe']['sha256'], hashlib.sha256(installed).hexdigest())
+        self.assertEqual(host.read_bytes(), staging)
+        host.write_bytes(installed)
+        result = subprocess.run(command, capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
+        self.assertEqual(json.loads(self.app_manifest.read_text(encoding='utf-8-sig')), predicted)
         host.write_bytes(b'after bundle patch')
         result = subprocess.run(command, capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
@@ -171,16 +217,16 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
                      'tokenizer.json', 'LICENSE', 'NOTICE', 'model.onnx', 'weights.bin'):
             self.assertFalse(assets.excluded(Path(name)))
 
-    def test_release_sidecar_contract_is_ipc26_schema33(self):
+    def test_release_sidecar_contract_is_ipc30_schema37(self):
         import re
         root = TOOLS.parent
         protocol = (root / 'services/agent-core/src/agent/protocol.py').read_text(encoding='utf-8')
         storage = (root / 'services/agent-core/src/agent/storage.py').read_text(encoding='utf-8')
         bridge = (root / 'apps/agent-desktop/src-tauri/src/core_bridge.rs').read_text(encoding='utf-8')
-        self.assertRegex(protocol, r'PROTOCOL_VERSION\s*=\s*26\b')
-        self.assertRegex(storage, r'SCHEMA_VERSION\s*=\s*33\b')
-        self.assertRegex(bridge, r'PROTOCOL_VERSION:\s*u64\s*=\s*26\b')
-        self.assertRegex(bridge, r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*33\b')
+        self.assertEqual(re.search(r'PROTOCOL_VERSION\s*=\s*(\d+)', protocol)[1], '30')
+        self.assertEqual(re.search(r'SCHEMA_VERSION\s*=\s*(\d+)', storage)[1], '37')
+        self.assertEqual(re.search(r'PROTOCOL_VERSION:\s*u64\s*=\s*(\d+)', bridge)[1], '30')
+        self.assertEqual(re.search(r'EXPECTED_SCHEMA_VERSION:\s*u64\s*=\s*(\d+)', bridge)[1], '37')
         verifier = (TOOLS / 'verify-python-sidecar.ps1').read_text(encoding='utf-8')
         self.assertIn('$actual.schema_version -ne $expectedSchema', verifier)
         self.assertIn('$actual.protocol_version -ne $expectedProtocol', verifier)
@@ -216,7 +262,7 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
         self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
 
     def invoke_installer(self, install, action='Install', fault='', defer=False, token=None, include_ocr=False,
-                         airworthiness=False, complete_application=True):
+                         airworthiness=False, complete_application=True, bundled_ocr=False):
         application = self.root / 'application-manifest.json'
         app_files = {name: {'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()}
                      for name, content in {'agent-desktop.exe': b'complete new host',
@@ -240,6 +286,8 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
             args += ['-Fault', fault]
         if include_ocr:
             args += ['-IncludeOcr']
+        if bundled_ocr:
+            args += ['-BundledOcr']
         if airworthiness:
             args += ['-Airworthiness']
         if defer:
@@ -280,6 +328,24 @@ Update-OfflineApplicationManifest $args[0] $args[1] $args[2]
             result = self.invoke_installer(install, action='Uninstall', airworthiness=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse((install / 'office-runtime').exists())
+
+    def test_bundled_ocr_upgrades_an_existing_two_component_install(self):
+        with tempfile.TemporaryDirectory(prefix='agent-bundled-ocr-install-') as directory:
+            install = Path(directory)
+            initial = self.invoke_installer(install)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            previous_owner = (install / '.managed-runtime/owner.txt').read_bytes()
+            for name in ('ocr-runtime/python/python.exe', 'ocr-model-package/ocr-model.json'):
+                path = self.root / name
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b'fixture')
+            upgraded = self.invoke_installer(install, bundled_ocr=True)
+            self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+            self.assertEqual((install / '.managed-runtime/owner.txt').read_bytes(), previous_owner)
+            self.assertEqual((install / 'ocr-model-package/ocr-model.json').read_bytes(), b'fixture')
+            result = self.invoke_installer(install, action='Uninstall', bundled_ocr=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((install / 'ocr-runtime').exists())
 
     def test_ocr_components_install_and_uninstall_with_distinct_ownership(self):
         for name in ('ocr-runtime/python/python.exe', 'ocr-model-package/ocr-model.json'):

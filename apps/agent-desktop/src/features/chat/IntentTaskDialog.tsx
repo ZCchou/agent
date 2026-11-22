@@ -3,18 +3,22 @@ import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "../../components/ui/Button";
 import { intentTasks } from "../../services/tauri/intentTasks";
+import type { IntentTask } from "../../services/tauri/intentTasks";
 import type { AcceptedModelRun } from "../../services/repositories/ModelRunRepository";
 
 type Answer = { choice: string; draft: string; mode: "choice" | "custom" };
 const drafts = new Map<string, Record<string, Answer>>();
 
-export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }: {
+export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings, externalTask, onRespond }: {
   scope: string; enabled: boolean;
-  onAccepted(result: AcceptedModelRun): Promise<boolean>;
+  onAccepted(result: AcceptedModelRun): Promise<boolean | "unavailable">;
   onModelSettings(): void;
+  externalTask?: IntentTask;
+  onRespond?(answers: Record<string, string>): Promise<void>;
 }) {
   const { t } = useTranslation("chat");
-  const task = useSyncExternalStore(intentTasks.subscribe, () => intentTasks.get(scope));
+  const storedTask = useSyncExternalStore(intentTasks.subscribe, () => intentTasks.get(scope));
+  const task = externalTask ?? storedTask;
   const revision = task ? `${scope}:${task.id}:${task.revision}` : "";
   const [hidden, setHidden] = useState("");
   const [answers, setAnswers] = useState<Record<string, Answer>>({});
@@ -27,20 +31,21 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }
   const open = enabled && Boolean(clarification) && hidden !== revision;
 
   useEffect(() => {
-    if (enabled && "__TAURI_INTERNALS__" in window) void intentTasks.restore(scope).catch(() => undefined);
-  }, [scope, enabled]);
+    if (enabled && !externalTask && "__TAURI_INTERNALS__" in window) void intentTasks.restore(scope).catch(() => undefined);
+  }, [scope, enabled, externalTask]);
   useEffect(() => { setAnswers(drafts.get(revision) ?? {}); setError(""); }, [revision]);
   useEffect(() => {
-    if (!enabled || !task || task.status !== "completed" || !task.result
+    if (externalTask || !enabled || !task || task.status !== "completed" || !task.result
       || intentTasks.hasAcceptanceOwner(task.id) || intentTasks.isConsumed(task.id)) return;
     if (task.result.status === "preflight_rejected") { intentTasks.consume(task.id); return; }
     const identity = `${scope}-${task.id}-${task.revision}`;
     if (adopting.current === identity) return;
     adopting.current = identity;
     void onAccepted(task.result).then((accepted) => {
-      if (accepted) intentTasks.acknowledge(scope, task.result!);
+      if (accepted === "unavailable") intentTasks.consume(task.id);
+      else if (accepted) intentTasks.acknowledge(scope, task.result!);
     }).finally(() => { if (adopting.current === identity) adopting.current = ""; });
-  }, [enabled, scope, task, onAccepted]);
+  }, [enabled, scope, task, onAccepted, externalTask]);
   useEffect(() => {
     const element = dialog.current;
     if (open && element && !element.open) element.showModal();
@@ -62,7 +67,8 @@ export function IntentTaskDialog({ scope, enabled, onAccepted, onModelSettings }
     actionLock.current = true; setBusy(true); setError("");
     try {
       const values = Object.fromEntries((clarification?.questions ?? []).map(q => [q.id, valueFor(q.id).trim()]));
-      await intentTasks.act(scope, action, action === "respond" ? values : undefined);
+      if (externalTask && action === "respond" && onRespond) await onRespond(values);
+      else await intentTasks.act(scope, action, action === "respond" ? values : undefined);
       if (action === "respond") drafts.delete(revision);
     } catch (value) { setError(value instanceof Error ? value.message : String(value)); }
     finally { actionLock.current = false; setBusy(false); }

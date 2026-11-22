@@ -22,6 +22,8 @@ import {
 import {
   settingsRepository,
 } from "../../services/runtime";
+import { Palette } from "lucide-react";
+import { readInterfaceStyle, saveInterfaceStyle } from "./interfaceStyle";
 import { TrashSettingsPage } from "./TrashSettingsPage";
 
 import type {
@@ -69,6 +71,8 @@ export function SettingsPage() {
   ] =
     useState(false);
 
+  const [style, setStyle] = useState(readInterfaceStyle);
+  const [styleSaveError, setStyleSaveError] = useState(false);
   const [section, setSection] = useState<"root" | "trash">("root");
 
 
@@ -183,6 +187,27 @@ export function SettingsPage() {
       </div>
 
 
+      <Card className="settings-language-card">
+        <div className="settings-language-card__icon"><Palette size={24} /></div>
+        <div className="settings-language-card__copy"><strong>UI</strong></div>
+        <label className="settings-language-control">
+          <span>{t("settings.interfaceStyle.label")}</span>
+          <select value={style} onChange={event => {
+            const next = event.target.value === "classic" ? "classic" : "ragent";
+            try {
+              saveInterfaceStyle(next);
+              setStyle(next);
+              setStyleSaveError(false);
+            } catch {
+              setStyleSaveError(true);
+            }
+          }}>
+            <option value="ragent">{t("settings.interfaceStyle.gradient")}</option>
+            <option value="classic">{t("settings.interfaceStyle.classic")}</option>
+          </select>
+        </label>
+        {styleSaveError && <p role="alert">{t("settings.interfaceStyle.error")}</p>}
+      </Card>
       <AppUpdateCard />
       <ProfileMigrationCard />
       <Card className="settings-language-card">

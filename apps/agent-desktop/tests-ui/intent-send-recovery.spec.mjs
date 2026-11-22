@@ -6,7 +6,7 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
   await page.addInitScript(({ initialFailure, managed }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     window.intentStarts = [];
-    window.intentTasks = [];
+    window.intentTasks = JSON.parse(localStorage.getItem("fixture-saved-intents") ?? "[]");
     let failedOnce = false;
     let accepted = null;
     const listeners = new Map();
@@ -72,6 +72,10 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
         if (args.action === 'respond') Object.assign(task, { status: 'identifying', revision: task.revision + 1, clarification: null });
         return { task: structuredClone(task) };
       }
+      if (command === "get_conversation" && args.conversationId === "deleted-chat") {
+        window.deletedLookups = (window.deletedLookups ?? 0) + 1;
+        throw new Error("conversation_not_found: Conversation unavailable");
+      }
       if (command === "get_conversation" && args.conversationId === accepted?.conversation.id) return structuredClone(accepted.conversation);
       if (command === "get_model_run") return { run: structuredClone(accepted.run) };
       if (command === "get_conversation_model_run" && args.conversationId === accepted?.conversation.id) return { run: structuredClone(accepted.run) };
@@ -85,6 +89,17 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
   return editor;
 }
 
+test('project review template fills an editable draft without sending or overwriting it', async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  await page.getByRole('button', { name: 'New work draft' }).click();
+  const template = page.getByRole('button', { name: 'Review template', exact: true });
+  await template.click();
+  await expect(editor).toHaveValue(/project library.*supporting excerpts/i);
+  await expect(editor).toBeFocused();
+  await expect(template).toBeDisabled();
+  expect(await page.evaluate(() => window.intentStarts)).toEqual([]);
+});
+
 test('background execution keeps progress visible without manual waiting controls', async ({ page }) => {
   const editor = await openRecoveryChat(page);
   await page.evaluate(() => {
@@ -92,8 +107,14 @@ test('background execution keeps progress visible without manual waiting control
     window.executionControls = [];
     window.__TAURI_INTERNALS__.invoke = async (command, args) => {
       if (command === 'execution_request') {
+        if (args.action === 'items') return { items: [{ source_id: 'source', target_id: 'p-7', outcome: 'gap',
+          result: { summary: 'Review retained', gaps: ['Controlled revision is missing'] } }], total: 1, next_offset: null };
         if (args.action !== 'status') {
           window.executionControls.push(structuredClone(args));
+          if (args.action === 'respond') {
+            window.executionRoot.answered_question_ids = [args.params.question_id];
+            window.executionRoot.pending_question = null;
+          }
           window.executionRoot.revision += 1;
           window.executionRoot.sequence += 1;
           window.executionRoot.status = args.action === 'cancel' ? 'cancelled' : 'running';
@@ -110,6 +131,13 @@ test('background execution keeps progress visible without manual waiting control
           revision: 1, attempt: 1, sequence: 1, status: 'running', stage: 'rag_retrieval', auto_recoveries: 0,
           created_at: 100, updated_at: 500, elapsed_seconds: 400, seconds_since_progress: 2,
           current_stage: { completed: 18, total: 40, details: { stage: 'reranking', device: 'cpu', model_name: 'Fixture reranker' } } };
+        window.executionRoot.plan = { task_id: 'execution-root', revision: 2, goal: 'Review all existing template content',
+          request: { attachments: [{ id: 'source', name: 'environment-template.docx' }] },
+          source_scopes: [{ source_id: 'source', operation: 'review', scope: 'full', target_ids: [], reason: '' }],
+          deliverables: [{ path: 'review.md' }],
+          steps: [{ id: 'read', description: 'Read original source positions', depends_on: [] },
+            { id: 'review', description: 'Review the registered positions', depends_on: ['read'] }], success_criteria: ['Coverage verified'] };
+        window.executionRoot.coverage = { ready: false, total: 1689, completed: 200, gaps: 89, remaining: 1400 };
         window.intentTasks.at(-1).remaining_seconds = 0;
       }
       return result;
@@ -117,18 +145,75 @@ test('background execution keeps progress visible without manual waiting control
   });
   await send(page, editor);
   const card = page.getByRole('region', { name: 'Task execution status' });
-  await expect(card).toContainText('Completed 18/40');
+  await expect(card).toContainText('Reranking document evidence 18/40');
   await expect(card).toContainText('Running for 400 seconds');
   await expect(card).toContainText('Fixture reranker');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await card.locator('summary').click();
+  await expect(card).toContainText('Review all existing template content');
+  await expect(card).toContainText('environment-template.docx · Entire source');
+  await expect(card).toContainText('Planned file review.md');
+  await expect(card).toContainText('1689 items');
+  await expect(card).toContainText('Controlled revision is missing');
   await page.evaluate(() => Object.assign(window.executionRoot, { status: 'waiting_recovery', sequence: 2,
     error_code: 'execution_activity_uncertain' }));
-  await expect(card).toContainText('Reranking candidates');
+  await expect(card).toContainText('Execution progress needs confirmation');
   await expect(card.getByRole('button', { name: 'Continue waiting', exact: true })).toHaveCount(0);
   await expect(card.getByRole('button', { name: 'Recover current stage', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => window.executionControls)).toEqual([]);
+  await page.evaluate(() => Object.assign(window.executionRoot, { sequence: 3,
+    pending_question: { id: 'run-question', revision: 0, clarification: { summary: 'Confirm the equipment',
+      questions: [{ id: 'equipment', question: 'Which equipment should be reviewed?', options: ['Equipment A', 'Equipment B'] }] } } }));
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(card).toContainText('Waiting for your answer');
+  await dialog.getByRole('radio', { name: 'Equipment A', exact: true }).check();
+  await dialog.getByRole('textbox').fill('Custom equipment C');
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await card.getByRole('button', { name: 'Continue providing information' }).click();
+  await expect(dialog.getByRole('textbox')).toHaveValue('Custom equipment C');
+  await dialog.getByRole('button', { name: 'Confirm and continue', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await page.evaluate(() => window.executionControls[0].params.answers)).toEqual({ equipment: 'Custom equipment C' });
   await card.getByRole('button', { name: 'Cancel task', exact: true }).click();
   await expect(card).toHaveCount(0);
+});
+
+test('completed document task retains verified scope and reported gaps', async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  await page.evaluate(() => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === 'execution_request') {
+        if (args.action === 'items') return { items: [{ source_id: 'doc', target_id: 'p-2', outcome: 'gap',
+          result: { gaps: ['Equipment parameters are missing'] } }], total: 1, next_offset: null };
+        return { task: structuredClone(window.finalTask ?? null) };
+      }
+      const result = await original(command, args);
+      if (command === 'start_model_run' && result.task) {
+        result.task.execution_task_id = 'final-task';
+        window.intentTasks.at(-1).execution_task_id = 'final-task';
+        window.finalTask = { id: 'final-task', intent_task_id: result.task.id, revision: 0, attempt: 2,
+          sequence: 1, status: 'running', stage: 'goal_verification', auto_recoveries: 0,
+          created_at: 1, updated_at: 2, elapsed_seconds: 100, can_cancel: true,
+          current_stage: { details: { stage: 'goal_verification' } },
+          plan: { task_id: 'final-task', revision: 1, goal: 'Review the whole source', steps: [], success_criteria: [] },
+          coverage: { ready: true, total: 2, completed: 1, gaps: 1, remaining: 0 } };
+      }
+      return result;
+    };
+  });
+  await send(page, editor);
+  const card = page.getByRole('region', { name: 'Task execution status' });
+  await expect(card).toContainText('Checking task completion');
+  await page.evaluate(() => Object.assign(window.finalTask, { status: 'completed', revision: 1, sequence: 2, can_cancel: false,
+    verification: { status: 'satisfied', summary: 'Original request and saved report verified', unmet_requirements: [] } }));
+  await expect(card).toContainText('Completed with information gaps');
+  await card.locator('summary').click();
+  await expect(card).toContainText('Review the whole source');
+  await expect(card).toContainText('Original request and saved report verified');
+  await expect(card).toContainText('Equipment parameters are missing');
+  await expect(card.getByRole('button', { name: 'Cancel task', exact: true })).toHaveCount(0);
 });
 
 test('cold local model transitions to intent recognition, clarification and actual run phases', async ({ page }) => {
@@ -232,6 +317,45 @@ test('an older intent cannot overwrite a new model preparation status', async ({
   expect(await page.evaluate(() => window.statusSamples.filter(value => value.includes('Identifying task intent')))).toEqual([]);
 });
 
+test("new drafts across restart and sibling windows ignore previously completed deleted conversations", async ({ page, context }) => {
+  await openRecoveryChat(page);
+  const initial = await page.getByLabel("Current scope").textContent();
+  await page.evaluate((scope) => localStorage.setItem("fixture-saved-intents", JSON.stringify([{
+    id: "old-task", scope, revision: 1, status: "completed",
+    result: { status: "accepted", conversation: { id: "deleted-chat" }, run: { id: "old-run" } },
+  }])), initial);
+  await page.reload();
+  await expect(page.getByLabel("Current scope")).not.toHaveText(initial);
+  const reloaded = await page.getByLabel("Current scope").textContent();
+  const sibling = await context.newPage();
+  try {
+    await openRecoveryChat(sibling);
+    const second = await sibling.getByLabel("Current scope").textContent();
+    expect(new Set([initial, reloaded, second]).size).toBe(3);
+    await page.getByRole("button", { name: "New work draft" }).click();
+    await expect(page.getByLabel("Current scope")).not.toHaveText(reloaded);
+    expect(await page.evaluate(() => window.deletedLookups ?? 0)).toBe(0);
+    expect(await sibling.evaluate(() => window.deletedLookups ?? 0)).toBe(0);
+  } finally { await sibling.close(); }
+});
+
+test("restoring a deleted accepted conversation retires its receipt without overwriting the current draft", async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  const scope = await page.getByLabel("Current scope").textContent();
+  await editor.fill("Keep this working text");
+  await page.evaluate(async (scope) => {
+    const { intentTasks } = await import("/src/services/tauri/intentTasks.ts");
+    intentTasks.update({ id: "deleted-task", scope, revision: 2, status: "completed",
+      result: { status: "accepted", conversation: { id: "deleted-chat" }, run: { id: "old-run" } } });
+  }, scope);
+  await expect.poll(() => page.evaluate(async () =>
+    (await import("/src/services/tauri/intentTasks.ts")).intentTasks.isConsumed("deleted-task"))).toBe(true);
+  await expect(editor).toHaveValue("Keep this working text");
+  await expect(page.getByLabel("Current scope")).toHaveText(scope);
+  await expect(page.locator(".chat-error")).toHaveCount(0);
+  expect(await page.evaluate(() => window.deletedLookups)).toBe(1);
+});
+
 for (const completion of ["before", "after"]) test(`draft scope switch adopts completion ${completion} returning`, async ({ page }) => {
   const editor = await openRecoveryChat(page);
   await send(page, editor);
@@ -245,7 +369,7 @@ for (const completion of ["before", "after"]) test(`draft scope switch adopts co
   }
   await page.getByRole("button", { name: "Original draft", exact: true }).click();
   if (completion === "after") {
-    await expect(page.getByLabel("Current scope")).toHaveText("draft-0");
+    await expect(page.getByLabel("Current scope")).toHaveText(/^draft-[0-9a-f-]{36}$/);
     await page.evaluate(() => window.completeIntent());
   }
   await expect(page.getByLabel("Current scope")).toHaveText("recovered-chat");

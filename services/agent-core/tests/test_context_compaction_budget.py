@@ -139,10 +139,10 @@ def test_correction_cannot_overflow_and_failed_usage_is_saved(tmp_path):
         service = ContextEngineService(repo)
         with pytest.raises(ContextEngineError) as caught:
             await service.compact_once(run, provider, context_window=2048, max_output_tokens=512)
-        assert caught.value.code == 'context_compaction_budget_exhausted'
-        assert provider.calls == 1
+        assert caught.value.code == 'context_compaction_unreliable'
+        assert provider.calls == 2
         status = service.context_repository.compaction_status(run['conversation_id'])
-        assert (status['input_tokens'], status['output_tokens']) == (100, 512)
+        assert (status['input_tokens'], status['output_tokens']) == (200, 1024)
     asyncio.run(scenario())
 
 
@@ -212,7 +212,8 @@ def test_resolved_budget_reaches_real_chat_transport(tmp_path, monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def aiter_lines(self):
-            checkpoint = {key: [] for key in ('goal', 'success_criteria', 'constraints', 'decisions', 'completed', 'relative_files', 'failed_approaches', 'open_tasks', 'next_step')}
+            source = json.loads(captured[-1]['messages'][1]['content'])['sources'][0]
+            checkpoint = {'goal': [{'text': 'preserved fact', 'source_ids': [source['source_id']], 'trust': source['trust']}]}
             yield 'data: ' + json.dumps({'choices': [{'delta': {'content': json.dumps(checkpoint)}, 'finish_reason': 'stop'}]})
             yield 'data: [DONE]'
     class Client:
@@ -313,4 +314,41 @@ def test_real_http_outcome_controls_replay(tmp_path, monkeypatch, failure):
         else:
             assert caught.value.code == 'provider_request_not_sent'
             assert len(posts) == 3
+    asyncio.run(scenario())
+
+def test_normalizes_checkpoint_without_weakening_provenance():
+    from agent.context_engine.compaction import parse_checkpoint
+    item = {'text': 'fact', 'source_ids': ['m'], 'trust': 'user_authored'}
+    def parse(payload):
+        return parse_checkpoint(json.dumps(payload), {'m': 'user_authored'})
+    valid = parse({'response': {'goal': item, 'open_tasks': None}})
+    assert valid['goal'] == [item] and valid['open_tasks'] == []
+    for bad in ({'goal': []}, {'goal': dict(item, text=' ')}, {'goal': item, 'unknown': [item]},
+                {'goal': dict(item, source_ids=['other'])}, {'goal': dict(item, trust='system_policy')}):
+        with pytest.raises(ContextEngineError):
+            parse(bad)
+
+
+def test_failed_empty_replacement_preserves_checkpoint_and_messages(tmp_path):
+    async def scenario():
+        repo = CoreRepository(tmp_path / 'recover.db')
+        service = ContextEngineService(repo)
+        prior = seed(repo)
+        cid = prior['conversation_id']
+        await service.compact_once(prior, CheckpointProvider(), context_window=32768, max_output_tokens=512)
+        checkpoint = service.context_repository.active_checkpoint(cid)
+        with repo._connect() as db:
+            db.execute("UPDATE model_runs SET status='completed' WHERE id=?", (prior['id'],))
+        repo._insert_message(cid, 'assistant', 'additional retained source')
+        current = repo.start_model_run(conversation_id=cid, content='continue again',
+            idempotency_key='next', provider_profile_id='builtin-demo', model_id='demo')
+        def original_messages():
+            with repo._connect() as db:
+                return list(db.execute('SELECT id,content FROM messages WHERE conversation_id=? ORDER BY sequence_no',(cid,)))
+        before = original_messages()
+        with pytest.raises(ContextEngineError) as caught:
+            await service.compact_once(current, CheckpointProvider(['{}','{}']), context_window=32768, max_output_tokens=512)
+        assert caught.value.code == 'context_compaction_unreliable'
+        assert original_messages() == before
+        assert service.context_repository.active_checkpoint(cid) == checkpoint
     asyncio.run(scenario())

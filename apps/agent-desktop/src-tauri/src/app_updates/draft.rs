@@ -43,8 +43,7 @@ pub struct RestoredUpdateDraft {
 }
 
 fn checkpoint_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+    crate::profile_paths::data_dir(app)
         .map(|root| root.join("update-draft-v1.json"))
         .map_err(|_| "app_update_draft_failed".into())
 }

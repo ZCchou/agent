@@ -1,10 +1,33 @@
 """Content-only recovery policy; never execute effects or expose exception bodies."""
 from __future__ import annotations
 
+import json
 from typing import Any
+
+from agent.message_assembly import insert_system_message
 
 
 REASONS = {
+    'task_final_answer_invalid': '最终回答的位置引用或原文未通过校验，已保存的读取结果仍可核对',
+    'task_final_context_too_small': '当前窗口不足以核对原始要求、完成证明与必要证据，完整结果已保留',
+    'task_selector_invalid': '任务范围选择器无效，原请求和资料已保留',
+    'task_source_alias_ambiguous': '该产物对应多个授权来源，请使用明确的附件身份继续',
+    'task_inventory_conflict': '同一资料版本的结构清单不一致，需要重新核对原件',
+    'task_goal_invalid': '任务目标要求无效，请核对处理范围与交付要求',
+    'task_goal_revision_changed': '任务要求已更新，请恢复当前修订',
+    'task_goal_change_requires_input': '任务范围变更需要补充确认，已有结果已保留',
+    'task_goal_context_too_small': '当前模型上下文不足以核对原始要求与成果，请扩大上下文后重试',
+    'task_goal_verification_invalid': '任务完成核对未通过格式校验，已有结果已保存',
+    'task_question_ended': '该澄清问题已结束，请查看当前任务',
+    'task_question_changed': '澄清问题已更新，请回答当前问题',
+    'task_incomplete': '任务仍有未处理位置，已完成结果已保存',
+    'task_plan_invalid': '任务计划无效，请查看步骤和依赖',
+    'task_plan_revision_changed': '任务计划已更新，请使用最新修订',
+    'task_plan_inactive': '当前任务已结束',
+    'task_plan_stale': '任务执行身份已变化，旧结果已丢弃',
+    'task_source_changed': '任务资料或位置身份已变化，需要重新读取',
+    'task_result_invalid': '任务结果尚未通过校验',
+    'document_target_invalid': '审阅位置不属于当前文档或存在重复',
     'model_recovery_identity_changed': '恢复期间模型、设备或配置已变化，请核对后重新发送',
     'rag_rerank_timeout': '资料重排序等待已达到配置时限，请查看检索诊断',
     'rag_worker_crash': '检索进程已退出，请查看辅助模型与设备诊断',
@@ -64,11 +87,19 @@ REASONS = {
     "image_payload_too_large": "本次图片数据超过模型服务的大小限制",
     "tool_call_limit_exceeded": "本次工具调用额度已用完",
     "tool_read_limit_exceeded": "本次文件读取或搜索额度已用完",
+    "task_no_progress": "任务重复读取且未产生新进展，已保存处理结果",
+    "working_context_summary_invalid": "工作上下文整理返回格式无效，原始内容和检查点已保留",
+    "tool_result_forbidden": "已保存结果不属于当前任务或已不可访问",
+    "tool_result_corrupt": "已保存结果完整性校验失败",
+    "document_cursor_invalid": "来源文件、解析版本或读取范围已变化，请重新读取",
+    "user_input_context_too_small": "当前模型窗口不足以保留任务指令和原文读取入口",
     "tool_mutation_limit_exceeded": "本轮任务的累计文件变更额度已用完",
     "tool_data_limit_exceeded": "工具请求或返回的数据量超过上限",
     "tool_limit_exceeded": "工具执行达到内部额度限制",
     "search_budget_exceeded": "搜索或网页内容额度已用完",
     "model_tool_protocol_failed": "模型返回的工具格式无法执行",
+    "model_template_render_failed": "模型聊天模板无法处理本次消息，请检查模型与模板配置后重试",
+    "model_message_order_invalid": "本次模型请求的消息顺序无效，请检查消息组装后重试",
     "model_tool_contract_failed": "模型返回的工具参数纠正后仍不符合格式",
     "invalid_tool_call": "工具参数无法解析或校验",
     "unsupported_tool": "请求的工具不可用",
@@ -98,6 +129,10 @@ IMAGE_REFUSAL_CODES = frozenset({
     "model_vision_unsupported", "image_format_unsupported", "image_payload_too_large",
 })
 
+DETERMINISTIC_TEMPLATE_ERROR_CODES = frozenset({
+    'model_template_render_failed', 'model_message_order_invalid',
+})
+
 
 def image_unread_notice(code: str | None = None) -> str:
     reason = REASONS.get(code, "当前选择的模型或调用路线未提供本轮可用的图片读取能力")
@@ -114,8 +149,27 @@ def safe_code(error: BaseException) -> str:
     return code if code in REASONS else "internal_error"
 
 
+def failure_explanation_messages(goal: str, code: str, operations: list[dict[str, Any]], *, goal_limit: int) -> list[dict[str, str]]:
+    return [
+        {'role': 'system', 'content': (
+            '请用用户使用的语言解释本次任务的实际处理情况。任务尚未完成。'
+            '只说明已确认的失败原因、已完成或不确定的操作，以及补齐条件后如何继续。'
+            '不要重新执行操作，不要起草适航专业结论或编造条款、引用、文件保存结果。'
+            '诊断记录未说明原因时明确表示原因尚未确定。用简短自然语言回复。')},
+        {'role': 'user', 'content': json.dumps({
+            'original_request': goal[:goal_limit], 'request_truncated': len(goal) > goal_limit,
+            'task_status': 'incomplete', 'error_code': code, 'confirmed_reason': REASONS[code],
+            'operation_summary': outcome_summary(operations),
+            'recent_operations': [{key: operation.get(key) for key in ('tool_name', 'status', 'error_code')}
+                                  for operation in operations[-10:]],
+            'omitted_operation_count': max(0, len(operations) - 10)}, ensure_ascii=False)},
+    ]
+
+
 def recovery_allowed(error: BaseException, *, partial: str, operations: list[dict[str, Any]]) -> bool:
     code = getattr(error, "code", "internal_error")
+    if code in DETERMINISTIC_TEMPLATE_ERROR_CODES:
+        return False
     if code.startswith(('rag_', 'ocr_', 'execution_')) or code == 'model_recovery_identity_changed':
         return False
     if code.startswith('document_') or code in {'terminal_isolation_unavailable', 'rag_library_required', 'attachment_purpose_invalid'}:
@@ -174,7 +228,7 @@ def closing_messages(messages: list[dict[str, Any]], partial: str, code: str,
                 result.append(item)
     if partial:
         result.append({"role": "assistant", "content": partial})
-    result.append({"role": "system", "content": (
+    insert_system_message(result, {"role": "system", "content": (
         "工具执行或回复生成失败，但必须给用户一个有用的收尾结果。"
         f"失败原因：{REASONS.get(code, REASONS['internal_error'])}（{code}）。"
         + outcome_summary(operations)

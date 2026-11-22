@@ -85,13 +85,65 @@ async def watch_process(process, activity, *, heartbeat=None, job=None):
         await asyncio.sleep(5)
 
 
+class _StreamProgressWrites:
+    """Write the first delta immediately and coalesce consecutive equivalent activity."""
+    def __init__(self, clock):
+        self.clock = clock
+        self.last_write = 0
+        self.last_kind = None
+        self.pending = None
+
+    def flush(self, activity):
+        if self.pending is not None:
+            activity.progress(**self.pending)
+            self.pending = None
+            self.last_write = self.clock()
+
+    def record(self, activity, payload):
+        kind = (payload['kind'], payload['repetitive_output'])
+        if kind != self.last_kind or payload['kind'] not in {'text_delta', 'reasoning_delta'}:
+            self.flush(activity)
+            self.last_kind = kind
+            self.last_write = self.clock()
+            return activity.progress(**payload)
+        if self.pending is None:
+            self.pending = payload
+        else:
+            self.pending['characters'] += payload['characters']
+            self.pending['reasoning_characters'] += payload['reasoning_characters']
+        if self.clock() - self.last_write >= 0.2:
+            self.flush(activity)
+
+
+def _observe_stream_event(activity,event,writes):
+    from agent.execution.output_progress import OutputProgress
+    observers=getattr(activity,'_output_progress_observers',None)
+    if observers is None:
+        observers={};activity._output_progress_observers=observers
+    novel=False;observed=False
+    for channel,text in [('public',event.text or ''),('reasoning',getattr(event,'opaque_reasoning_delta','') or '')]:
+        if text:
+            observed=True
+            observer=observers.setdefault(channel,OutputProgress())
+            novel=observer.feed(text) or novel
+    return writes.record(activity,dict(kind=event.kind,characters=len(event.text or ''),
+        reasoning_characters=len(getattr(event,'opaque_reasoning_delta','') or ''),repetitive_output=observed and not novel,
+        **({'output_delivered':True} if event.kind!='finish' else {})))
+
+
 async def monitored_events(factory, *, stage='model_output', diagnose=None, process=None, heartbeat=None, job=None,
                            safe_to_retry=False, recoverable=None):
     """Monitor stream ownership, drain cancellation and preserve output ordering."""
+    import time
+    writes = _StreamProgressWrites(time.monotonic)
     if current_monitor.get() is None or current_task_id.get() is None or current_activity.get() is not None:
         stream = factory()
         try:
             async for event in stream:
+                activity=current_activity.get()
+                if activity is not None and event.kind not in {'usage','provider_diagnostic'}:
+                    activity.replay_unsafe=getattr(activity,'replay_unsafe',False) or event.kind!='finish'
+                    _observe_stream_event(activity,event,writes)
                 yield event
         finally:
             await stream.aclose()
@@ -109,8 +161,8 @@ async def monitored_events(factory, *, stage='model_output', diagnose=None, proc
             async for event in stream:
                 if event.kind not in {'usage', 'provider_diagnostic'}:
                     produced = produced or event.kind != 'finish'
-                    activity.progress(kind=event.kind, characters=len(event.text or ''),
-                                      **({'output_delivered': True} if event.kind != 'finish' else {}))
+                    activity.replay_unsafe=produced
+                    _observe_stream_event(activity,event,writes)
                 await queue.put(event)
         finally:
             await stream.aclose()
@@ -120,7 +172,7 @@ async def monitored_events(factory, *, stage='model_output', diagnose=None, proc
 
     def diagnose_safely(activity):
         from agent.execution.execution_wait import Diagnostic
-        return diagnose(activity) if diagnose is not None and not produced else Diagnostic()
+        return diagnose(activity) if diagnose is not None else Diagnostic()
 
     operation = asyncio.create_task(run_stage(stage, consume, safe_to_retry=safe_to_retry,
         diagnose=diagnose_safely, recoverable=lambda error: not produced and recoverable is not None and recoverable(error)))

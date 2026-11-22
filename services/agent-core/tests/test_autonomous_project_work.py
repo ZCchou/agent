@@ -109,8 +109,12 @@ def test_confirmation_receives_real_file_tools_and_completes_change_set(tmp_path
     def respond(req):
         payload = json.loads(req.content)
         requests.append(payload)
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload)
         names = {item["function"]["name"] for item in payload.get("tools", [])}
-        if "fs_propose_changes" not in names:
+        if checked is not None:
+            delta, reason = {"content": checked}, "stop"
+        elif "fs_propose_changes" not in names:
             delta, reason = {"content": "No tools supplied"}, "stop"
         elif len(requests) == 1:
             delta, reason = {"tool_calls": [{"index": 0, "id": "create-page", "type": "function",
@@ -173,10 +177,11 @@ def test_confirmation_receives_real_file_tools_and_completes_change_set(tmp_path
         answers = [m["content"] for m in repository.get_conversation(work["id"])["messages"]
                    if m["role"] == "assistant"]
         assert answers == ["Plan: create a seven-file browser page.", "Created seven files."]
-        assert len(requests) == 2
+        assert len(requests) == 3
         assert {item["function"]["name"] for item in requests[0]["tools"]} == {
             "fs_list", "fs_search", "fs_read", "fs_propose_changes", "terminal_run",
-            "skills_load", "skills_read_resource", "skills_save"}
+            "skills_load", "skills_read_resource", "skills_save", "tools_discover", "task_update_plan", "task_request_input",
+            "tools_read_result", "tools_search_result"}
         assert "tool" in {item["role"] for item in requests[1]["messages"]}
         assert not any(event["event_type"] == "run.waiting_permission" for event in events)
 

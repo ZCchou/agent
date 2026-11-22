@@ -157,14 +157,16 @@ def test_uncertain_and_failed_classification_are_visible_and_conservative():
 
 
 def test_offline_fixed_model_semantic_intent_runs_before_library_check(tmp_path, monkeypatch):
-    from test_tool_continuation_retry import configuration, fixture
+    from test_tool_continuation_retry import configuration, fixture, install_http
     from agent.storage import CoreDataError
 
+    requests = install_http(monkeypatch, [({'content': '本次任务需要项目资料库，请先启用资料库。'}, 'stop')])
     async def scenario():
         async def sink(event):
             pass
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:12345/v1'
+        config['model_tool_modes']['model'] = 'text_only'
         core, project, chat, service = await fixture(tmp_path, sink, config)
         service.offline = True
         calls = []
@@ -176,12 +178,15 @@ def test_offline_fixed_model_semantic_intent_runs_before_library_check(tmp_path,
                     'reasoning': 'standard'}, None
         monkeypatch.setattr(service, '_preflight_intent_advisor', advisor)
         try:
-            with pytest.raises(CoreDataError) as error:
-                await service.start({'conversation_id': chat['id'],
-                    'content': '这个设备安装在发动机旁，需要验证什么', 'idempotency_key': 'semantic'})
-            assert error.value.code == 'rag_library_required'
+            started = await service.start({'conversation_id': chat['id'],
+                'content': '这个设备安装在发动机旁，需要验证什么', 'idempotency_key': 'semantic'})
+            await service.tasks[started['run']['id']]
+            blocked = core.get_model_run(started['run']['id'])
+            assert blocked['status'] == 'failed' and blocked['error_code'] == 'rag_library_required'
+            assert '资料库' in blocked['draft']['content']
             assert len(calls) == 1
-            assert not any(m['role'] == 'user' for m in core.get_conversation(chat['id'])['messages'])
+            assert len(requests) == 1
+            assert len([m for m in core.get_conversation(chat['id'])['messages'] if m['role'] == 'user']) == 1
         finally:
             await service.shutdown()
     asyncio.run(scenario())
@@ -201,7 +206,9 @@ def test_classifier_input_has_bounded_request_roles_and_history():
 @pytest.mark.parametrize('window', [8192, 128])
 def test_real_preflight_preserves_complete_attachment_metadata_and_resumed_answers(tmp_path, monkeypatch, window):
     import httpx
-    from agent.context_engine.policy import estimate_tokens
+    import hashlib
+    from agent.rag.routing import intent_payload, intent_tokens
+    from agent.tool_contracts import ToolCall
     from test_tool_continuation_retry import configuration, fixture
     captured = []
     original = httpx.AsyncClient
@@ -216,12 +223,12 @@ def test_real_preflight_preserves_complete_attachment_metadata_and_resumed_answe
         config = configuration()
         config['model_capabilities']['model']['context_length'] = window
         async def sink(event): pass
-        _, _, _, service = await fixture(tmp_path, sink, config)
+        core, _, work, service = await fixture(tmp_path, sink, config)
         attachments = [{'id': '597922fb-90a2-41e6-8c48-3532e89563ef', 'name': '适航设备实际参数说明.docx',
                         'purpose': 'reference', 'media_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'byte_size': 4321},
                        {'id': '8a315a60-7ac4-4be9-af30-f768e923b158', 'name': 'template.docx',
                         'purpose': 'template', 'media_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'byte_size': 9876}]
-        content = 'Read my supplied actual equipment values. ' + '背景资料 ' * 6000 + '\n\n补充信息\n用户补充回答：只读取第二份附件的第三页，不允许模拟。'
+        content = 'Read my supplied actual equipment values. ' + '背景资料 ' * 3000 + '\n\n补充信息\n用户补充回答：只读取第二份附件的第三页，不允许模拟。'
         try:
             intent, code = await service._preflight_intent_advisor(content=content, attachments=attachments,
                 profile=service._profile('synthetic'), model_id='model', conversation_kind='project_work',
@@ -231,14 +238,34 @@ def test_real_preflight_preserves_complete_attachment_metadata_and_resumed_answe
                 assert captured == []
                 return
             assert code is None
-            assert captured[0]['response_format']['type'] == 'json_schema'
-            assert captured[0]['response_format']['json_schema']['strict'] is True
-            payload = json.loads(captured[0]['messages'][-1]['content'])
+            assert captured == []
+            assert intent['defer_interpretation']
+            assert intent['files'] == 'available' and intent['tools'] == 'available'
+            assert intent['rag_requirement'] == 'uncertain'
+            assert intent['read_attachment_ids'] == []
+            projected = intent_payload(content, attachments, [], 'project_work', budget_tokens=1024)
+            payload = json.loads(projected)
             assert payload['attachments'] == attachments
             assert '用户补充回答：只读取第二份附件的第三页，不允许模拟。' in payload['request']
             assert payload['request'].startswith('Read my supplied actual equipment values.')
             assert payload['request_truncated']
-            assert estimate_tokens(captured[0]['messages']) + 512 + 64 <= window
+            assert payload['input_source']['defer_interpretation']
+            assert payload['input_source']['sha256'] == hashlib.sha256(content.encode('utf-8')).hexdigest()
+            assert intent_tokens(projected) <= 1024
+            run = core.start_model_run(content=content, conversation_id=work['id'], idempotency_key='raw-input',
+                provider_profile_id='synthetic', model_id='model')
+            pages, cursor = [], None
+            while True:
+                arguments = {'result_id': 'user-input', 'length': 1000}
+                if cursor:
+                    arguments['cursor'] = cursor
+                page = json.loads(service._saved_result_tool(run['id'], ToolCall('read-source', 'tools.read_result', arguments)))
+                pages.append(page['content'])
+                cursor = page['next_cursor']
+                if cursor is None:
+                    break
+            assert ''.join(pages) == content
+            assert '用户补充回答：只读取第二份附件的第三页，不允许模拟。' in pages[-1]
         finally:
             await service.shutdown()
     asyncio.run(scenario())
@@ -305,6 +332,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
     from test_tool_continuation_retry import configuration, fixture
     from test_document_runtime_plan import runtime_attachment
     captured = []
+    goal_requests = []
     original = httpx.AsyncClient
     def respond(request):
         payload = json.loads(request.content)
@@ -322,7 +350,11 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
                 result['read_attachment_ids'] = [value['attachments'][0]['id']]
             content = json.dumps(result, ensure_ascii=False)
         else:
-            content = '已读取实际设备型号 ACTUAL-Z。'
+            from goal_check_support import goal_check_content
+            checked = goal_check_content(payload)
+            if checked is not None:
+                goal_requests.append(json.loads(payload['messages'][-1]['content']))
+            content = checked or '已读取实际设备型号 ACTUAL-Z。'
         return httpx.Response(200, text='data: ' + json.dumps({'choices': [{'delta': {'content': content}, 'finish_reason': 'stop'}]}) + '\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def scenario():
@@ -335,7 +367,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
             async def parse(self, path):
                 return {'chunks': [{'text': 'ACTUAL-Z', 'locator': {'page': 3}}], 'warnings': []}
         service.document_attachments.parser = Parser()
-        attachment = runtime_attachment(tmp_path, '597922fb-90a2-41e6-8c48-3532e89563ef', 'ACTUAL-Z', '适航设备模板.docx')
+        attachment = runtime_attachment(tmp_path, '597922fb-90a2-41e6-8c48-3532e89563ef', 'ACTUAL-Z', '适航设备资料.pdf')
         try:
             task = (await service.intent_sessions.handle('start', {'request': {
                 'conversation_id': work['id'], 'content': '提取所选附件中的实际设备型号。' + '背景资料 ' * 3000,
@@ -352,6 +384,8 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
             await service.tasks[run_id]
             assert core.get_model_run(run_id)['status'] == 'completed'
             assert len(captured) == 2
+            assert any(item['answer'] == '第三页，只提取实际设备型号，不允许模拟。'
+                       for item in goal_requests[0]['answers'])
             for value in captured:
                 assert value['attachments'] == [{key: attachment[key] for key in ('id', 'name', 'media_type', 'byte_size')} | {'purpose': 'reference'}]
         finally:
@@ -359,7 +393,7 @@ def test_normal_intent_start_and_respond_keep_purpose_override_and_complete_answ
     asyncio.run(scenario())
 
 
-def test_first_project_message_uses_bound_libraries(tmp_path, monkeypatch):
+def test_first_native_project_action_can_choose_evidence_from_bound_libraries(tmp_path, monkeypatch):
     from test_tool_continuation_retry import configuration, fixture
 
     async def scenario():
@@ -378,7 +412,9 @@ def test_first_project_message_uses_bound_libraries(tmp_path, monkeypatch):
             started = await service.start({'kind': 'project_work', 'project_id': project['id'],
                 'provider_profile_id': 'synthetic', 'model_id': 'model',
                 'content': '振动试验目的', 'idempotency_key': 'first-message'})
-            assert started['run']['rag_decision']['required']
+            assert not started['run']['rag_decision']['required']
+            assert started['run']['rag_decision']['reason'] == 'model_pending'
+            assert started['run']['rag_decision']['agent_loop']
         finally:
             await service.shutdown()
     asyncio.run(scenario())
@@ -475,7 +511,8 @@ def test_runtime_continue_preserves_document_task_in_both_modes(tmp_path, monkey
             assert decision['task_type'] == 'document_export'
             assert decision['required']
             assert decision['query_context'] == '填写项目模板并保存为Word文档'
-            assert observed[0]['pending_task']['task_type'] == 'document_export'
+            assert observed == []
+            assert decision['agent_loop'] is True
         finally:
             await service.shutdown()
     asyncio.run(scenario())

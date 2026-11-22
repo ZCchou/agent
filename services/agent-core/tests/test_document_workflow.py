@@ -27,6 +27,51 @@ def workflow(tmp_path):
     return core, run, DocumentWorkflow(core)
 
 
+def test_saved_review_reports_restore_full_body_only_for_current_evidence(tmp_path):
+    import json
+    core, run, docs = workflow(tmp_path)
+    template = docs.register_template(run['id'], template_bytes(), '原件.docx')
+    text = '完整审阅结果。\n' * 2000
+    artifact = docs.create(run['id'],text,'markdown',max_characters=100000)
+    docs.record_review(run['id'],artifact['id'],{'template_id':template['id'],'template_sha256':template['sha256'],
+        'coverage':{'total':2000,'completed':2000},'review_status':'pending_human_review'})
+    with core._connect() as db:
+        manifest = docs.get(run['id'],artifact['id'])['manifest']
+        db.execute('UPDATE document_artifacts SET manifest_json=? WHERE id=?',
+            (json.dumps({**manifest,'rag_generation':7}),artifact['id']))
+    assert docs.saved_review_reports(run['id'],7) == [text]
+    assert docs.saved_review_reports(run['id'],8) == []
+    docs.path_for(run['id'],artifact['id']).write_text('corrupted',encoding='utf-8')
+    with pytest.raises(CoreDataError):
+        docs.saved_review_reports(run['id'],7)
+
+
+@pytest.mark.parametrize('change', ['delete', 'overwrite'])
+def test_completion_checks_actual_published_document_bytes(tmp_path, change):
+    _, run, docs = workflow(tmp_path)
+    artifact = docs.create(run['id'], '真实交付内容', 'docx')
+    path = tmp_path / '交付.docx'
+    path.write_bytes(docs.path_for(run['id'], artifact['id']).read_bytes())
+    docs.record_publication(run['id'], artifact['id'], {'status': 'published',
+        'path': path.name, 'absolute_path': str(path), 'sha256': artifact['sha256']})
+    assert docs.verify_publication(run['id'], artifact['id'])
+    if change == 'delete':
+        path.unlink()
+    else:
+        path.write_text('不是原文档', encoding='utf-8')
+    with pytest.raises(CoreDataError, match='交付'):
+        docs.verify_publication(run['id'], artifact['id'])
+
+
+def test_final_checker_reads_authenticated_document_content_with_truncation(tmp_path):
+    _, run, docs = workflow(tmp_path)
+    artifact = docs.create(run['id'], '错误的振动试验答案\n' + '长正文' * 1000, 'docx')
+    preview = docs.verification_content(run['id'], artifact['id'], max_characters=400)
+    assert '错误的振动试验答案' in str(preview['items'])
+    assert preview['truncated'] and preview['total_characters'] > 400
+    assert sum(len(item['text']) for item in preview['items']) <= 400
+
+
 def test_inspect_and_fill_docx_paragraph_and_table_keep_original(tmp_path):
     core, run, service = workflow(tmp_path)
     payload = template_bytes()
@@ -60,6 +105,15 @@ def test_template_identity_targets_and_artifact_tampering_are_checked(tmp_path):
     path.write_bytes(b'changed')
     with pytest.raises(CoreDataError):
         service.inspect(run['id'], source['template_id'])
+
+
+def test_generated_report_is_file_backed_beyond_tool_json_content_limit(tmp_path):
+    _, run, service = workflow(tmp_path)
+    content = 'Report\n' * 150000
+    with pytest.raises(CoreDataError):
+        service.create(run['id'], content, 'markdown')
+    report = service.create(run['id'], content, 'markdown', max_characters=20 * 1024 * 1024)
+    assert service.path_for(run['id'], report['id']).read_text(encoding='utf-8') == content
 
 
 @pytest.mark.parametrize('format', ['docx', 'markdown', 'txt'])
@@ -141,16 +195,42 @@ def test_project_template_import_requires_a_live_bound_operation(tmp_path):
 
 
 @pytest.mark.parametrize('destination', [None, '振动目的.docx'])
-def test_text_only_model_uses_application_owned_document_publication(tmp_path, monkeypatch, destination):
+@pytest.mark.parametrize('needs_correction', [False, True])
+def test_text_only_model_uses_application_owned_document_publication(tmp_path, monkeypatch, destination, needs_correction):
     import asyncio
     import json
     import httpx
     from test_tool_continuation_retry import fixture, configuration
     original = httpx.AsyncClient
     payloads = []
+    generations, checks, classifications = [], [], []
     def respond(request):
         payloads.append(json.loads(request.content))
-        chunk = {'choices': [{'delta': {'content': '欢迎使用本地智能体。'}, 'finish_reason': 'stop'}]}
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payloads[-1])
+        if any(message.get('role') == 'system' and str(message.get('content', '')).startswith(
+                'Classify task and first attachment read only;') for message in payloads[-1]['messages']):
+            classifications.append(payloads[-1])
+            content = json.dumps({'files': 'write', 'tools': 'available', 'web': 'off',
+                'web_evidence': 'optional', 'reasoning': 'standard', 'task_kinds': ['document_export'],
+                'explanation_code': 'export_welcome_document', 'follow_up': 'none',
+                'rag_requirement': 'not_needed', 'read_attachment_ids': [], 'read_requests': [],
+                'task_scope': 'full', 'retrieval_scope': 'focused', 'document_workflow': 'none',
+                'allow_simulated_data': False, 'clarification': None})
+        elif checked is not None:
+            value = json.loads(payloads[-1]['messages'][-1]['content'])
+            checks.append(value)
+            assert len(value['outputs']) == 1
+            result = json.loads(checked)
+            if value['requirements'] is None:
+                result['goal_requirements']['deliverables'] = [{'path': destination, 'format': 'docx'}]
+            if '错误答案' in json.dumps(value['outputs'][0]['content'], ensure_ascii=False):
+                result.update(status='needs_work', unmet_requirements=['实际Word文档没有写欢迎语，请修正正文后重新保存'])
+            content = json.dumps(result)
+        else:
+            content = '错误答案，没有完成欢迎语。' if needs_correction and not generations else '欢迎使用本地智能体。'
+            generations.append(content)
+        chunk = {'choices': [{'delta': {'content': content}, 'finish_reason': 'stop'}]}
         return httpx.Response(200, text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n')
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     async def exercise():
@@ -164,7 +244,7 @@ def test_text_only_model_uses_application_owned_document_publication(tmp_path, m
                 destination = tmp_path / operation['arguments']['path']
                 destination.write_bytes(service.documents.path_for(operation['run_id'], artifact['id']).read_bytes())
                 published.append(destination)
-                service.resolve_tool(operation['id'], True, json.dumps({'status': 'published', 'path': destination.name, 'sha256': artifact['sha256']}))
+                service.resolve_tool(operation['id'], True, json.dumps({'status': 'published', 'path': str(destination), 'sha256': artifact['sha256']}))
         config = configuration()
         config['model_tool_modes']['model'] = 'text_only'
         core, project, work, service = await fixture(tmp_path, sink, config)
@@ -174,7 +254,9 @@ def test_text_only_model_uses_application_owned_document_publication(tmp_path, m
             await service.tasks[response['run']['id']]
             run = core.get_model_run(response['run']['id'])
             assert run['status'] == 'completed', run.get('error_message')
-            assert len(published) == 1
+            assert len(published) == (2 if needs_correction else 1)
+            assert len(checks) == len(published)
+            assert len(classifications) == 1
             if destination:
                 assert published[0].name == destination
             assert '欢迎使用' in '\n'.join(p.text for p in Document(published[0]).paragraphs)
@@ -197,3 +279,49 @@ def test_application_filling_selects_table_answer_cell(tmp_path):
     document.save(stream)
     source = service.register_template(run['id'], stream.getvalue(), '表格模板.docx')
     assert service.select_section(run['id'], source['id'], '填写振动试验的试验目的') == 't-0-r0-c1'
+
+def test_template_dedup_preserves_authorized_attachment_identity(tmp_path):
+    _, run, docs = workflow(tmp_path)
+    payload = template_bytes()
+    first = docs.register_template(run['id'], payload, 'same.docx', source_id='attachment-a')
+    second = docs.register_template(run['id'], payload, 'same.docx', source_id='attachment-b')
+    assert first['id'] != second['id']
+    assert docs.register_template(run['id'], payload, 'same.docx', source_id='attachment-a')['id'] == first['id']
+    assert docs.get(run['id'], first['id'])['manifest']['authorized_source_id'] == 'attachment-a'
+    legacy = docs.register_template(run['id'], payload, 'same.docx')
+    assert legacy['id'] not in {first['id'], second['id']}
+    assert docs.register_template(run['id'], payload, 'same.docx')['id'] == legacy['id']
+
+
+def test_single_cell_fill_preserves_all_other_docx_parts(tmp_path):
+    import zipfile
+
+    _, run, service = workflow(tmp_path)
+    payload = io.BytesIO(template_bytes())
+    with zipfile.ZipFile(payload, 'a') as package:
+        package.writestr('customXml/unreferenced-test.xml', b'<custom>keep this</custom>')
+    source = service.register_template(run['id'], payload.getvalue(), 'template.docx')
+    filled = service.fill(run['id'], source['id'], [{'target_id': 't-0-r0-c1', 'text': 'QA Text'}],
+                          preserve_package=True)
+    output = service.path_for(run['id'], filled['id'])
+    with zipfile.ZipFile(payload) as original, zipfile.ZipFile(output) as copy:
+        assert copy.namelist() == original.namelist()
+        assert [name for name in copy.namelist() if copy.read(name) != original.read(name)] == ['word/document.xml']
+    assert Document(output).tables[0].cell(0, 1).text == 'QA Text'
+
+
+def test_first_nonempty_page_skips_blank_positions_and_keeps_raw_continuation(tmp_path):
+    _, run, service = workflow(tmp_path)
+    doc = Document()
+    for text in (' ', 'Title', '', 'Subtitle', '', 'Other'):
+        doc.add_paragraph(text)
+    payload = io.BytesIO()
+    doc.save(payload)
+    source = service.register_template(run['id'], payload.getvalue(), 'template.docx')
+    read = service.inspect(run['id'], source['id'], limit=2, nonempty_only=True)
+    assert [field['id'] for field in read['fields']] == ['p-1', 'p-3']
+    assert read['total'] == 6
+    assert read['next_offset'] == 4
+    selected = service.inspect(run['id'], source['id'], limit=1, selected_ids={'p-5'})
+    assert [field['id'] for field in selected['fields']] == ['p-5']
+    assert selected['next_offset'] is None

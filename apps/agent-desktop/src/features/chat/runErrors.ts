@@ -18,16 +18,22 @@ import type { ModelRun, ModelRunEvent } from "../../types/domain";
 
 
 /** Terminal events carry a result even when the persistence refresh fails. */
-export function applyRunFailure(run: ModelRun, event: ModelRunEvent): ModelRun {
+export function preservePublicContent(existing: string, incoming: string): string {
+  if (!incoming || existing.includes(incoming)) return existing;
+  if (!existing || incoming.includes(existing)) return incoming;
+  return existing + "\n\n" + incoming;
+}
+
+export function applyRunFailure(run: ModelRun, event: ModelRunEvent, streamed = ""): ModelRun {
   if (run.id !== event.run_id) return run;
-  const content = typeof event.data.fallback_content === "string" && event.data.fallback_content
-    ? event.data.fallback_content : run.draft?.content;
+  const content = preservePublicContent(preservePublicContent(streamed, run.draft?.content ?? ""),
+    typeof event.data.fallback_content === "string" ? event.data.fallback_content : "");
   return {
     ...run,
     status: event.event_type === "run.cancelled" ? "cancelled"
       : event.event_type === "run.interrupted" ? "interrupted" : "failed",
     error_code: typeof event.data.error_code === "string" ? event.data.error_code : run.error_code,
     error_message: typeof event.data.message === "string" ? event.data.message : run.error_message,
-    draft: content ? { content, updated_at: event.timestamp } : run.draft,
+    draft: content ? { ...run.draft, content, updated_at: event.timestamp } : run.draft,
   };
 }

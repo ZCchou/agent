@@ -126,6 +126,7 @@ class ManagedRuntime:
         self.engine = None
         self.gpu_layers_used = 0
         self.actual_context_length = None
+        self.supports_token_counting = False
         self.error = None
         self.preflight = None
         self.fallbacks = []
@@ -266,7 +267,9 @@ class ManagedRuntime:
                     "--fit", "on" if auto_layers else "off"]
                 if auto_layers:
                     command.extend(["--fit-ctx", str(record["context_length"])])
-                if record["architecture"] == "qwen3":
+                if record["architecture"] in {"qwen3", "qwen35"}:
+                    # b12110 maps --reasoning off to the Jinja template's
+                    # enable_thinking=false. Direct template kwargs are deprecated.
                     command.extend(["--reasoning", "off"])
                 operation = "process creation"
                 self.process, self.job = launch_contained(command, cwd=engine.executable.parent,
@@ -276,6 +279,7 @@ class ManagedRuntime:
                 base_url = f"http://127.0.0.1:{port}"
                 operation = "authenticated readiness check"
                 props = await self._readiness(base_url, token, record["id"], deadline, event)
+                self.supports_token_counting = bool(props.get('chat_template'))
                 facts = self._output.facts()
                 self.gpu_layers_used = facts["gpu_layers"]
                 if engine.backend != "cpu" and (not self.gpu_layers_used or engine.backend not in facts["backends"]):
@@ -362,6 +366,7 @@ class ManagedRuntime:
 
     async def _stop_child(self):
         self.profile = None
+        self.supports_token_counting = False
         process, job = self.process, self.job
         self.process, self.job = None, None
         if job:

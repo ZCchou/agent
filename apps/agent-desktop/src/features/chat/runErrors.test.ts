@@ -51,6 +51,16 @@ describe("failed run limit diagnostics", () => {
   });
 });
 
+describe("model template diagnostics", () => {
+  it.each([
+    ["model_message_order_invalid", "消息顺序", "message order"],
+    ["model_template_render_failed", "聊天模板", "chat template"],
+  ])("localizes %s in both languages", async (code, chinese, english) => {
+    expect(await translated(code, "Provider request failed")).toContain(chinese);
+    expect(await translated(code, "Provider request failed", "en")).toContain(english);
+  });
+});
+
 describe("terminal response fallback", () => {
   const run = { id: "run-1", status: "generating", draft: { content: "Partial output", updated_at: "old" } } as ModelRun;
   const event = { run_id: "run-1", sequence: 1, event_type: "run.failed", timestamp: "now", data: {
@@ -78,4 +88,12 @@ describe("terminal response fallback", () => {
   it("does not apply a different run's terminal event", () => {
     expect(applyRunFailure(run, { ...event, run_id: "other" })).toBe(run);
   });
+});
+
+
+it("keeps public streamed body when terminal payload only has a notice", () => {
+  const run = {id:"run-1", draft:{content:"Public original body",updated_at:"old"}} as ModelRun;
+  const event = {run_id:"run-1",sequence:1,event_type:"run.failed",timestamp:"now",data:{fallback_content:"System failure notice"}} as ModelRunEvent;
+  expect(applyRunFailure(run,event).draft?.content).toContain("Public original body");
+  expect(applyRunFailure(run,event).draft?.content).toContain("System failure notice");
 });

@@ -1,6 +1,8 @@
 """Live, observational model context, separate from execution authority."""
 from __future__ import annotations
 
+from agent.message_assembly import insert_system_message
+
 import asyncio
 import json
 import uuid
@@ -114,7 +116,7 @@ def render_snapshot(*, budgets: dict[str, Any], host: dict[str, Any], allowed_to
         status = observed.get("status", "unknown") if name.startswith(("fs.", "terminal.")) or name == 'document.export' else "available"
         reason = observed.get("reason_code")
         quota_names = ["calls"]
-        if name in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment"}: quota_names.append("reads")
+        if name in {"fs.list", "fs.read", "fs.search", "skills.load", "skills.read_resource", "rag.search", "rag.read", "document.inspect_template", "document.read_attachment", "tools.read_result", "tools.search_result"}: quota_names.append("reads")
         if name in {"fs.propose_changes", "skills.save", "document.fill_template", "document.export"}: quota_names.append("mutations")
         if name == "web.search": quota_names.extend(("web_searches", "web_characters"))
         if name == "web.open": quota_names.extend(("web_opens", "web_characters"))
@@ -149,5 +151,4 @@ def replace_snapshot(messages: list[dict[str, Any]], content: str) -> None:
                    and isinstance(m.get("content"), str) and m["content"].startswith(MARKER))]
     # Runtime metadata belongs with the leading instructions. Keep the user or
     # tool result at the conversation tail for providers that use that boundary.
-    index = next((i for i, message in enumerate(messages) if message.get("role") != "system"), len(messages))
-    messages.insert(index, {"role": "system", "content": content})
+    insert_system_message(messages, {"role": "system", "content": content})

@@ -113,9 +113,7 @@ fn read_json(path: &Path) -> Result<Value, String> {
 
 fn job_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     validate_job_id(id)?;
-    Ok(app
-        .path()
-        .app_data_dir()
+    Ok(crate::profile_paths::data_dir(app)
         .map_err(|_| "migration_storage_failed")?
         .join("profile-migrations")
         .join(id))
@@ -184,9 +182,7 @@ fn stage_recovery(app: &AppHandle, workspace: &Path) -> Result<(), String> {
         return Err("migration_state_invalid".into());
     }
     let target = fs::canonicalize(
-        app.path()
-            .app_data_dir()
-            .map_err(|_| "migration_storage_failed")?,
+        crate::profile_paths::data_dir(app).map_err(|_| "migration_storage_failed")?,
     )
     .map_err(|_| "migration_storage_failed")?;
     let store = app.state::<crate::credentials::CredentialStore>();
@@ -240,9 +236,7 @@ fn prepare_recovery_rollback(app: &AppHandle, workspace: &Path) -> Result<(), St
     else {
         return Ok(());
     };
-    let target = app
-        .path()
-        .app_data_dir()
+    let target = crate::profile_paths::data_dir(app)
         .map_err(|_| "migration_storage_failed")?
         .join("file-recovery/undo-catalog-v1.bin");
     if !target.exists() {
@@ -412,9 +406,7 @@ fn startup_state(mut state: Value, activation: Option<&Value>) -> (Value, bool) 
 }
 
 pub fn initialize(app: &AppHandle) -> Result<(), String> {
-    let root = app
-        .path()
-        .app_data_dir()
+    let root = crate::profile_paths::data_dir(app)
         .map_err(|_| "migration_storage_failed")?
         .join("profile-migrations");
     let latest = root.join("latest.json");
@@ -452,7 +444,7 @@ pub async fn finish_after_startup(app: AppHandle) {
     if crate::program_update_session::is_health_probe() {
         return;
     }
-    let Ok(root) = app.path().app_data_dir() else {
+    let Ok(root) = crate::profile_paths::data_dir(&app) else {
         return;
     };
     let Ok(latest) = read_json(&root.join("profile-migrations/latest.json")) else {
@@ -490,10 +482,7 @@ pub async fn profile_migration_request(
     job_id: Option<String>,
     source_ids: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    let target = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "migration_storage_failed")?;
+    let target = crate::profile_paths::data_dir(&app).map_err(|_| "migration_storage_failed")?;
     let root = target.join("profile-migrations");
     match action.as_str() {
         "discover" => {

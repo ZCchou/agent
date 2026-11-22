@@ -15,14 +15,17 @@ def test_new_database_seeds_global_instructions_and_schema_v20(tmp_path) -> None
 
     assert instructions["enabled"] is True
     assert instructions["revision"] == 1
-    assert instructions["default_version"] == "agent-default-v1"
+    assert instructions["default_version"] == "agent-local-default-v2"
+    assert '联网搜索' not in instructions['content']
+    assert 'Kimi' not in instructions['content'] and 'DeepSeek' not in instructions['content']
+    assert '更新器' in instructions['content']
     assert "agent" in instructions["content"]
     assert instructions["content_hash"] == hashlib.sha256(
         instructions["content"].encode("utf-8")
     ).hexdigest()
 
     with repository._connect() as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 33
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 37
         assert connection.execute(
             "SELECT COUNT(*) FROM global_instructions WHERE id = 1"
         ).fetchone()[0] == 1
@@ -55,18 +58,34 @@ def test_global_instruction_length_is_bounded(tmp_path) -> None:
     assert error.value.code == "invalid_global_instruction"
 
 
+@pytest.mark.parametrize('edited', [False, True])
+def test_schema37_replaces_only_untouched_legacy_default(tmp_path, edited):
+    from agent.global_instructions import LEGACY_DEFAULT_GLOBAL_INSTRUCTIONS, DEFAULT_GLOBAL_INSTRUCTIONS
+    path = tmp_path/'legacy.db'
+    repository = CoreRepository(path)
+    with repository._connect() as db:
+        db.execute('UPDATE global_instructions SET content=?,content_hash=?,default_version=?,revision=?,enabled=0',
+            (LEGACY_DEFAULT_GLOBAL_INSTRUCTIONS,hashlib.sha256(LEGACY_DEFAULT_GLOBAL_INSTRUCTIONS.encode()).hexdigest(),
+             'agent-default-v1',2 if edited else 1))
+        db.execute('UPDATE schema_info SET version=36')
+    migrated = CoreRepository(path).get_global_instructions()
+    assert migrated['content'] == (LEGACY_DEFAULT_GLOBAL_INSTRUCTIONS if edited else DEFAULT_GLOBAL_INSTRUCTIONS)
+    assert migrated['enabled'] is False
+    assert migrated['revision'] == 2
+
+
 def test_global_instruction_protocol_round_trip(tmp_path) -> None:
     repository = CoreRepository(tmp_path / "global-instructions-protocol.db")
 
     loaded = handle_message(
-        {"v": 26, "id": "get", "type": "memory.global_instructions.get", "params": {}},
+        {"v": 30, "id": "get", "type": "memory.global_instructions.get", "params": {}},
         repository,
     )
     assert loaded["result"]["global_instructions"]["revision"] == 1
 
     saved = handle_message(
         {
-            "v": 26,
+            "v": 30,
             "id": "update",
             "type": "memory.global_instructions.update",
             "params": {"content": "使用简洁中文回答。", "enabled": True},
@@ -76,7 +95,7 @@ def test_global_instruction_protocol_round_trip(tmp_path) -> None:
     assert saved["result"]["global_instructions"]["content"] == "使用简洁中文回答。"
 
     reset = handle_message(
-        {"v": 26, "id": "reset", "type": "memory.global_instructions.reset", "params": {}},
+        {"v": 30, "id": "reset", "type": "memory.global_instructions.reset", "params": {}},
         repository,
     )
     assert reset["result"]["global_instructions"]["revision"] == 3

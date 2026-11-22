@@ -400,7 +400,6 @@ pub async fn rag_open_original(
     manager: State<'_, Mutex<CoreProcessManager>>,
     version_id: String,
 ) -> Result<(), String> {
-    use tauri::Manager;
     use tauri_plugin_opener::OpenerExt;
     let result = request_core_with_timeout(
         &app,
@@ -414,8 +413,7 @@ pub async fn rag_open_original(
         result["path"].as_str().ok_or("Missing original path")?,
     ))?;
     let root = canonical_path(
-        &app.path()
-            .app_data_dir()
+        &crate::profile_paths::data_dir(&app)
             .map_err(|e| e.to_string())?
             .join("rag")
             .join("originals"),

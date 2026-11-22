@@ -254,3 +254,13 @@ def test_automatic_attempts_can_share_one_call_allowance(budget, monkeypatch):
         admitted(retry, ToolCall("auto-extra", "fs.list", {"path": "."}), budget_attempt_ids=lineage)
     assert caught.value.code == "tool_call_limit_exceeded"
     assert caught.value.details["used"] == 3
+
+
+def test_nested_model_error_keeps_its_code(budget):
+    from agent.providers import ProviderError
+
+    async def fail():
+        raise ProviderError("provider_response_incomplete", "diagnostic detail")
+
+    _, result = admitted(budget, ToolCall("review", "document.review_targets", {"template_id":"source", "format":"markdown"}), async_executor=fail)
+    assert result.error_code == "provider_response_incomplete"

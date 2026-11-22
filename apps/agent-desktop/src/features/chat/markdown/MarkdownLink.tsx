@@ -1,15 +1,17 @@
-import { ExternalLink, FileText, FolderOpen } from "lucide-react";
+import { ExternalLink, FolderOpen } from "lucide-react";
 import { type ComponentPropsWithoutRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { classifyLink, parseProjectDirectoryTarget, parseProjectFileTarget, parseRagEvidenceTarget, type ProjectDirectoryTarget, type ProjectFileTarget } from "./markdownPolicy";
+import { ProjectFileLink } from "./ProjectFileLink";
 import { RagEvidenceLink } from "./RagEvidenceLink";
 
-export function MarkdownLink({ href = "", children, onProjectFile, onProjectDirectory }: ComponentPropsWithoutRef<"a"> & {
+export function MarkdownLink({ href = "", children, onProjectFile, onProjectDirectory, verifiedEvidenceIds }: ComponentPropsWithoutRef<"a"> & {
+  verifiedEvidenceIds?: readonly string[];
   onProjectFile?: (target: ProjectFileTarget) => void;
   onProjectDirectory?: (target: ProjectDirectoryTarget) => void;
 }) {
   const evidenceId = parseRagEvidenceTarget(href);
-  if (evidenceId) return <RagEvidenceLink evidenceId={evidenceId}>{children}</RagEvidenceLink>;
+  if (evidenceId && verifiedEvidenceIds?.includes(evidenceId)) return <RagEvidenceLink evidenceId={evidenceId}>{children}</RagEvidenceLink>;
   const directoryTarget = parseProjectDirectoryTarget(href);
   if (directoryTarget && onProjectDirectory) {
     return <button type="button" className="markdown-link markdown-link--project" title={directoryTarget.path}
@@ -17,8 +19,8 @@ export function MarkdownLink({ href = "", children, onProjectFile, onProjectDire
   }
   const projectTarget = parseProjectFileTarget(href);
   if (projectTarget && onProjectFile) {
-    return <button type="button" className="markdown-link markdown-link--project" title={projectTarget.path}
-      onClick={() => onProjectFile(projectTarget)}><span>{children}</span><FileText size={12} aria-hidden="true" /></button>;
+    return <ProjectFileLink path={projectTarget.path} open={() => onProjectFile(projectTarget)}
+      openDirectory={onProjectDirectory}>{children}</ProjectFileLink>;
   }
   if (classifyLink(href) !== "external") {
     return <span className="markdown-link--blocked">{children}</span>;

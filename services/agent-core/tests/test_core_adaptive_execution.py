@@ -374,8 +374,9 @@ def test_parser_adaptive_exchange_accepts_only_matching_worker_heartbeats():
     assert observed == [{'worker': 'document_parser'}]
 
 
-@pytest.mark.parametrize('linked_retry,long_targets', [(False, False), (True, False), (False, True)])
-def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry, long_targets):
+@pytest.mark.parametrize('linked_retry,long_targets,correction', [
+    (False, False, False), (True, False, False), (False, True, False), (False, False, True)])
+def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_path, monkeypatch, linked_retry, long_targets, correction):
     import hashlib
     import io
     import json
@@ -389,10 +390,21 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
 
     original_client = httpx.AsyncClient
     batches = []
+    goal_checks = []
 
     def respond(request):
         payload = json.loads(request.content)
         value = json.loads(payload['messages'][-1]['content'])
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload)
+        if checked is not None:
+            goal_checks.append(value)
+            if correction and len(goal_checks) == 1:
+                result = json.loads(checked)
+                result.update(status='needs_work', unmet_requirements=['请进一步核对适用性说明'])
+                checked = json.dumps(result)
+            chunk = {'choices': [{'delta': {'content': checked}, 'finish_reason': 'stop'}]}
+            return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n')
         batch, sources = value['batch'], value['sources']['evidence']
         batches.append(batch)
         assert sources
@@ -417,12 +429,7 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         cancellation = None
 
         async def emit(value):
-            nonlocal checkpoint_count, cancellation
-            if (linked_retry and cancellation is None and value['event_type'] == 'execution.activity'
-                    and value['data'].get('stage') == 'document_review' and value['data'].get('event') == 'checkpoint'):
-                checkpoint_count += 1
-                if checkpoint_count == 2:
-                    cancellation = asyncio.create_task(service.cancel(value['run_id']))
+            pass
 
         config = configuration()
         config['base_url'] = 'http://127.0.0.1:19999/v1'
@@ -430,6 +437,26 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         if long_targets:
             config['model_capabilities']['model']['context_length'] = 8192
         core, project, work, service = await fixture(tmp_path, emit, config)
+        checkpoint = service.execution_monitor._checkpoint
+        cancelled_activity = []
+        def checkpoint_then_cancel(activity, key, identity, payload):
+            nonlocal checkpoint_count, cancellation
+            committed = checkpoint(activity, key, identity, payload)
+            if committed and linked_retry and cancellation is None and activity.stage == 'document_review':
+                checkpoint_count += 1
+                if checkpoint_count == 2:
+                    # Cancellation is a business-checkpoint guarantee, not a
+                    # count of UI notifications, which may be coalesced.
+                    with core._connect() as db:
+                        saved = db.execute('SELECT payload_json FROM execution_wait_checkpoints '
+                            'WHERE task_id=? AND stage=? AND checkpoint_key=?',
+                            (activity.task_id, activity.stage, key)).fetchone()
+                    assert saved and json.loads(saved['payload_json']) == payload
+                    cancelled_activity.append(activity)
+                    owner = service.execution_monitor.get_task(activity.task_id)['run_id']
+                    cancellation = asyncio.create_task(service.cancel(owner))
+            return committed
+        monkeypatch.setattr(service.execution_monitor, '_checkpoint', checkpoint_then_cancel)
         await service.rag.close()
         service.rag = RagService(core, Engines())
         service.rag_grounding = RagGrounding(service.rag)
@@ -447,6 +474,10 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
         document.save(payload)
         attachment = source_attachment(tmp_path, payload.getvalue(), 'attached.docx')
         attachment['purpose'] = 'reference'
+        other = source_attachment(tmp_path, payload.getvalue(), 'other.docx') if correction else None
+        if other:
+            other['id'] = 'unselected-docx'
+            other['artifacts'][0]['artifact_id'] = 'unselected-source'
         original_hash = attachment['sha256']
 
         async def advisor(**params):
@@ -464,13 +495,16 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
                 {'library_id': library})))['status'] == 'completed'
             await service.rag.handle('library.bind', {'library_id': library, 'project_id': project['id'], 'enabled': True})
             result = await service.start({'conversation_id': work['id'], 'content': '请检查附件中的每个现有位置',
-                'attachments': [attachment], 'idempotency_key': 'semantic-review'})
+                'attachments': [other, attachment] if other else [attachment], 'idempotency_key': 'semantic-review'})
             await asyncio.gather(service.tasks[result['run']['id']], return_exceptions=True)
             run = core.get_model_run(result['run']['id'])
             if linked_retry:
                 assert cancellation is not None
                 await cancellation
                 assert run['status'] == 'cancelled'
+                assert checkpoint_count == 2 and len(cancelled_activity) == 1
+                assert not checkpoint(cancelled_activity[0], 'late-after-cancel', {}, [])
+                assert not cancelled_activity[0].progress(completed=999)
                 parent_root = service.execution_status({'owner_kind': 'run', 'owner_id': run['id']})
                 with core._connect() as connection:
                     saved = connection.execute('SELECT payload_json FROM execution_wait_checkpoints WHERE task_id=? AND stage=?',
@@ -488,12 +522,13 @@ def test_normal_model_selected_review_covers_reference_docx_without_export(tmp_p
             assert run['rag_decision']['task_type'] == 'evidence_answer'
             assert len(batches) >= 2 and all(len(batch['fields']) <= 10 for batch in batches)
             if not linked_retry:
-                assert len(batches) >= 4
-                assert len({field['id'] for batch in batches for field in batch['fields']}) == paragraph_count + 2
+                assert len(batches) >= 3
+                assert len({field['id'] for batch in batches for field in batch['fields']}) == paragraph_count + 3
                 with core._connect() as connection:
                     invocation_count = connection.execute('SELECT COUNT(*) FROM invocation_specs i JOIN execution_plans p ON p.id=i.plan_id WHERE p.run_id=?',
                         (run['id'],)).fetchone()[0]
-                assert invocation_count == len(batches)
+                assert invocation_count == len(batches) + len(goal_checks)
+            assert len(goal_checks) == (2 if correction else 1)
             assert hashlib.sha256((tmp_path / attachment['storage_key']).read_bytes()).hexdigest() == original_hash
             assert not any(operation['tool_name'] == 'document.export' for operation in service.tool_loop.repository.list_for_run(run['id']))
             assert str(paragraph_count + 3) in run['assistant_message']['content']

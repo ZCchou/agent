@@ -12,6 +12,7 @@ import {
 import { getAgentCoreStatus, pingAgentCore, type CoreStatus } from "../services/tauri/coreBridge";
 
 interface DraftConversation {
+  scope: string;
   ragMode?: "auto" | "required";
   kind: ConversationKind;
   category: ProjectCategory;
@@ -81,9 +82,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     INITIAL_PROJECT_NAVIGATION,
   );
   const { viewingProjectId, newProjectRequested } = projectNavigation;
-  const [draft, setDraft] = useState<DraftConversation>({
+  const [draft, setDraft] = useState<DraftConversation>(() => ({
+    scope: `draft-${crypto.randomUUID()}`,
     kind: "standard_chat", category: "casual", projectId: null, chatGroupId: null, revision: 0,
-  });
+  }));
   const [coreStatus, setCoreStatus] = useState<CoreStatus>({ running: false, healthy: false });
 
   const refreshCoreStatus = useCallback(async () => {
@@ -124,20 +126,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const startNewChat = useCallback((chatGroupId: string | null = null) => {
+    const scope = `draft-${crypto.randomUUID()}`;
     dispatchProjectNavigation({ type: "view", projectId: null });
     setActiveConversationId(null);
     setDraft((current) => ({
       kind: "standard_chat", category: "casual", projectId: null, chatGroupId,
+      scope,
       revision: current.revision + 1,
     }));
     setCurrentPage("chat");
   }, []);
 
   const startNewWork = useCallback((projectId: string) => {
+    const scope = `draft-${crypto.randomUUID()}`;
     dispatchProjectNavigation({ type: "view", projectId });
     setActiveConversationId(null);
     setDraft((current) => ({
       kind: "project_work", category: "casual", projectId, chatGroupId: null,
+      scope,
       revision: current.revision + 1,
     }));
     setCurrentPage("chat");

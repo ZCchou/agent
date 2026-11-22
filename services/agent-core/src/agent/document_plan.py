@@ -329,6 +329,8 @@ def citation_claims(text, evidence):
 
 def validate_source_locators(text, metadata):
     """Compare explicit generated locators with immutable resolved source metadata."""
+    from agent.rag.quote_scopes import validate_illustration_locators
+    validate_illustration_locators(text, metadata)
     clauses = re.findall(r'(?:\b(?:sections?|sec|clauses?|cl|paragraphs?|para)\.?|条款|§)\s*(\d+(?:\.\d+)*)', text, re.I)
     clauses += re.findall(r'第\s*(\d+(?:\.\d+)*)\s*[条节章]', text)
     pages = re.findall(r'\b(?:pages?|pp?)\.?\s*(\d+)', text, re.I)
@@ -554,6 +556,9 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
         # Older checkpoints gain provenance on their next normal resume.
         plan['equipment_parameter_provenance'] = current_provenance
         # Recheck original identity, completed output identity and current evidence on every retry.
+        if plan.get('artifact_id'):
+            workflow.path_for(run_id, plan['artifact_id'])
+        obsolete = []
         for target in plan['targets']:
             field = available.get(target['target_id'])
             if field is None or field['original_content'] != target['original_content']:
@@ -562,10 +567,29 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
                 result = target['result']
                 text = render_parameters(result, target, plan['equipment_parameters'])
                 citation_claims(text, result.get('evidence', []))
-                resolve_evidence(text, result.get('evidence', []))
-        if migrate_provenance and plan['equipment_parameters']:
-            # Earlier checkpoints applied a blanket simulation notice. Re-render
-            # saved results through the normal fill path without another model call.
+                try:
+                    resolve_evidence(text, result.get('evidence', []))
+                except CoreDataError as error:
+                    # Contract upgrades can invalidate a saved quote without
+                    # changing source identity. Never treat authority revocation,
+                    # generation changes or generic citation errors as repairable.
+                    recoverable = error.code == 'rag_quote_invalid' or (
+                        error.code == 'rag_citation_invalid'
+                        and (error.details or {}).get('locator_issue') == 'illustration_scope_mismatch')
+                    if not recoverable:
+                        raise
+                    obsolete.append((target, error.code))
+        if obsolete:
+            for target, code in obsolete:
+                target.update(status='pending', resume_issue=code)
+            # Old output already contains invalid applied fields. Detach it
+            # durably before replay or generation can fail; it remains history.
+            plan.update(artifact_id=None, status='filling', evidence_replay_pending=True)
+            save_checkpoint(path, plan)
+        if (migrate_provenance and plan['equipment_parameters']) or plan.get('evidence_replay_pending'):
+            # Rebuild valid saved results from the immutable template, both for
+            # provenance migration and after invalidating applied quote content.
+            # No model call is needed for the still-valid completed fields.
             replay = []
             for target in plan['targets']:
                 if target['status'] != 'completed':
@@ -587,6 +611,7 @@ async def fill_planned(workflow, run_id, template_id, request, generate, evidenc
                 plan['artifact_id'] = migrated['id']
                 save_checkpoint(path, plan)
             plan.pop('provenance_migration_pending')
+            plan.pop('evidence_replay_pending', None)
             save_checkpoint(path, plan)
         current_id = plan['artifact_id'] or template_id
         workflow.path_for(run_id, current_id)

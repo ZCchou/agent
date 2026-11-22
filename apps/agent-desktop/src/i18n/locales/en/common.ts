@@ -278,7 +278,7 @@ const common = {
         enabledLabel: "Enable global behavior instructions",
         enabled: "Enabled",
         disabled: "Disabled",
-        placeholder: "For example: lead with the conclusion; proactively judge when current information needs web research.",
+        placeholder: "For example: lead with the conclusion; verify professional judgments against local sources and identify missing evidence.",
         characters: "Characters: {{count}} / {{max}}",
         revision: "Revision: {{revision}}",
         boundary: "This only affects response style and collaboration. It cannot grant file, web, or tool access or bypass approval and safety rules.",
@@ -400,6 +400,7 @@ const common = {
         "unknown": "The update failed. Please retry."
       }
     },
+    interfaceStyle: { label: "Interface style", classic: "Classic", gradient: "Gradient", error: "Could not save the interface style." },
     moreSettings: "More settings",
     webSearch: {
       title: "Web & Search", description: "Manage search services, privacy, defaults, and connection status.", open: "Open",

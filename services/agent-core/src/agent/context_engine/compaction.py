@@ -83,6 +83,8 @@ def parse_checkpoint(value: str, source_trust: dict[str, str] | set[str], *, sou
         parsed = json.loads(candidate)
     except json.JSONDecodeError as error:
         raise _checkpoint_error('invalid_json') from error
+    if isinstance(parsed, dict) and set(parsed) == {'response'}:
+        parsed = parsed['response']
     if isinstance(parsed, dict) and 'items' in parsed and source_aliases is not None:
         entries = parsed['items']
         if set(parsed) != {'items'} or not isinstance(entries, list) or not 1 <= len(entries) <= 12:
@@ -105,18 +107,21 @@ def parse_checkpoint(value: str, source_trust: dict[str, str] | set[str], *, sou
             normalized[category].append({'text': text, 'source_ids': original_ids,
                                          'trust': _derived_trust({source_trust[item] for item in original_ids})})
         parsed = normalized
-    if not isinstance(parsed, dict) or not REQUIRED_KEYS <= parsed.keys():
+    if not isinstance(parsed, dict) or not parsed.keys() <= REQUIRED_KEYS:
         raise _checkpoint_error('missing_fields')
     valid_source_ids = set(source_trust)
     trust_by_source = source_trust if isinstance(source_trust, dict) else None
     for key in REQUIRED_KEYS:
-        entries = parsed[key]
+        entries = parsed.get(key)
+        if entries is None or entries == '':
+            entries = []
         if key in {"goal", "next_step"} and isinstance(entries, dict):
             entries = [entries]
+        parsed[key] = entries
         if not isinstance(entries, list):
             raise _checkpoint_error('invalid_list', key)
         for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
+            if not isinstance(entry, dict) or not isinstance(entry.get("text"), str) or not entry["text"].strip():
                 raise _checkpoint_error('invalid_entry', key)
             source_ids = entry.get("source_ids")
             if isinstance(source_ids, list) and source_aliases is not None:
@@ -135,6 +140,8 @@ def parse_checkpoint(value: str, source_trust: dict[str, str] | set[str], *, sou
                 expected = _derived_trust(source_trusts)
                 if trust != expected:
                     raise _checkpoint_error('trust_mismatch', key)
+    if not any(parsed.values()):
+        raise _checkpoint_error('empty_checkpoint')
     return parsed
 
 

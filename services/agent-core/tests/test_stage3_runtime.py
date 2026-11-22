@@ -189,7 +189,7 @@ def test_project_static_question_with_auto_web_does_not_require_search_or_image_
     asyncio.run(scenario())
 
 
-def test_automatic_project_intent_advisor_promotes_ambiguous_file_work(
+def test_automatic_local_project_defers_first_action_to_agent_loop(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -211,13 +211,10 @@ def test_automatic_project_intent_advisor_promotes_ambiguous_file_work(
             },
         })
         plan = started["execution_plan"]
-        # The user/rule request stays immutable; the semantic advisor is
-        # recorded separately and contributes the effective plan.
         assert plan["requirements"]["files"] == "available"
-        assert plan["resolved_intent"]["advisor"]["files"] == "write"
-        assert plan["resolved_intent"]["advisor"]["tools"] == "required"
-        assert plan["resolved_intent"]["effective_requirements"]["files"] == "write"
-        assert plan["resolved_intent"]["effective_requirements"]["tools"] == "required"
+        assert plan["resolved_intent"]["agent_loop"] is True
+        assert "advisor" not in plan["resolved_intent"]
+        assert plan["resolved_intent"]["effective_requirements"]["tools"] == "available"
         await service.tasks[started["run"]["id"]]
 
     asyncio.run(scenario())
@@ -507,8 +504,10 @@ def test_native_tool_protocol_gets_one_bounded_correction(
         assert run["status"] == "completed"
         assert run["assistant_message"]["content"] == "Recovered after one correction."
         assert len(captured_messages) == 2
+        from agent.message_assembly import validate_system_message_prefix
+        validate_system_message_prefix(captured_messages[1])
         assert any(
-            message.get("role") == "system" and "previous tool call was rejected" in message["content"]
+            message.get("role") == "user" and "previous tool call was rejected" in message["content"]
             for message in captured_messages[1]
         )
         assert service.list_tool_operations(run["id"]) == []
@@ -551,7 +550,7 @@ def test_fake_model_naturally_reads_then_proposes_a_file_change(tmp_path: Path) 
         assert run["status"] == "completed"
         operations = service.list_tool_operations(run["id"])
         assert [item["tool_name"] for item in operations] == [
-            "fs.read", "fs.propose_changes",
+            "fs.read", "fs.propose_changes", "task.update_plan",
         ]
         assert operations[1]["arguments"]["mutations"][0]["path"] == "README.md"
 

@@ -200,3 +200,74 @@ def test_model_save_admission_serializes_with_disable(tmp_path, monkeypatch):
     assert revoked.is_set()
     assert r.inspect('custom')['content'] == 'Updated'
     assert r.list()[0]['enabled'] is False
+
+def test_builtin_document_skill_installation_is_progressive_and_preserves_preferences(tmp_path):
+    from agent.skills import SkillRegistry
+    from agent.rag.bootstrap import install_builtin_skill
+    skills = SkillRegistry(tmp_path / 'skills.json')
+    assert skills.list() == []
+    install_builtin_skill(skills)
+    item = skills.load('local-document-work', explicit=False)
+    assert item['enabled'] and not item['rag_required']
+    assert skills.load('grounded-document-review')['rag_required']
+    assert skills.requires_rag('$grounded-document-review 核对附件与资料库')
+    assert not skills.requires_rag('提取附件中已填写的内容，保存为文档')
+    assert not skills.requires_rag('$local-document-work summarize attachment')
+    assert 'document.read_attachment' in item['content']
+    assert 'references/examples.md' in item['content']
+    assert 'Evidence table example' not in skills.render('Read attachment', tools_available=True)
+    assert 'Evidence table example' in skills.read_resource('local-document-work', 'references/examples.md')['content']
+    skills.set_enabled(item['id'], False)
+    install_builtin_skill(skills)
+    assert not skills.inspect('local-document-work')['enabled']
+
+
+def test_existing_rag_marker_does_not_skip_new_document_skill(tmp_path):
+    from agent.skills import SkillRegistry
+    from agent.rag.bootstrap import install_builtin_skill
+    skills = SkillRegistry(tmp_path / 'skills.json')
+    (tmp_path / 'builtin-rag-skill-v1.installed').write_text('1')
+    install_builtin_skill(skills)
+    assert skills.load('local-document-work')['enabled']
+
+
+
+@pytest.mark.parametrize('case', ['pristine', 'disabled', 'edited', 'removed', 'missing', 'external'])
+def test_builtin_review_skill_upgrade_respects_ownership(tmp_path, monkeypatch, case):
+    from hashlib import sha256
+    from agent.rag import bootstrap
+    from agent.skills import SkillRegistry
+
+    skills = SkillRegistry(tmp_path / 'skills.json')
+    bootstrap.install_builtin_skill(skills)
+    item = skills.inspect('grounded-document-review')
+    skill = Path(item['path']) / 'SKILL.md'
+    current = skill.read_bytes()
+    previous = current + b'\nOld official review instructions.\n'
+    skill.write_bytes(previous)
+    monkeypatch.setattr(bootstrap, '_GROUNDED_REVIEW_V1', {sha256(previous).hexdigest()})
+    if case == 'edited':
+        skill.write_bytes(previous + b'My edits')
+    if case == 'disabled':
+        skills.set_enabled(item['id'], False)
+    if case == 'missing':
+        skill.unlink()
+    if case in {'removed', 'external'}:
+        skills.remove(item['id'])
+    if case == 'external':
+        external = tmp_path / 'user-skill'
+        external.mkdir()
+        (external / 'SKILL.md').write_bytes(previous)
+        skills.add(str(external))
+    registry_before = skills.path.read_bytes()
+    before = skill.read_bytes() if skill.exists() else None
+    bootstrap.install_builtin_skill(skills)
+    bootstrap.install_builtin_skill(skills)
+    assert skills.path.read_bytes() == registry_before
+    if case in {'pristine', 'disabled'}:
+        assert skill.read_bytes() == current
+        assert skills.inspect('grounded-document-review')['enabled'] == (case == 'pristine')
+    else:
+        assert (skill.read_bytes() if skill.exists() else None) == before
+    if case == 'external':
+        assert (external / 'SKILL.md').read_bytes() == previous

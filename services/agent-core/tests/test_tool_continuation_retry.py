@@ -31,15 +31,23 @@ def list_reply(identity):
         "function": {"name": "fs_list", "arguments": '{"path":"."}'}}]}
 
 
-def install_http(monkeypatch, replies):
+def install_http(monkeypatch, replies, *, goal_checks=False):
     requests = []
     original = httpx.AsyncClient
+    business_calls = 0
 
     def respond(request):
+        nonlocal business_calls
         payload = json.loads(request.content)
         requests.append((str(request.url), payload))
-        assert len(requests) <= len(replies), "unexpected model dispatch/replay"
-        delta, finish = replies[len(requests) - 1]
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload) if goal_checks else None
+        if checked is not None:
+            delta, finish = {'content': checked}, 'stop'
+        else:
+            assert business_calls < len(replies), "unexpected model dispatch/replay"
+            delta, finish = replies[business_calls]
+            business_calls += 1
         chunk = {"choices": [{"delta": delta, "finish_reason": finish}]}
         return httpx.Response(200, text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
 
@@ -49,7 +57,7 @@ def install_http(monkeypatch, replies):
 
 
 async def configure(service, value):
-    response = await handle_async_message({"v": 26, "id": "host-feedback",
+    response = await handle_async_message({"v": 30, "id": "host-feedback",
         "type": "provider.configure", "params": value}, service)
     assert "error" not in response, response
 
@@ -176,9 +184,9 @@ def test_host_feedback_does_not_hide_real_dispatch_revocation(tmp_path, monkeypa
 @pytest.mark.parametrize("strategy", ["default", "expanded_retry"])
 def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_path, monkeypatch, strategy):
     requests = install_http(monkeypatch, [(list_reply("inspect-original"), "tool_calls"),
-        ({"content": "partial"}, "length"), ({}, "length"),
+        ({"content": "partial"}, "length"),
         (list_reply("inspect-new-explicit-call"), "tool_calls"),
-        ({"content": "Explicit retry completed."}, "stop")])
+        ({"content": "Explicit retry completed."}, "stop")], goal_checks=True)
 
     async def scenario():
         async def sink(event):
@@ -195,7 +203,8 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
         with repository._connect() as connection:
             snapshots = [dict(row) for row in connection.execute("SELECT * FROM context_snapshots WHERE run_id=? ORDER BY round_no", (run_id,))]
             invocations = [dict(row) for row in connection.execute("SELECT * FROM invocation_specs WHERE plan_id=? ORDER BY round_no", (parent["execution_plan_id"],))]
-        assert len(invocations) == 3
+        assert parent["draft"]["content"].startswith("partial")
+        assert len(invocations) == 2
         assert len(snapshots) == len(invocations) + 1
         assert service.context.context_repository.preview(run_id)['input_scope'] == 'compiled_request'
         retried = await service.retry(run_id, context_strategy=strategy)
@@ -204,7 +213,7 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
         await service.tasks[retried["id"]]
         current = repository.get_model_run(retried["id"])
         assert current["status"] == "completed", (current["error_code"], current["error_message"])
-        assert len(requests) == 5
+        assert len(requests) == 4
         assert current["user_message_id"] == parent["user_message_id"]
         assert (current["id"] == parent["id"]) == (strategy == "default")
         if strategy == "expanded_retry": assert current["parent_run_id"] == parent["id"]
@@ -226,7 +235,7 @@ def test_explicit_retry_after_tool_progress_preserves_audit_and_has_plan(tmp_pat
 @pytest.mark.parametrize("strategy", ["default", "expanded_retry", "parent_expanded_retry"])
 def test_explicit_retry_recovers_legacy_child_only_via_bound_ancestor_plan(tmp_path, monkeypatch, strategy):
     requests = install_http(monkeypatch, [(list_reply("inspect-original"), "tool_calls"),
-        ({"content": "partial"}, "length"), ({}, "length"),
+        ({"content": "partial"}, "length"),
         ({"content": "Recovered the explicit retry."}, "stop")])
 
     async def scenario():
@@ -254,13 +263,13 @@ def test_explicit_retry_recovers_legacy_child_only_via_bound_ancestor_plan(tmp_p
         assert recovered["user_message_id"] == parent["user_message_id"]
         assert service.list_tool_operations(parent_id) == original_operations
         assert not service.list_tool_operations(recovered["id"]), "finished ancestor tools must not automatically replay"
-        assert len(requests) == 4
+        assert len(requests) == 3
         assert service.execution_repository.get_for_run(parent_id) == parent_plan
         if strategy == "parent_expanded_retry":
             repeated = await service.retry(parent_id, context_strategy="expanded_retry")
             assert repeated["id"] == recovered["id"] and repeated["status"] == "completed"
             assert repeated["id"] not in service.tasks
-            assert len(requests) == 4, "completed child must remain idempotent"
+            assert len(requests) == 3, "completed child must remain idempotent"
     asyncio.run(scenario())
 
 
@@ -368,14 +377,14 @@ def test_explicit_retry_continues_after_twenty_four_prior_tools(tmp_path, monkey
     replies += [({"content": "Synthetic incomplete response."}, "length"), ({}, "length")]
     replies += [(list_reply(f"retry-{index}"), "tool_calls") for index in range(3)]
     replies += [({"content": "Retry finished after additional inspections."}, "stop")]
-    requests = install_http(monkeypatch, replies)
+    requests = install_http(monkeypatch, replies, goal_checks=True)
 
     async def scenario():
         async def sink(event):
             if event["event_type"] == "run.tool_requested":
                 operation = event["data"]["operation"]
                 service.tool_status(operation["id"], "executing")
-                service.resolve_tool(operation["id"], True, '{"path":".","entries":[]}')
+                service.resolve_tool(operation["id"], True, json.dumps({'path': '.', 'entries': [], 'inspection': operation['sequence']}))
 
         repository, _, work, service = await fixture(tmp_path, sink)
         run_id = await start(service, work)
@@ -387,7 +396,7 @@ def test_explicit_retry_continues_after_twenty_four_prior_tools(tmp_path, monkey
         final = repository.get_model_run(run_id)
         assert final["status"] == "completed", (final["error_code"], final["error_message"])
         operations = service.list_tool_operations(run_id)
-        assert len(requests) == 30
+        assert len(requests) == 31
         assert [item["sequence"] for item in operations] == list(range(1, 28))
         assert all(item["status"] == "completed" for item in operations)
         assert len({item["attempt_id"] for item in operations[:24]}) == 1
@@ -409,8 +418,13 @@ def test_automatic_retry_keeps_allowance_but_explicit_retry_refreshes_it(tmp_pat
 
     def respond(request):
         nonlocal manual_requests
-        requests.append(json.loads(request.content))
-        if manual:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        from goal_check_support import goal_check_content
+        checked = goal_check_content(payload)
+        if checked is not None:
+            delta, finish = {'content': checked}, 'stop'
+        elif manual:
             manual_requests += 1
             delta = list_reply("manual-read") if manual_requests == 1 else {"content": "Manual retry finished."}
             finish = "tool_calls" if manual_requests == 1 else "stop"

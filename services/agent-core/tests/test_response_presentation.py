@@ -19,7 +19,7 @@ def test_tool_round_narration_is_not_the_final_answer_and_survives_reload(tmp_pa
     first = dict(list_reply("read-one"), content="先读取 main.js。", reasoning_content="PRIVATE-REASONING")
     second = dict(list_reply("read-two"), content="正在检查数据集生成逻辑。")
     requests = install_http(monkeypatch, [(first, "tool_calls"), (second, "tool_calls"),
-        ({"content": "Datasets added."}, "stop")])
+        ({"content": "Datasets added."}, "stop")], goal_checks=True)
 
     async def scenario():
         events = []
@@ -47,7 +47,7 @@ def test_tool_round_narration_is_not_the_final_answer_and_survives_reload(tmp_pa
         turns = reconstruct_turns(history, [run])
         assert [m["role"] for turn in turns for m in turn.messages] == ["user", "assistant"]
         assert "先读取" not in json.dumps([turn.messages for turn in turns], ensure_ascii=False)
-        assert len(requests) == 3
+        assert len(requests) == 4
     asyncio.run(scenario())
 
 

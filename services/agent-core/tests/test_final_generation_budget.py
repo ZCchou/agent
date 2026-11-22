@@ -21,7 +21,11 @@ def coding_endpoint(*, partial_tool=False):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(payload)
-            if len(requests) == 1:
+            from goal_check_support import goal_check_content
+            checked = goal_check_content(payload)
+            if checked is not None:
+                delta, finish = {'content': checked}, 'stop'
+            elif len(requests) == 1:
                 delta, finish = list_reply("inspect"), "tool_calls"
             elif len(requests) == 2:
                 delta, finish = {"tool_calls": [{"index": 0, "id": "write-once", "type": "function",
@@ -31,6 +35,11 @@ def coding_endpoint(*, partial_tool=False):
             elif partial_tool:
                 delta, finish = {"tool_calls": [{"index": 0, "id": "never-execute", "type": "function",
                     "function": {"name": "fs_propose_changes", "arguments": '{"title":"PRIVATE_PARTIAL'}}]}, "length"
+            elif len(requests) == 3 and payload["max_tokens"] >= 16_384:
+                delta, finish = {"tool_calls": [{"index": 0, "id": "plan", "type": "function",
+                    "function": {"name": "task_update_plan", "arguments": json.dumps({
+                        "expected_revision": 0, "steps": [], "success_criteria": ["Source file saved"],
+                        "source_scopes": [], "deliverables": [{"path": "result.py"}]})}}]}, "tool_calls"
             elif payload["max_tokens"] >= 16_384:
                 delta, finish = {"content": "Created result.py."}, "stop"
             else:
@@ -94,13 +103,16 @@ def test_final_allowance_reaches_http_and_matches_every_snapshot_and_frozen_spec
             run_id = await start(service, work)
             run = repository.get_model_run(run_id)
             assert run["status"] == status, (run["error_code"], [p["max_tokens"] for p in requests])
-            rounds = 4 if status == "failed" else 3
-            assert len(requests) == rounds, "length termination permits one text-only closing call, never a tool replay"
+            rounds = 4
+            checks = int(status == 'completed')
+            assert len(requests) == rounds + checks, "Business completion has one separate goal-check invocation"
             if status == "failed": assert not requests[-1].get("tools")
-            assert [p["max_tokens"] for p in requests] == [allowance] * rounds
+            assert [p["max_tokens"] for p in requests] == [allowance] * rounds + [2048] * checks
             assert len(writes) == 1 and (tmp_path / "result.py").read_text() == "print('done')\n"
-            assert [(op["tool_name"], op["status"]) for op in service.list_tool_operations(run_id)] == [
-                ("fs.list", "completed"), ("fs.propose_changes", "completed")]
+            expected_operations = [("fs.list", "completed"), ("fs.propose_changes", "completed")]
+            if status == "completed":
+                expected_operations.append(("task.update_plan", "completed"))
+            assert [(op["tool_name"], op["status"]) for op in service.list_tool_operations(run_id)] == expected_operations
             assert any(m.get("role") == "tool" and "changed_files" in m["content"]
                        for m in requests[2]["messages"])
             with repository._connect() as connection:
@@ -112,13 +124,14 @@ def test_final_allowance_reaches_http_and_matches_every_snapshot_and_frozen_spec
             # The assembled base remains immutable. A known-window request now
             # records its complete compiled budget before the first dispatch too.
             expected_snapshots = rounds + int(window is not None)
-            assert [row[0] for row in snapshots] == [max(512, allowance)] * expected_snapshots
+            assert [row[0] for row in snapshots] == [max(512, allowance)] * expected_snapshots + [2048] * checks
             if window is not None:
                 snapshot = service.context.context_repository.preview(run_id)
                 assert snapshot['input_scope'] == 'compiled_request'
-                assert snapshot['input_hard_limit'] == max(1, int(window * 0.85) - max(512, allowance))
-            assert [json.loads(row[0])["max_output_tokens"] for row in specs] == [allowance] * rounds
-            assert [row[1] for row in specs] == ["completed", "completed", status] + (["failed"] if status == "failed" else [])
+                assert snapshot['input_hard_limit'] == max(1, int(window * 0.85) - (2048 if checks else max(512, allowance)))
+            assert [json.loads(row[0])["max_output_tokens"] for row in specs] == [allowance] * rounds + [2048] * checks
+            expected_states = ["completed"] * 5 if status == "completed" else ["completed", "completed", "failed", "failed"]
+            assert [row[1] for row in specs] == expected_states
             if status == "failed":
                 assert run["error_code"] == "provider_response_incomplete"
                 assert not any(e["event_type"] == "run.completed" for e in events)

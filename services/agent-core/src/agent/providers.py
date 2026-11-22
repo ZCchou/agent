@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+MANAGED_USAGE_TRAILER_SECONDS = 2.0
+
 from agent.multimodal import (
     contains_images,
     ollama_content,
@@ -229,6 +231,29 @@ def validate_profile(profile: ProviderProfile) -> None:
 def _map_http_error(response: httpx.Response) -> ProviderError:
     status = response.status_code
     lowered = response.text.lower()
+    if status in {401, 403}:
+        return ProviderError("authentication_failed", "Provider authentication failed.")
+    if any(marker in lowered for marker in ("out of memory", "oom", "resource exhausted")):
+        return ProviderError("resource_exhausted", "The model provider ran out of resources.")
+    if status in {400, 422, 500}:
+        template_markers = {
+            "system message must be at the beginning": "system_message_order",
+            "conversation roles must alternate": "conversation_role_order",
+            "jinja2.exceptions.templateerror": "jinja_template_error",
+            "jinja2.exceptions.templateruntimeerror": "jinja_template_error",
+            "jinja2.exceptions.templatesyntaxerror": "jinja_template_error",
+            "jinja template error": "jinja_template_error",
+            "failed to render chat template": "chat_template_render",
+            "failed to render the chat template": "chat_template_render",
+            "error rendering chat template": "chat_template_render",
+            "failed to apply chat template": "chat_template_render",
+        }
+        for marker, category in template_markers.items():
+            if marker in lowered:
+                return ProviderError(
+                    "model_template_render_failed", "The model chat template could not render the request.",
+                    details={"http_status": status, "phase": "provider_response", "template_error": category},
+                )
     if status == 400 and "response_format" in lowered and any(
         marker in lowered for marker in ("unsupported", "unknown", "unrecognized", "not support")
     ):
@@ -268,10 +293,6 @@ def _map_http_error(response: httpx.Response) -> ProviderError:
         return ProviderError(
             "provider_context_limit_exceeded", "The provider rejected the request as too large."
         )
-    if any(marker in lowered for marker in ("out of memory", "oom", "resource exhausted")):
-        return ProviderError("resource_exhausted", "The model provider ran out of resources.")
-    if status in {401, 403}:
-        return ProviderError("authentication_failed", "Provider authentication failed.")
     if status == 404:
         return ProviderError("model_not_found", "The selected model or endpoint was not found.")
     if status == 429:
@@ -350,6 +371,22 @@ class FakeModelProvider(ModelProvider):
         self, model_id: str, messages: list[dict[str, Any]], *, tools: bool,
         options: GenerationOptions | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        if options and options.response_schema and 'goal_requirements' in options.response_schema.get('properties', {}):
+            value = json.loads(next(message['content'] for message in reversed(messages) if message['role'] == 'user'))
+            proposal = None
+            if value.get('requirements') is None:
+                execution = value.get('execution_plan', {})
+                scopes = execution.get('source_scopes') or [
+                    {'source_id': item['source_id'], 'operation': item['operation'], 'scope': 'full', 'target_ids': [], 'reason': ''}
+                    for item in value.get('observed_sources', [])]
+                proposal = {'source_scopes': scopes, 'success_criteria': execution.get('success_criteria', []),
+                    'deliverables': [{'path': item['path'], 'format': item['path'].rsplit('.', 1)[-1]}
+                        for item in execution.get('deliverables', [])]}
+            yield ProviderEvent('text_delta', text=json.dumps({'status': 'satisfied',
+                'summary': 'Demo task result checked against its recorded requirements.',
+                'unmet_requirements': [], 'questions': [], 'goal_requirements': proposal,
+                'evidence_required': bool(value.get('evidence_generation') is not None)}, ensure_ascii=False))
+            return
         if options and options.purpose == "intent_analysis":
             request = next((
                 str(message.get("content") or "")
@@ -405,6 +442,16 @@ class FakeModelProvider(ModelProvider):
         if tools and messages and messages[-1].get("role") == "tool":
             tool_name = messages[-1].get("name", "project operation")
             output = str(messages[-1].get("content", ""))
+            if tool_name == 'fs.propose_changes' and allowed_tools and 'task.update_plan' in allowed_tools:
+                calls = next(message['tool_calls'] for message in reversed(messages) if message.get('tool_calls'))
+                change = next(call['function'] for call in calls
+                    if call['function']['name'] in {'fs.propose_changes', 'fs_propose_changes'})
+                arguments = json.loads(change['arguments']) if isinstance(change['arguments'], str) else change['arguments']
+                yield ProviderEvent('tool_call', tool_call=ToolCall(f'fake-plan-{len(messages)}', 'task.update_plan', {
+                    'expected_revision': 0, 'steps': [], 'success_criteria': ['Requested files saved'], 'source_scopes': [],
+                    'deliverables': [{'path': item['path']} for item in arguments['mutations']
+                        if item['kind'] in {'create_text', 'overwrite_text', 'patch_text', 'copy', 'move'}]}))
+                return
             original = next((str(message.get("content", "")) for message in reversed(messages)
                              if message.get("role") == "user"), "")
             if tool_name == "fs.read" and any(marker in original.casefold() for marker in (
@@ -820,6 +867,11 @@ class OpenAICompatibleProvider(ModelProvider):
                     yield event
             return
         calls: dict[int, dict[str, str]] = {}
+        diagnostic_stage, diagnostic_reason, diagnostic_index = "fragment", "invalid_call", None
+        certification_reason = "not_fully_drained"
+        tool_forwarded = False
+        managed_text = self.profile.local_strict and self.profile.id.startswith('managed:') and not tools
+        received_usage = False
         finish_reason: str | None = None
         streamed_text = ""
         response_opened = False
@@ -874,7 +926,21 @@ class OpenAICompatibleProvider(ModelProvider):
                     if response.is_error:
                         await response.aread()
                         raise _map_http_error(response)
-                    async for line in response.aiter_lines():
+                    lines = response.aiter_lines()
+                    trailer_deadline = None
+                    while True:
+                        try:
+                            if trailer_deadline is None:
+                                line = await anext(lines)
+                            else:
+                                async with asyncio.timeout_at(trailer_deadline):
+                                    line = await anext(lines)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError:
+                            if trailer_deadline is None:
+                                raise
+                            break
                         if not line or not line.startswith("data:"):
                             continue
                         data = line[5:].strip()
@@ -884,6 +950,9 @@ class OpenAICompatibleProvider(ModelProvider):
                             value = json.loads(data)
                             usage = value.get("usage")
                             if isinstance(usage, dict):
+                                received_usage = received_usage or (
+                                    isinstance(usage.get('prompt_tokens'), int) and
+                                    isinstance(usage.get('completion_tokens'), int))
                                 yield ProviderEvent("usage", usage={
                                     "input_tokens": int(usage.get("prompt_tokens") or 0),
                                     "output_tokens": int(usage.get("completion_tokens") or 0),
@@ -893,6 +962,8 @@ class OpenAICompatibleProvider(ModelProvider):
                                 })
                             choices = value.get("choices") or []
                             if not choices:
+                                if managed_text and received_usage and not calls and finish_reason in {'stop', 'length'}:
+                                    break
                                 continue
                             choice = choices[0]
                             delta = choice.get("delta", {})
@@ -917,26 +988,33 @@ class OpenAICompatibleProvider(ModelProvider):
                                 "finish", finish_reason=finish_reason,
                             )
                         for raw_call in delta.get("tool_calls", []) or []:
+                            diagnostic_stage, diagnostic_reason, diagnostic_index = "fragment", "invalid_call", None
                             if not isinstance(raw_call, dict):
                                 raise ProviderError(
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                            diagnostic_reason = "invalid_index"
                             index = raw_call.get("index", 0)
                             if not isinstance(index, int) or isinstance(index, bool) or index < 0:
                                 raise ProviderError(
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                            diagnostic_index = index
                             current = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                            diagnostic_reason = "invalid_id_metadata"
                             _merge_stable_tool_fragment(current, "id", raw_call.get("id"))
+                            diagnostic_reason = "invalid_function"
                             function = raw_call.get("function", {})
                             if not isinstance(function, dict):
                                 raise ProviderError(
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                            diagnostic_reason = "invalid_name_metadata"
                             _merge_stable_tool_fragment(current, "name", function.get("name"))
+                            diagnostic_reason = "invalid_arguments_type"
                             arguments = function.get("arguments", "")
                             if isinstance(arguments, str):
                                 current["arguments"] += arguments
@@ -949,13 +1027,27 @@ class OpenAICompatibleProvider(ModelProvider):
                                     "model_tool_protocol_failed",
                                     "Model returned an invalid tool call.",
                                 )
+                        # Managed text calls have no further semantic payload after finish and usage.
+                        # Native tool streams still drain their complete ordered fragments and trailer.
+                        if managed_text and not calls and finish_reason in {'stop', 'length'}:
+                            if received_usage:
+                                break
+                            if trailer_deadline is None:
+                                trailer_deadline = asyncio.get_running_loop().time() + MANAGED_USAGE_TRAILER_SECONDS
             # Usage can arrive after the finish frame. Drain it before failing,
             # and never parse or yield tools from a truncated response.
             validate_provider_completion(streamed_text, finish_reason, {}, require_output=False)
+            from agent.native_tool_diagnostics import batch_correction_certification
+            correction_eligible, certification_reason = batch_correction_certification(
+                calls, finish_reason, forwarded_semantic=tool_forwarded)
+            validated_calls = []
             for index in sorted(calls):
                 raw = calls[index]
+                diagnostic_index = index
+                diagnostic_stage, diagnostic_reason = "arguments_json", "invalid_json"
                 try:
                     arguments = json.loads(raw["arguments"] or "{}")
+                    diagnostic_stage, diagnostic_reason = "arguments_schema", "invalid_schema"
                     internal_name = _internal_tool_name(raw["name"])
                     candidate = ToolCall(raw["id"] or f"openai-{index}", internal_name, arguments)
                     call = candidate if internal_name == "native.web_search" else validate_tool_call(candidate)
@@ -966,17 +1058,33 @@ class OpenAICompatibleProvider(ModelProvider):
                             "tool_validation_reason": (
                                 "invalid_json" if isinstance(error, json.JSONDecodeError) else "invalid_schema"
                             ),
-                            # Early fragment failures and ambiguous batches
-                            # cannot certify a safe model correction.
-                            "native_tool_correction_eligible": (
-                                len(calls) == 1 and finish_reason in {"stop", "tool_calls"}
-                            ),
+                            **({'tool_argument_constraint': 'template_identity'}
+                               if isinstance(error, CoreDataError)
+                               and (error.details or {}).get('tool_argument_constraint') == 'template_identity' else {}),
+                            # No tool is forwarded until every call validates.
+                            "native_tool_correction_eligible": correction_eligible,
                         },
                     ) from error
+                validated_calls.append(call)
+            for call in validated_calls:
+                tool_forwarded = True
                 yield ProviderEvent(
                     "native_search_call" if call.name == "native.web_search" else "tool_call",
                     tool_call=call,
                 )
+        except ProviderError as error:
+            if error.code == "model_tool_protocol_failed":
+                from agent.native_tool_diagnostics import build
+                if error.message == "Model returned conflicting tool metadata.":
+                    diagnostic_reason = "conflicting_metadata"
+                error.details['native_tool_diagnostic'] = build(calls, diagnostic_index,
+                    diagnostic_stage, diagnostic_reason, error.__cause__)
+                error.details['native_tool_diagnostic']['certification_reason'] = certification_reason
+            error.details.update(text_character_count=len(streamed_text),
+                tool_argument_character_count=sum(len(call['arguments']) for call in calls.values()))
+            if finish_reason is not None:
+                error.details['finish_reason'] = finish_reason
+            raise
         except httpx.ConnectError as error:
             # With redirects disabled, a failed initial connection proves that
             # this generation request was not sent. Do not infer this from an
@@ -1465,13 +1573,9 @@ def _internal_tool_name(name: Any) -> str:
         raise CoreDataError("invalid_tool_call", "Tool name is invalid.")
     if name == "$web_search":
         return "native.web_search"
-    name = "terminal.run" if name == "terminal_run" else name
-    candidate = name.replace("fs_", "fs.", 1) if name.startswith("fs_") else name
-    candidate = candidate.replace("web_", "web.", 1) if candidate.startswith("web_") else candidate
-    candidate = candidate.replace("skills_", "skills.", 1) if candidate.startswith("skills_") else candidate
-    candidate = candidate.replace("document_", "document.", 1) if candidate.startswith("document_") else candidate
-    candidate = candidate.replace("rag_", "rag.", 1) if candidate.startswith("rag_") else candidate
-    return candidate
+    from agent.tool_contracts import TOOL_NAMES
+    aliases = {_external_tool_name(internal): internal for internal in TOOL_NAMES}
+    return aliases.get(name, name)
 
 
 def _merge_stable_tool_fragment(current: dict[str, str], key: str, value: Any) -> None:

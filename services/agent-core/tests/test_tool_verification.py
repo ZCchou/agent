@@ -5,6 +5,17 @@ import pytest
 from agent.storage import CoreDataError, CoreRepository
 
 
+def test_legacy_probe_record_needs_one_current_protocol_verification(tmp_path):
+    from agent.tool_verification import ToolVerification
+    store = ToolVerification(CoreRepository(tmp_path/'core.db'))
+    assert not store.needs_upgrade('tool:model:template:engine:probe:2')
+    store._save('tool:model:template:engine:probe:1','verified','native')
+    assert store.needs_upgrade('tool:model:template:engine:probe:2')
+    store._save('tool:model:template:engine:probe:2','verified','structured')
+    assert not store.needs_upgrade('tool:model:template:engine:probe:2')
+    assert store.get('tool:model:template:engine:probe:1')['tool_mode']=='native'
+
+
 def test_capability_query_reason_keeps_semantic_tool_intent_consistent():
     import json
     from agent.execution.coordinator import ExecutionCoordinator
@@ -58,8 +69,18 @@ def test_native_protocol_rejection_uses_structured_probe(tmp_path, monkeypatch):
             async def stream_events(self, model_id, messages, *, tools, options):
                 if tools:
                     raise ProviderError('unsupported_capability', 'native tools unavailable')
-                yield ProviderEvent('text_delta', text=json.dumps({
-                    'type': 'tool_call', 'id': 'probe', 'name': 'fs.list', 'arguments': {'path': '.'}}))
+                observation = next((message['content'].removeprefix('Synthetic fs.list result:')
+                    for message in messages if isinstance(message.get('content'), str)
+                    and message['content'].startswith('Synthetic fs.list result:')), None)
+                if observation is None:
+                    value = {'type': 'tool_call', 'id': 'probe', 'name': 'fs.list',
+                             'arguments': {'path': '.'}}
+                else:
+                    observed = json.loads(observation)
+                    answer = {'nonce': observed['nonce'],
+                              'identifiers': [entry['name'] for entry in observed['entries'][:2]]}
+                    value = {'type': 'text', 'content': json.dumps(answer)} if options.allowed_tools else answer
+                yield ProviderEvent('text_delta', text=json.dumps(value))
 
         monkeypatch.setattr(service, '_provider', lambda profile: Provider())
         try:

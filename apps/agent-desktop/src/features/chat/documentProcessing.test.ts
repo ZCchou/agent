@@ -18,6 +18,19 @@ describe("document processing activity", () => {
     expect(documentProcessingLabel({ phase: "ocr", page: 2, total_pages: 8 }, translate)).toBe(ocr);
     expect(documentProcessingLabel({ phase: "other" }, translate)).toBeNull();
   });
+  it("keeps screening positions separate from reviewed targets and rejects unknown totals", () => {
+    const translate = (key: string, values: Record<string, string | number>) => key + " " + values.completed + "/" + values.total;
+    expect(documentProcessingLabel({ phase: "document_review", document_phase: "scope_selection", completed: 1729, total: 2409 }, translate))
+      .toBe("attachments.processing.scopeSelection 1729/2409");
+    expect(documentProcessingLabel({ phase: "document_review", completed: 1, total: 7 }, translate))
+      .toBe("attachments.processing.documentReview 1/7");
+    expect(documentProcessingLabel({ phase: "document_review", completed: 1 }, translate)).toBeNull();
+  });
+  it.each([["review_report_generated", "reportGenerated"], ["review_report_publishing", "reportPublishing"],
+    ["review_report_verified", "reportVerified"]])("labels publication phase %s", (phase, key) => {
+    expect(documentProcessingLabel({ phase, file_name: "report.md" }, (k, v) => k + " " + v.name))
+      .toBe("attachments.processing." + key + " report.md");
+  });
   it("shows reranking candidate counts", () => {
     const translate = (key: string, values: Record<string, string | number>) => `${key} ${values.completed}/${values.total}`;
     expect(documentProcessingLabel({ phase: "reranking", completed: 4, total: 9 }, translate))

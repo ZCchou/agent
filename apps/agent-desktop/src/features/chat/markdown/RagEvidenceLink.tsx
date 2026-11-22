@@ -50,9 +50,11 @@ export function RagEvidenceLink({ evidenceId, children }: { evidenceId: string; 
   }
 
   const open = selection && selection.projectId === projectId && selection.evidenceId === evidenceId;
+  const numeric = typeof children === "string" && /^[1-9]\d*$/.test(children);
   return <>
-    <button type="button" className="markdown-link markdown-link--evidence" title={t("rag.viewEvidence")} aria-haspopup="dialog" onClick={() => selectPage(0)}>
-      <span>{children}</span><BookOpen size={12} aria-hidden="true" />
+    <button type="button" className={numeric ? "markdown-link markdown-link--citation" : "markdown-link markdown-link--evidence"}
+      title={t("rag.viewEvidence")} aria-label={numeric ? t("rag.viewEvidence") + " " + children : undefined} aria-haspopup="dialog" onClick={() => selectPage(0)}>
+      <span>{children}</span>{!numeric && <BookOpen size={12} aria-hidden="true" />}
     </button>
     {open && createPortal(<RagEvidenceDialog page={page} loading={loading} error={error} onClose={() => setSelection(null)} onPage={selectPage} />, document.body)}
   </>;

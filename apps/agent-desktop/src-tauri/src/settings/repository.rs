@@ -63,7 +63,10 @@ impl TauriStoreSettingsRepository {
          * SettingsRepository 会在一次逻辑更新完成以后主动 save，
          * 避免 schema_version 和 general 分别触发落盘。
          */
-        let store = explicit_store(app, SETTINGS_STORE_PATH)?;
+        let path = crate::profile_paths::data_dir(app)
+            .map_err(SettingsError::Storage)?
+            .join(SETTINGS_STORE_PATH);
+        let store = explicit_store(app, path)?;
 
         Ok(Self { store })
     }

@@ -51,6 +51,21 @@ def test_vector_candidates_search_full_authorized_set_without_keyword_prefilter(
         assert ids == [chunks[0]['id']]
         ids, _ = candidates(connection, 'index', vector_blob([1, 0]), '完全不同的同义表达', version_ids=[version] * 40000, count=1)
         assert ids == [chunks[0]['id']]
+        connection.execute("UPDATE rag_chunks SET clause_number='8.2.1.3' WHERE id=?", (chunks[2]['id'],))
+        ids, _ = candidates(connection, 'index', vector_blob([1, 0]),
+                            '请确认第8.2.1.3条的试验类型并给出物理页和原文', count=1)
+        assert ids == [chunks[2]['id']]
+        ids, _ = candidates(connection, 'index', vector_blob([1, 0]),
+                            '请确认第8.2.1.4条的试验类型', count=1)
+        assert ids == []
+        connection.execute("UPDATE rag_versions SET title='DO-160F' WHERE id=?", (version,))
+        assert candidates(connection, 'index', None, 'DO-160F clause 8.2.1.3')[0] == [chunks[2]['id']]
+        assert candidates(connection, 'index', None, 'DO-160E clause 8.2.1.3')[0] == []
+        assert candidates(connection, 'index', None, '请查DO-160E第8.2.1.3条')[0] == []
+        connection.execute("UPDATE rag_versions SET title='RTCA DO-160', revision='F' WHERE id=?", (version,))
+        assert candidates(connection, 'index', None, 'DO-160F clause 8.2.1.3.')[0] == [chunks[2]['id']]
+        assert candidates(connection, 'index', None, 'DO-160F 8.2.1.3原文')[0] == [chunks[2]['id']]
+        assert candidates(connection, 'index', None, 'DO-160F clause 8.2.1.3', version_ids=[])[0] == []
 
 
 def test_100000_chunk_vector_scan_and_enforced_library_capacity(tmp_path):
@@ -87,3 +102,28 @@ def test_100000_chunk_vector_scan_and_enforced_library_capacity(tmp_path):
     with pytest.raises(CoreDataError) as error:
         repository.save_version(library['id'], 'Overflow', parse_text('extra'), '1' * 64, 'overflow.txt', 'text/plain')
     assert error.value.code == 'rag_capacity_exceeded'
+
+
+@pytest.mark.parametrize('publisher,city', [('RTCA，INC.', 'Washington，DC 20036'), ('RTCA INC.', 'Washington, DC 20036')])
+def test_pdf_publisher_cover_unicode_punctuation_is_not_technical_evidence(publisher, city):
+    from agent.rag.retrieval import reference_material
+
+    text = publisher + '\n1828 L Street\n' + city + '\nRTCA/DO－160F\n第 5 章\n温度变化\n发行日期：2007'
+    assert reference_material(text, '通用试验条件和试验场地要求')
+    assert not reference_material(text, '封面上的发行日期')
+
+
+def test_spaced_preface_heading_is_reference_material():
+    from agent.rag.retrieval import reference_material
+
+    assert reference_material('前 言\n本文件由特别委员会制定。', '试验安装条件')
+    assert not reference_material('前 言\n本文件由特别委员会制定。', '前言介绍了什么')
+
+
+def test_appendix_cover_crossreferences_are_not_the_referenced_requirements():
+    from agent.rag.retrieval import reference_material
+
+    text = ('RTCA INC.\n1828 L Street\nWashington,DC 20036\nRTCA/DO－160F\n'
+            '附录 A\n环境试验标识\n第 1、2、3 章中包含相关信息。\n发行日期：2007')
+    assert reference_material(text, '通用试验条件')
+    assert not reference_material(text + '\nA.1 设备应保存环境鉴定记录。', '设备记录要求')

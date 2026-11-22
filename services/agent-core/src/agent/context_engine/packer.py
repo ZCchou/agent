@@ -14,6 +14,7 @@ from agent.context_engine.domain import (
     SourceRef,
     TrustKind,
 )
+from agent.message_assembly import extend_application_messages
 from agent.context_engine.policy import estimate_tokens
 from agent.context_engine.retrieval import RetrievedKnowledge
 
@@ -126,9 +127,9 @@ def pack_context(
     if used + protected_cost > hard_limit:
         raise ContextEngineError('context_compaction_required', 'Required history must be compacted before this request can run.')
     if rag_evidence:
-        from agent.rag.grounding import ANSWER_INSTRUCTION, evidence_for_model
-        stable_messages[0]["content"] += "\n" + ANSWER_INSTRUCTION
-        instruction_cost = estimate_tokens(ANSWER_INSTRUCTION)
+        from agent.rag.grounding import PUBLIC_ANSWER_INSTRUCTION, evidence_for_model
+        stable_messages[0]["content"] += "\n" + PUBLIC_ANSWER_INSTRUCTION
+        instruction_cost = estimate_tokens(PUBLIC_ANSWER_INSTRUCTION)
         stable_cost += instruction_cost
         used += instruction_cost
         evidence_limit = min(6000, int(hard_limit * 0.45), max(0, hard_limit - used - protected_cost - 128))
@@ -243,8 +244,8 @@ def pack_context(
     items.append(ContextItem(
         SourceRef("current_message", current_message["id"], TrustKind.USER_AUTHORED,
                   source_hash=hashlib.sha256(current_message["content"].encode("utf-8")).hexdigest()),
-        ContextSection.CURRENT, Representation.ORIGINAL,
-        estimate_tokens(current_message["content"]), True, "current_request",
+        ContextSection.CURRENT, Representation.METADATA if current_message.get('_externalized_input') else Representation.ORIGINAL,
+        _message_cost(current_message), True, "externalized_current_request" if current_message.get('_externalized_input') else "current_request",
     ))
     for attachment_item in current_message.get("_attachment_items", []):
         attachment = attachment_item["attachment"]
@@ -268,7 +269,9 @@ def pack_context(
                 "effective_attachment_ids": [value["attachment"]["id"] for value in current_message.get("_attachment_items", [])]},
         ))
 
-    messages = stable_messages + dynamic_messages
+    messages = []
+    extend_application_messages(messages, stable_messages)
+    extend_application_messages(messages, dynamic_messages)
     serialized_tokens = estimate_tokens(messages)
     if serialized_tokens > hard_limit:
         raise ContextEngineError('current_input_too_large', 'The serialized context exceeds the available input budget.')

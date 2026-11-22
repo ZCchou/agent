@@ -131,6 +131,7 @@ export interface ChatMessage {
   conversation_id: string;
   role: MessageRole;
   content: string;
+  verified_evidence_ids?: string[];
   event_type: string | null;
   source_message_id: string | null;
   created_at: string;
@@ -291,7 +292,7 @@ export interface ModelRun {
   web_grounding_status?: "not_required" | "grounded" | "ungrounded_fallback" | "failed";
   error_code: string | null;
   error_message: string | null;
-  draft: { content: string; updated_at: string } | null;
+  draft: { content: string; updated_at: string; verified_evidence_ids?: string[] } | null;
   assistant_message: ChatMessage | null;
 }
 

@@ -164,7 +164,8 @@ def test_native_search_executor_never_uses_the_host_tool_allowlist() -> None:
 
 
 @pytest.mark.parametrize('response_schema', [None, {'type': 'object', 'properties': {'result': {'type': 'string'}}}])
-def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed(response_schema) -> None:
+def test_empty_model_result_fails_invocation_before_it_can_be_marked_completed(response_schema, monkeypatch) -> None:
+    monkeypatch.setattr('agent.runtime.record_invocation_diagnostics', lambda *args, **kwargs: None)
     class ExecutionRepositoryStub:
         def __init__(self) -> None:
             self.finished: list[tuple[str, str, str | None]] = []
@@ -329,7 +330,9 @@ def test_web_specialist_receives_prior_vision_artifact_without_the_image() -> No
         for message in messages if isinstance(message.get("content"), list)
         for part in message["content"] if isinstance(part, dict)
     )
-    assert "Example Person" in messages[-1]["content"]
+    assert "Example Person" in messages[0]["content"]
+    assert messages[0]['role'] == 'system'
+    assert messages[-1]['role'] == 'user'
     assert ChatRunService._prior_artifacts_for_specialist("vision_analysis", artifacts) == []
 
 
@@ -483,15 +486,15 @@ def test_kimi_native_search_final_response_bypasses_host_tool_scope(
     asyncio.run(scenario())
 
 
-def test_ungrounded_fallback_cannot_claim_fresh_search_evidence() -> None:
+def test_ungrounded_fallback_labels_unverified_prose_and_preserves_text() -> None:
     unsafe = ChatRunService._safe_ungrounded_fallback(
         "根据搜索结果，最新番剧包括……", "搜索最新番剧",
     )
     safe = ChatRunService._safe_ungrounded_fallback(
         "番剧通常按季度播出。", "搜索最新番剧",
     )
-    assert "根据搜索结果" not in unsafe
-    assert "无法安全提供或确认最新事实" in unsafe
+    assert "根据搜索结果" in unsafe
+    assert unsafe.startswith("本次联网请求没有返回可核验来源")
     assert safe.startswith("本次联网请求没有返回可核验来源")
     assert "番剧通常按季度播出" in safe
 

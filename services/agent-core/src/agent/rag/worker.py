@@ -15,6 +15,17 @@ from pathlib import Path
 from agent.rag.model_profiles import PROFILES, QUERY_INSTRUCTION, RERANK_PREFIX, RERANK_SUFFIX
 
 HEARTBEAT_INTERVAL = 5
+_cuda_dlls_preloaded = False
+_cuda_dlls_lock = threading.Lock()
+
+
+def _preload_cuda_dlls(ort):
+    """Preload process-resident CUDA dependencies once; retry raised failures."""
+    global _cuda_dlls_preloaded
+    with _cuda_dlls_lock:
+        if not _cuda_dlls_preloaded:
+            ort.preload_dlls(cuda=True, cudnn=True, msvc=True)
+            _cuda_dlls_preloaded = True
 
 
 def _owned_state_dict(root):
@@ -84,7 +95,7 @@ def _engine(backend, device):
         return {"engine": "transformers", "device": device, "cuda": torch.cuda.is_available()}
     import onnxruntime as ort
     if device == "cuda":
-        ort.preload_dlls(cuda=True, cudnn=True, msvc=True)
+        _preload_cuda_dlls(ort)
     provider = "CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider"
     if provider not in ort.get_available_providers():
         raise RuntimeError(f"Requested provider {provider} is unavailable")
@@ -109,7 +120,17 @@ def _load(params, cache):
         import onnxruntime as ort
         metadata = json.loads((path / "rag-model.json").read_text(encoding="utf-8"))
         provider = "CUDAExecutionProvider" if params["device"] == "cuda" else "CPUExecutionProvider"
-        model = ort.InferenceSession(str(path / metadata["graph"]), providers=[provider])
+        session_options = {"providers": [provider]}
+        if params["device"] == "cuda":
+            # CUDA graphs still contain CPU fallback/copy nodes. Bound their
+            # pool rather than letting default CPU spinning starve inference.
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = min(8, os.cpu_count() or 1)
+            options.inter_op_num_threads = 1
+            options.add_session_config_entry('session.intra_op.allow_spinning', '0')
+            options.add_session_config_entry('session.inter_op.allow_spinning', '0')
+            session_options['sess_options'] = options
+        model = ort.InferenceSession(str(path / metadata["graph"]), **session_options)
         model.disable_fallback()
         if not model.get_providers() or model.get_providers()[0] != provider:
             raise RuntimeError(f"Requested ONNX provider {provider} failed to initialize")

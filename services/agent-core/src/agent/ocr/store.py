@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import threading
 
@@ -12,9 +13,13 @@ from agent.rag.models import _files, _hash, _json, _safe_relative, _write_json
 from agent.storage import CoreDataError
 
 
+_default_import_lock = threading.Lock()
+
+
 class OcrModelStore:
     def __init__(self, root):
         self.root = Path(root).absolute()
+        self._app_store = self.root.name == 'ocr-models'
         configuration = self.root.parent / 'ocr-storage.json'
         if self.root.name == 'ocr-models' and configuration.is_file():
             try:
@@ -77,7 +82,12 @@ class OcrModelStore:
                         raise CoreDataError('ocr_model_invalid', 'OCR model changed during import')
                     metadata = {key: value for key, value in verified.items() if key not in {'path', 'manifest'}}
                     _write_json(stage / '.ocr-meta.json', metadata)
-                    stage.rename(destination)
+                    try:
+                        stage.rename(destination)
+                    except OSError:
+                        # Another Core process may have published the same verified bundle.
+                        if not destination.is_dir():
+                            raise
             return self.get_profile(inspected['id'])
 
     def get_profile(self, profile_id):
@@ -88,7 +98,7 @@ class OcrModelStore:
             raise CoreDataError('ocr_model_invalid', 'OCR model identity changed')
         return result
 
-    def list_models(self):
+    def _registered_models(self):
         models = []
         for path in sorted(self.root.iterdir()):
             if len(path.name) == 64 and path.is_dir():
@@ -97,4 +107,16 @@ class OcrModelStore:
                     models.append({**record, 'status': 'ready'})
                 except (OSError, ValueError):
                     continue
+        return models
+
+    def list_models(self):
+        models = self._registered_models()
+        if not models and self._app_store and getattr(sys, 'frozen', False):
+            bundle = Path(sys.executable).parent / 'ocr-model-package'
+            if bundle.is_dir():
+                with _default_import_lock:
+                    models = self._registered_models()
+                    if not models:
+                        self.import_bundle(bundle)
+                        models = self._registered_models()
         return {'models': models, 'root': str(self.root)}

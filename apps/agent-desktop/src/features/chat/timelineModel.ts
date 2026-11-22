@@ -1,6 +1,13 @@
 import type { ChangeSet, ChatMessage, ToolOperation, WebOperation } from "../../types/domain";
 import { safeSearchCompleteness } from "./searchPresentation";
 
+export function isTimelineMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<ChatMessage>;
+  return typeof message.id === "string" && typeof message.content === "string"
+    && (message.role === "assistant" || message.role === "user" || message.role === "system_event");
+}
+
 export interface ToolEventSummary {
   run_id: string | null;
   operation_id: string | null;
@@ -147,6 +154,7 @@ export function buildConversationTimeline(
   let legacyIndex = 0;
   let activeLegacy: Extract<ConversationTimelineItem, { kind: "activity" }> | null = null;
   for (const message of messages) {
+    if (!isTimelineMessage(message)) continue;
     const progress = parsePublicProgress(message);
     if (progress) {
       activeLegacy = null;

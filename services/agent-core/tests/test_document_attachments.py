@@ -117,17 +117,28 @@ def test_document_excerpt_expands_matching_heading_into_section_body():
 
 
 def test_normal_chat_entry_extracts_document_before_model_dispatch(tmp_path, monkeypatch):
+    import io
+    from docx import Document
     from agent.runtime import ChatRunService
     from agent.context_engine.service import ContextEngineService
     monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
     core = CoreRepository(tmp_path / "agent.db")
-    attachment = source_attachment(tmp_path)
+    document = Document()
+    document.add_paragraph('Title')
+    document.add_paragraph('Equipment requirements')
+    stream = io.BytesIO()
+    document.save(stream)
+    attachment = source_attachment(tmp_path, stream.getvalue())
     async def scenario():
         events = []
         async def sink(event):
             events.append(event)
         service = ChatRunService(core, sink)
-        service.document_attachments.parser = Parser()
+        class CompleteParser:
+            async def parse(self, path):
+                return {'chunks': [{'text': paragraph.text, 'locator': {'kind': 'docx', 'paragraph': index}}
+                    for index, paragraph in enumerate(Document(path).paragraphs, start=1)], 'warnings': ['Verify diagrams']}
+        service.document_attachments.parser = CompleteParser()
         async def select_read(**kwargs):
             return {'files': 'read', 'tools': 'available', 'web': 'off', 'web_evidence': 'optional',
                 'reasoning': 'standard', 'task_kinds': ['attachment_extract'],
@@ -202,7 +213,7 @@ def test_schema26_upgrade_preserves_existing_attachment_records(tmp_path):
     assert stored['sha256'] == attachment['sha256']
     assert stored['storage_key'] == attachment['storage_key']
     with upgraded._connect() as connection:
-        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 33
+        assert connection.execute('SELECT version FROM schema_info').fetchone()[0] == 37
         assert "'document.source'" in connection.execute("SELECT sql FROM sqlite_master WHERE name='attachment_artifacts'").fetchone()[0]
 
 
@@ -279,3 +290,33 @@ def test_ocr_page_failure_preserves_readable_native_text(tmp_path, monkeypatch):
         finally:
             await service.close()
     asyncio.run(scenario())
+
+
+
+def test_reference_native_document_without_extracted_text(tmp_path, monkeypatch):
+    from io import BytesIO
+
+    from docx import Document
+
+    monkeypatch.setenv('AGENT_DATA_DIR', str(tmp_path))
+    core = CoreRepository(tmp_path / 'agent.db')
+    document = Document()
+    document.add_paragraph('Equipment EQ-17')
+    content = BytesIO()
+    document.save(content)
+    attachment = source_attachment(tmp_path, content.getvalue())
+    run = core.start_model_run(content='Save source', idempotency_key='source',
+        kind='standard_chat', category='casual', provider_profile_id='builtin-demo',
+        model_id='demo', attachments=[attachment])
+    ref = {'attachment_id': attachment['id']}
+    selected, = core.resolve_attachment_references(run['conversation_id'], [ref])
+    assert selected['reference_attachment_id'] == attachment['id']
+    assert 'source_start' not in selected
+    assert 'source_end' not in selected
+    with pytest.raises(CoreDataError) as error:
+        core.resolve_attachment_references(run['conversation_id'], [{**ref, 'source_end': 4}])
+    assert error.value.code == 'attachment_reference_range_invalid'
+    (tmp_path / attachment['storage_key']).write_bytes(b'tampered')
+    with pytest.raises(CoreDataError) as error:
+        core.resolve_attachment_references(run['conversation_id'], [ref])
+    assert error.value.code == 'attachment_changed'

@@ -6,6 +6,7 @@ param(
     [string]$ManifestSha256,
     [switch]$RunPrerequisites,
     [switch]$IncludeOcr,
+    [switch]$BundledOcr,
     [switch]$Airworthiness,
     [switch]$DeferCommit,
     [string]$TransactionToken,
@@ -26,6 +27,10 @@ foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Secu
 $components = @('llm-runtime', 'rag-runtime')
 $appFiles = @('agent-desktop.exe', 'agent.exe', 'agent-core.exe', 'uninstall.exe')
 $owner = 'io.github.zcchou.agent.offline-runtime.v1'
+if ($BundledOcr) {
+    $components += @('ocr-runtime', 'ocr-model-package')
+    $appFiles += @('agent-installer.exe', 'agent-updater.exe')
+}
 if ($IncludeOcr) {
     $components += @('ocr-runtime', 'ocr-model-package')
     $appFiles += 'agent_desktop_lib.dll'
@@ -100,6 +105,7 @@ function Read-ApplicationManifest([string]$Path, [string]$Digest) {
     }
     $record = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     $allowed = @('agent-desktop.exe', 'agent-core.exe')
+    if ($BundledOcr) { $allowed += @('agent-installer.exe', 'agent-updater.exe') }
     if ($IncludeOcr) { $allowed += 'agent_desktop_lib.dll' }
     if ($Airworthiness) { $allowed += @('agent_desktop_lib.dll', 'agent-updater.exe', 'application.json') }
     if ($record.schema_version -ne 1 -or @($record.files.PSObject.Properties).Count -lt 2) { throw 'Invalid application identity manifest' }
@@ -148,7 +154,9 @@ function Verify-Tree([string]$Root, $Manifest, [string[]]$OnlyComponents = @()) 
     }
     $observed = 0
     $roots = @($Root)
-    if ($OnlyComponents.Count) { $roots = @($OnlyComponents | ForEach-Object { Get-SafePath $Root $_ }) }
+    if ($OnlyComponents.Count) {
+        $roots = @($OnlyComponents | ForEach-Object { Get-SafePath $Root $_ } | Where-Object { Test-Path -LiteralPath $_ })
+    }
     foreach ($treeRoot in $roots) {
         foreach ($item in Get-Tree $treeRoot) {
             $name = $item.FullName.Substring([IO.Path]::GetFullPath($Root).TrimEnd('\').Length + 1).Replace('\', '/')
@@ -297,6 +305,28 @@ function Recover-Transaction([string]$Root, [string]$Managed, [switch]$AllowOrph
     Remove-Item -LiteralPath $journalPath
 }
 
+function Test-InstalledVcX64([string]$RequiredVersion) {
+    # NSIS calls native PowerShell via Sysnative. Do not trust a redirected registry view.
+    if (-not [Environment]::Is64BitProcess) { return $false }
+    try {
+        $runtime = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64' -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    if (-not $runtime.PSObject.Properties['Installed'] -or $runtime.Installed -isnot [int] -or
+        $runtime.Installed -ne 1 -or -not $runtime.PSObject.Properties['Version'] -or
+        $runtime.Version -isnot [string] -or $runtime.Version -notmatch '^v?[0-9]+(\.[0-9]+){3}$') {
+        return $false
+    }
+    [version]$installed = $null
+    [version]$required = $null
+    if (-not [version]::TryParse(($runtime.Version -replace '^v', ''), [ref]$installed) -or
+        -not [version]::TryParse($RequiredVersion, [ref]$required)) {
+        return $false
+    }
+    return $installed -ge $required
+}
+
 function Install-Prerequisites([string]$Root, $Manifest) {
     foreach ($name in @('vc_redist.x64.exe', 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe')) {
         $path = Get-SafePath $Root ('prerequisites/' + $name)
@@ -306,6 +336,10 @@ function Install-Prerequisites([string]$Root, $Manifest) {
         }
         if ((Get-Item -LiteralPath $path).VersionInfo.FileVersion -ne $Manifest.prerequisites.$name.file_version) {
             throw "Microsoft prerequisite file version differs from the installer inventory: $name"
+        }
+        if ($name -eq 'vc_redist.x64.exe' -and (Test-InstalledVcX64 $Manifest.prerequisites.$name.file_version)) {
+            Write-Output 'VC_X64_ALREADY_INSTALLED'
+            continue
         }
         if ($name -like 'MicrosoftEdge*') {
             $webviewId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'

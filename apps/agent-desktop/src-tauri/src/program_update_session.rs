@@ -191,9 +191,7 @@ pub fn startup(app: &AppHandle) -> Result<bool, String> {
         if std::env::var("AGENT_UPDATE_HEALTH_NONCE").ok().as_deref() != Some(plan.nonce.as_str()) {
             return Err("app_update_handoff_invalid".into());
         }
-        if app
-            .path()
-            .app_data_dir()
+        if crate::profile_paths::data_dir(app)
             .ok()
             .and_then(|root| root.canonicalize().ok())
             != plan.data_root.canonicalize().ok()

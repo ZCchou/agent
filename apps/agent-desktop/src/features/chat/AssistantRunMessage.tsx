@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Bot } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ModelRunStatus } from "../../types/domain";
-import { WorkProcessDisclosure } from "./WorkProcessDisclosure";
+import { AssistantMessageBody } from "./markdown/AssistantMessageBody";
 import type { ProjectDirectoryTarget, ProjectFileTarget } from "./markdown/markdownPolicy";
 
 interface Props {
@@ -40,7 +40,7 @@ export function AssistantRunMessage({ status, content, onProjectFile, onProjectD
       </span>
     </div>
     {hasContent ? <div className="chat-run-message__content">
-      <WorkProcessDisclosure content={content} state="streaming" onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
+      <AssistantMessageBody content={content} state="streaming" onProjectFile={onProjectFile} onProjectDirectory={onProjectDirectory} />
     </div> : null}
   </div>;
 }

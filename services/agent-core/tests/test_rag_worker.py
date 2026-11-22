@@ -20,6 +20,7 @@ def test_onnx_cuda_preloads_dependencies_before_provider_discovery(monkeypatch):
     from types import SimpleNamespace
     from agent.rag.worker import _engine
     calls = []
+    monkeypatch.setattr("agent.rag.worker._cuda_dlls_preloaded", False)
     monkeypatch.setattr("agent.rag.worker.importlib.util.find_spec", lambda name: object())
     ort = SimpleNamespace(
         preload_dlls=lambda **kwargs: calls.append(("preload", kwargs)),
@@ -38,7 +39,9 @@ def test_onnx_session_rejects_cuda_initialization_fallback(monkeypatch, tmp_path
             return ["CPUExecutionProvider"]
         def disable_fallback(self):
             pass
-    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(InferenceSession=lambda *args, **kwargs: Session()))
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(
+        InferenceSession=lambda *args, **kwargs: Session(),
+        SessionOptions=lambda: SimpleNamespace(add_session_config_entry=lambda *args: None)))
     monkeypatch.setattr(worker, "_engine", lambda *args: {})
     monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
         AutoTokenizer=SimpleNamespace(from_pretrained=lambda *args, **kwargs: object())))

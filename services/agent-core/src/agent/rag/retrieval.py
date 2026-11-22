@@ -5,14 +5,90 @@ import math
 import json
 import re
 import struct
+import unicodedata
 
 from agent.storage import CoreDataError
 from agent.rag.documents import CLAUSE
+from agent.rag.locations import located_source, prime_location_cache
 
 
 def explicit_subject(query: str) -> str | None:
     match = re.search(r'(?:关于|有关)\s*(.{2,60}?)\s*(?:的)?(?:相关)?(?:内容|条款|规定|要求|资料|知识)(?=[\s。？！?!，,]|$)', query)
     return match.group(1).strip().removesuffix('的').strip() if match else None
+
+
+_CLAUSE_NUMBER = r'([A-Z]*(?:-?\d+)?(?:\.\d+)+(?:\([A-Z0-9]+\))*)(?![A-Z0-9]|\.\d|\([A-Z0-9]+\))'
+_STANDARD_FAMILY = r'MIL\s*-\s*STD|DO|CCAR|CS|FAR|ISO|IEC|SAE'
+_STANDARD_SUFFIX = r'\s*[-‐‑–—]?\s*(\d+[A-Z]?)(?![A-Z0-9])'
+_NAMED_STANDARD = re.compile(r'(?<![A-Z0-9])(' + _STANDARD_FAMILY + ')' + _STANDARD_SUFFIX, re.I)
+_CLAUSE_REFERENCE = re.compile(
+    r'(?:第\s*|§\s*|\b(?:section|subclause|clause|article)\s+)' + _CLAUSE_NUMBER, re.I,
+)
+_STANDARD_CLAUSE_REFERENCE = re.compile(_NAMED_STANDARD.pattern + r'\s+' + _CLAUSE_NUMBER, re.I)
+
+
+def explicit_clause_numbers(query):
+    normalized = unicodedata.normalize('NFKC', query)
+    matches = [match.group(1).upper() for match in _CLAUSE_REFERENCE.finditer(normalized)]
+    matches.extend(match.group(3).upper() for match in _STANDARD_CLAUSE_REFERENCE.finditer(normalized))
+    return tuple(dict.fromkeys(matches))
+
+
+def explicit_standard_references(text):
+    """Return named standards in request order using the shared recognition rule."""
+    return tuple(dict.fromkeys(
+        re.sub(r'\s+', '', match.group(1)).upper() + '-' + match.group(2).upper()
+        for match in _NAMED_STANDARD.finditer(unicodedata.normalize('NFKC', text))))
+
+
+def _standard_ids(text):
+    return {re.sub(r'[\s-]+', '', match.group(1)).upper() + match.group(2).upper()
+            for match in _NAMED_STANDARD.finditer(unicodedata.normalize('NFKC', text))}
+
+
+def _matches_standard(row, named):
+    standards = _standard_ids(' '.join(row[key] or '' for key in ('title', 'document_number', 'original_name')))
+    revision = unicodedata.normalize('NFKC', row['revision'] or '').strip().upper()
+    if re.fullmatch('[A-Z]', revision):
+        standards.update({value + revision for value in standards if value[-1].isdigit()})
+    return not named or bool(named.intersection(standards))
+
+
+def named_review_versions(connection, request, allowed):
+    """Keep the requested standard restriction when attachment coordinates use topic retrieval."""
+    named = _standard_ids(request)
+    if not named:
+        return allowed
+    rows = connection.execute("""SELECT id,title,document_number,original_name,revision FROM rag_versions
+        WHERE status='confirmed' AND id IN (SELECT value FROM json_each(?))""", (json.dumps(allowed),))
+    return [row['id'] for row in rows if _matches_standard(row, named)]
+
+
+def exact_clause_candidates(connection, index_id, query, version_ids=None, *, count=40):
+    """Restrict explicit clause search to confirmed chunks of the requested source."""
+    clauses = explicit_clause_numbers(query)
+    named = _standard_ids(query)
+    sql = """SELECT c.id, c.version_id, c.text, c.locator, c.clause_number, v.title, v.document_number, v.original_name, v.revision
+        FROM rag_index_chunks ic JOIN rag_chunks c ON c.id=ic.chunk_id
+        JOIN rag_versions v ON v.id=c.version_id
+        WHERE ic.index_id=? AND v.status='confirmed'
+        AND upper(c.clause_number) IN (SELECT value FROM json_each(?))"""
+    params = [index_id, json.dumps(clauses)]
+    if version_ids is not None:
+        sql += ' AND c.version_id IN (SELECT value FROM json_each(?))'
+        params.append(json.dumps(list(dict.fromkeys(version_ids))))
+    rows = connection.execute(sql + ' ORDER BY c.ordinal,c.id', params).fetchall()
+    ids = []
+    location_cache = prime_location_cache(connection, [dict(row) for row in rows])
+    for row in rows:
+        if located_source(connection, dict(row), location_cache).get('clause_number') is None:
+            continue
+        if not _matches_standard(row, named):
+            continue
+        ids.append(row['id'])
+        if len(ids) == count:
+            break
+    return ids, reciprocal_rank_fusion([ids])
 
 
 def matches_subject(text: str, subject: str) -> bool:
@@ -27,15 +103,17 @@ def matches_subject(text: str, subject: str) -> bool:
 
 def reference_material(text: str, query: str) -> bool:
     """Identify explicit front matter/navigation without excluding formal scope sections."""
-    titles = r'译者的话|译者序|编者的话|前言|序言|目\s*录|foreword|preface|table of contents'
+    text = unicodedata.normalize('NFKC', text)
+    query = unicodedata.normalize('NFKC', query)
+    titles = r'译者的话|译者序|编者的话|前\s*言|序\s*言|目\s*录|foreword|preface|table of contents'
     if re.search(titles + r'|译者|作者|编者|谁翻译|谁编写|出版|修订历史|版本历史|封面|扉页|发行日期|title page|cover page', query, re.IGNORECASE):
         return False
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if any(re.fullmatch(titles, line, re.IGNORECASE) for line in lines[:3]):
         return True
-    publisher = re.search(r'^\s*RTCA\s*[,，]\s*INC\.?\s*$', text, re.IGNORECASE | re.MULTILINE)
+    publisher = re.search(r'^\s*RTCA\s*[,]?\s*INC\.?\s*$', text, re.IGNORECASE | re.MULTILINE)
     contact = re.search(r'\bWashington\s*,\s*D\.?\s*C\.?(?=\s|\d|$)', text, re.IGNORECASE)
-    chapter = re.search(r'^\s*(?:第\s*[一二三四五六七八九十百零〇\d]+\s*章|section\s+\d+\b)',
+    chapter = re.search(r'^\s*(?:第\s*[一二三四五六七八九十百零〇\d]+\s*章|section\s+\d+\b|附录\s*[A-Z]|appendix\s+[A-Z]\b)',
                         text, re.IGNORECASE | re.MULTILINE)
     standard = re.search(r'RTCA\s*/\s*DO[-－ ]?160[A-Z]?', text, re.IGNORECASE)
     issued = re.search(r'发行日期|issue date|date of issue', text, re.IGNORECASE)
@@ -90,8 +168,10 @@ def load_vector_extension(connection):
         raise CoreDataError('rag_vector_runtime_unavailable', 'The sqlite-vec runtime is unavailable.') from error
 
 
-def candidates(connection, index_id, query_vector, query, version_ids=None, count=40):
+def candidates(connection, index_id, query_vector, query, version_ids=None, count=40, *, infer_clause=True):
     """Cosine is computed over every authorized indexed chunk before top-k."""
+    if infer_clause and explicit_clause_numbers(query):
+        return exact_clause_candidates(connection, index_id, query, version_ids, count=count)
     load_vector_extension(connection)
     params = [query_vector, index_id]
     version_filter = ''

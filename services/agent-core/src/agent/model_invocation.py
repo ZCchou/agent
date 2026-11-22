@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import asyncio
+import json
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -74,10 +75,10 @@ class ModelInvocationService:
 
     async def complete_prepared(
         self, provider: Any, spec: InvocationSpec, prepared: PreparedRequest,
-        *, stream_factory=None,
+        *, stream_factory=None, on_public_text=None, stream_records_progress=False,
     ) -> tuple[str, dict[str, int], list[ProviderEvent]]:
         if monitored_local(provider) and current_activity.get() is None and stream_factory is None:
-            return await run_stage('model_output', lambda activity: self.complete_prepared(provider, spec, prepared))
+            return await run_stage('model_output', lambda activity: self.complete_prepared(provider, spec, prepared, on_public_text=on_public_text))
         content = ""
         usage: dict[str, int] = {}
         events: list[ProviderEvent] = []
@@ -106,7 +107,7 @@ class ModelInvocationService:
                             if event.kind not in {"provider_diagnostic", "usage"}:
                                 saw_activity = True
                                 activity = current_activity.get()
-                                if activity is not None:
+                                if activity is not None and not stream_records_progress:
                                     activity.progress(kind=event.kind, characters=len(event.text or ''))
                             capability_id = (
                                 "structured_web_evidence"
@@ -133,6 +134,8 @@ class ModelInvocationService:
                             events.append(event)
                             if event.kind == "text_delta" and event.text:
                                 content += event.text
+                                if on_public_text is not None:
+                                    await on_public_text(event.text)
                             elif event.kind == "usage" and event.usage:
                                 usage.update(event.usage)
                     validate_provider_completion(
@@ -144,6 +147,16 @@ class ModelInvocationService:
                     )
         except ProviderError as error:
             error.usage = dict(usage)
+            error.details.update({
+                'text_character_count': len(content),
+                'tool_argument_character_count': max(error.details.get('tool_argument_character_count', 0),
+                    sum(len(json.dumps(event.tool_call.arguments, ensure_ascii=False))
+                        for event in events if event.tool_call is not None)),
+                'partial_text': bool(content),
+            })
+            raw_finish = next((event.finish_reason for event in reversed(events) if event.kind == 'finish'), None)
+            if raw_finish is not None:
+                error.details['finish_reason'] = raw_finish
             diagnostic_fields = dict(error.details)
             diagnostic_fields.update({
                 "normalized_event_types": event_counts,
