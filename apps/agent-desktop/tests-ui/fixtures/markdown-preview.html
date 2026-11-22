@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Markdown preview test</title></head>
+<body><div id="root"></div><script type="module">
+  import { createElement } from "react";
+  import { createRoot } from "react-dom/client";
+  import { initializeI18n } from "../../src/i18n";
+  import { ChatInspector } from "../../src/features/chat/ChatInspector";
+  await initializeI18n();
+  const content = await (await fetch("/__report_fixture.md")).text();
+  const view = { kind: "project_file", path: "report.md", title: "report.md", content, lineStart: null, lineEnd: null };
+  createRoot(document.getElementById("root")).render(createElement(ChatInspector, {
+    entry: { open: true, view }, onClose() {},
+  }));
+</script></body>
+</html>

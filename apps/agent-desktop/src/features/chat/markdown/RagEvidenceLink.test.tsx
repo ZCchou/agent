@@ -176,3 +176,14 @@ it("keeps the generated summary an index, preserves its citation and colors verd
  expect(tables[2]).toContain('review-verdict--unknown');
  expect(html.match(/review-verdict--missing/g)).toHaveLength(2);
 });
+
+it("recognizes grouped summary tables only inside the report summary", () => {
+ const table = "| 问题项及位置 | 判断 | 原文 | 建议 | 证据 |\n|---|---|---|---|---|\n| 位置 | 不符合 | 原文 | 建议 | 依据 |";
+ const report = ["# 文档审阅正文", "## 问题与待核事项汇总", "已确认问题 1 项 · 待补充材料 0 项 · 无法判断 0 项",
+   "### 已确认问题", table, "## 自定义审阅", "### 已确认问题", table].join("\n\n");
+ const html = renderToStaticMarkup(<MarkdownRenderer content={report} state="complete" />);
+ const tables = [...html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/g)].map(m => m[1]);
+ expect(tables).toHaveLength(2);
+ expect(tables[0]).toContain("<td>不符合</td>");
+ expect(tables[1]).toContain("review-verdict--issue");
+});

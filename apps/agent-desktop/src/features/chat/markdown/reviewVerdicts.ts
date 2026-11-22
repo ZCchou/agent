@@ -88,10 +88,16 @@ export function reviewVerdicts(options: { labels?: Readonly<Record<string, strin
       }
     }
     let previous: Element | undefined;
+    let insideSummary = false;
     for (const child of node.children) {
       if (child.type !== "element") continue;
-      const followsHeading = node.type === "root" && child.tagName === "table" && previous?.tagName === "h2"
-        && plain(previous.children) === "问题与待核事项汇总";
+      if (node.type === "root" && (child.tagName === "h1" || child.tagName === "h2")) {
+        insideSummary = child.tagName === "h2" && plain(child.children) === "问题与待核事项汇总";
+      }
+      const followsHeading = insideSummary && child.tagName === "table" && (
+        previous?.tagName === "h2" || (previous?.tagName === "h3" &&
+          ["已确认问题", "待补充材料", "无法判断"].includes(plain(previous.children)))
+      );
       visit(child, followsHeading);
       previous = child;
     }

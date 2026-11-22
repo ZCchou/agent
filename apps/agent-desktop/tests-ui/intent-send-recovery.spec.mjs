@@ -89,6 +89,17 @@ async function openRecoveryChat(page, initialFailure = null, managed = false) {
   return editor;
 }
 
+test('project review template fills an editable draft without sending or overwriting it', async ({ page }) => {
+  const editor = await openRecoveryChat(page);
+  await page.getByRole('button', { name: 'New work draft' }).click();
+  const template = page.getByRole('button', { name: 'Review template', exact: true });
+  await template.click();
+  await expect(editor).toHaveValue(/project library.*supporting excerpts/i);
+  await expect(editor).toBeFocused();
+  await expect(template).toBeDisabled();
+  expect(await page.evaluate(() => window.intentStarts)).toEqual([]);
+});
+
 test('background execution keeps progress visible without manual waiting controls', async ({ page }) => {
   const editor = await openRecoveryChat(page);
   await page.evaluate(() => {

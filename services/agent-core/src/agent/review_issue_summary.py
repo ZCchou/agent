@@ -40,12 +40,26 @@ def issue_rows(sections, fields):
 
 
 def issue_table(rows):
+    lines = ['## 问题与待核事项汇总', '']
+    groups = {'已确认问题': [], '待补充材料': [], '无法判断': []}
+    for row in rows:
+        group = {'不符合': '已确认问题', '待补充': '待补充材料'}.get(row['verdict'], '无法判断')
+        groups[group].append(row)
+    lines.append(' · '.join(f'{label} {len(entries)} 项' for label, entries in groups.items()))
+    if not rows:
+        return '\n'.join(lines + ['', '本次已审阅位置中没有列入汇总的问题或待核事项。'])
+    for label, entries in groups.items():
+        if entries:
+            lines.extend(['', '### ' + label, ''])
+            lines.extend(_table_lines(entries))
+    return '\n'.join(lines)
+
+
+def _table_lines(rows):
     def cell(value):
         return plain_markdown(html.escape(' '.join(value.split()), quote=False))
-    lines = ['## 问题与待核事项汇总', '']
-    if not rows:
-        return '\n'.join(lines + ['本次已审阅位置中没有列入汇总的问题或待核事项。'])
-    lines += ['| 问题项及位置 | 判断 | 原文 | 建议 | 证据 |', '| --- | --- | --- | --- | --- |']
+    yield '| 问题项及位置 | 判断 | 原文 | 建议 | 证据 |'
+    yield '| --- | --- | --- | --- | --- |'
     for row in rows:
         evidence = {ref['number']:ref for ref in row.get('evidence', [])}
         refs = []
@@ -58,6 +72,5 @@ def issue_table(rows):
             refs.append((cell(label)+' ' if label else '') + f'[{n}](#审阅出处-{n})')
         recommendation = row['recommendation'] or ('复核本项原文及适用依据后再判定。'
             if row['verdict'] == '无法判断' else '原审阅未给出具体建议。')
-        lines.append('| ' + ' | '.join([cell(row['title'] + ' · ' + row['finding']), cell(row['verdict']),
-            cell(row['source_excerpt']) or '未取得原文', cell(recommendation), '；'.join(refs) or '无已核对的本项摘录']) + ' |')
-    return '\n'.join(lines)
+        yield '| ' + ' | '.join([cell(row['title'] + ' · ' + row['finding']), cell(row['verdict']),
+            cell(row['source_excerpt']) or '未取得原文', cell(recommendation), '；'.join(refs) or '无已核对的本项摘录']) + ' |'

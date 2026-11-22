@@ -10,7 +10,7 @@ import uuid
 
 from agent.context_engine.policy import estimate_tokens
 from agent.document_consistency import conflict_groups, review_facts
-from agent.review_table_context import paragraph_table_references, table_contexts
+from agent.review_table_context import checked_scope_ids, paragraph_table_references, table_contexts
 from agent.document_plan import FIELD_TYPES, document_structure, field_type, validate_source_locators
 from agent.documents import load_docx, targets
 from agent.execution.execution_wait import current_activity
@@ -361,6 +361,14 @@ def review_request(batch, sources, *, structured=True):
         'Read any referenced attachment tables and their applicable category together with the target paragraph. '
         'Do not report a requirement missing merely because a paragraph relies on its explicit table. '
         'If the excerpt cannot establish the claim, mark it unable to determine. '
+        'Only for Does not conform or Needs information, give separate labeled lines: '
+        '**原文摘录** / **Original excerpt** (short verbatim target text), '
+        '**依据摘录** / **Requirement excerpt** (verbatim applicable requirement followed by its [N](#cite-N)). '
+        'Use **对比量值** / **Compared values** for a quantitative discrepancy: original constraint | required constraint. '
+        'Copy both operands from their respective excerpts, with bounds and units. Compare the same subject, action, '
+        'phase and starting event. Equivalent wording or units and ranges satisfying the requirement are compatible. '
+        'For a mandatory omission use **已查范围** / **Checked scope** with the actual inspected attachment IDs. '
+        'A local omission does not establish a document-wide omission. '
         'For an issue use **问题**: or **Finding**: for one specific discrepancy or gap. '
         'When an action is available write **建议**: or **Recommendation**: followed by the action. '
         'The application builds the final findings index from these items. '
@@ -426,6 +434,17 @@ def review_request(batch, sources, *, structured=True):
             'Structural labels do not themselves assert mandatory completion or external signing duties. '
             'Do not invent that obligation as a defect; an explicit user request to assess duties still requires applicable evidence. '
             'Ambiguous roles stay unspecified and pending.')
+    if freeform and style == 'default':
+        if batch.get('report_language') == 'zh':
+            instruction += (' 对照时，将两句的每一项要求分别还原为主体、动作、对象、条件和约束方向。注意紧缩动词：'
+                '“禁/禁止、勿/不得”均表禁止，“防/防止、免/避免”均表避免，“须/必须”均表必须。'
+                '禁止某结果和避免同一结果在该目标上兼容。语言简略或歧义可澄清；如果按原句存在一致的解释，就不能断言要求相反。'
+                '判断数值差异时，每行只写同一指标的一对原始量值，禁止把不同指标合并成一个操作数。'
+                '对比量值仅用于数值。每个符合判定在说明句末引用直接支持它的 [N](#cite-N)。')
+        else:
+            instruction += (' Compare actor, action, object, conditions and obligation. Preserve prohibitions and preventive intent. '
+                'Report ambiguous wording separately from a contradiction. For numeric discrepancies, give one pair per metric on its own line. '
+                'Cite direct support for each finding of conformity using [N](#cite-N).')
     visible = {**batch, 'fields': visible_fields}
     visible_sources = {**sources, 'evidence': numbered_sources(sources['evidence'])} if freeform else sources
     messages = [{'role': 'system', 'content': instruction}, {'role': 'user',
@@ -759,9 +778,10 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
         expected = identity.get('project_generation')
         if expected is not None and context.get('generation') != expected:
             raise CoreDataError('rag_evidence_stale','审阅期间项目资料身份已变化。')
-        cache_identity={**identity,'public_prose_policy':2,'targets':batch['target_ids'],
+        cache_identity={**identity,'public_prose_policy':3,'targets':batch['target_ids'],
                         'evidence_sha256':_hash(context)}
-        referenced = {f['id']: f['referenced_table_context'] for f in page if 'referenced_table_context' in f}
+        referenced = {f['id']: {k: f[k] for k in ('table_context', 'referenced_table_context') if k in f}
+                      for f in page if 'table_context' in f or 'referenced_table_context' in f}
         if referenced:
             cache_identity['referenced_table_sha256'] = _hash(referenced)
         key='document-public-review-'+_hash(batch['target_ids'])
@@ -772,6 +792,7 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
             # Public text is opaque model-authored content, including JSON examples.
             goals = plans.goals.get(activity.task_id) or {}
             saved={'body':body,'target_ids':batch['target_ids'],'review_layout':review_layout,
+                   'review_contract_version':1, 'checked_scope_ids':{f['id']: checked_scope_ids(f) for f in page},
                    'goal_revision':goals.get('revision'), 'request_digest':goals.get('request_digest'),
                    'verified_source_quotes':_batch_references(body, context.get('evidence', [])),
                    'evidence_available':bool(context.get('evidence')),
@@ -803,6 +824,8 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
                 # Reserve before calling the model. An interrupted call consumes
                 # its single supplement attempt rather than replaying public text.
                 supplement = {'body': '', 'target_ids': correction['target_ids'], 'review_layout':review_layout,
+                    'review_contract_version':1,
+                    'checked_scope_ids':{f['id']: checked_scope_ids(f) for f in correction['fields']},
                     'public_output_state': 'interrupted', 'verified_source_quotes': [],
                     'evidence_available': bool(context.get('evidence')), 'supplement': True}
                 if not activity.checkpoint(correction_key, correction_identity, supplement):
@@ -855,7 +878,7 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
         pending_ids = [item['target_id'] for item in section['target_delivery'] if item['status'] != 'delivered']
         if section.get('public_output_state')=='truncated':
             count = len(section['target_ids'])
-            parts.extend(['', f'本批文字达到长度上限，中途停止。{count} 个位置中，'
+            parts.extend(['', f'本批达到输出上限，中途停止。{count} 个位置中，'
                               f'{count-len(pending_ids)} 个能找到对应审阅文字，{len(pending_ids)} 个尚未对应。'
                               '即使已有对应文字，末尾意见也可能没有写完。'])
         if pending_ids:
@@ -879,7 +902,11 @@ async def _freeform_review(workflow, run_id, template, request, fields, generate
     if review_layout == 'default' or _ISSUE_TABLE_SUFFIX.search(request):
         from agent.review_issue_summary import issue_rows, issue_table
         report['issue_summary'] = issue_rows(sections, fields)
-        parts.extend(['', issue_table(report['issue_summary'])])
+        summary = ['', issue_table(report['issue_summary'])]
+        if _ISSUE_TABLE_SUFFIX.search(request):
+            parts.extend(summary)
+        else:
+            parts[3:3] = summary
     workflow.path_for(run_id,template['id'])
     return {'report':report,'markdown':'\n'.join(parts)}
 

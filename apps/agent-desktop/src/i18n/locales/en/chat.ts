@@ -83,6 +83,10 @@ const chat = {
   publicOps: { correctionAttempt:"Review call {{value}}", events: {correcting:"Correcting a review item",reading:"Reading attachment", inventory_ready:"Inventory ready",selecting:"Screening positions",checking:"Checking current targets",searching:"Searching for evidence",search_results:"Search results returned",results_saved:"Review results saved"}, hits:"Search returned {{value}} items", integrity:"Verified {{completed}}/{{total}} runtime files", title: "Recent actions", inspect: "Inspect attachment structure", read: "Read attachment", review: "Review document targets", search: "Search project library", source: "Read source evidence", export: "Save document" },
   docProgress: { rolesReviewed: "Rechecked {{completed}}/{{total}} source roles", title: "Document progress", batches: "{{value}} batches saved", searches: "{{value}} searches", include: "Included", exclude: "Excluded", context: "Context", uncertain: "Uncertain", decisions: "Recent scope decisions", finding: "Latest review finding", citations: "Evidence for this finding" },
   terminal: {"activityActive": "Running project commands", "activityComplete": "Command results", "cwd": "Working directory", "timeout": "Timeout", "authority": "Runs with your Windows user privileges. Commands can access files outside the project.", "reject": "Reject command", "approve": "Run command", "timedOut": "Command timed out", "cancelled": "Command cancelled", "unknown": "Command outcome unknown; verification is not confirmed", "exit": "Exit code: {{code}}", "truncated": "Output truncated"},
+  reviewTemplate: {
+    title: "Review template",
+    prompt: "Review the completed content in the attachment against applicable requirements in the project library. Compare the original passages with the clauses and their conditions. Preserve locations and supporting excerpts. Check related paragraphs, tables and references before reporting omissions. Distinguish confirmed issues, required additions and unresolved items, and give actionable recommendations. Save the report as Attachment review.md.",
+  },
   welcome: {
     title:
       "Hi! I'm agent.",

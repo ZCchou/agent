@@ -83,6 +83,10 @@ const chat = {
   publicOps: { correctionAttempt:"第 {{value}} 次审阅调用", events: {correcting:"正在修正审阅项",reading:"正在读取附件",inventory_ready:"附件位置清单已建立",selecting:"正在筛选以下位置",checking:"正在核查以下位置",searching:"正在查询项目资料库",search_results:"检索结果已返回",results_saved:"本批审阅结果已保存"}, hits:"本次检索返回 {{value}} 条结果", integrity:"已校验 {{completed}}/{{total}} 个运行文件", title: "最近的公开操作", inspect: "检查附件结构", read: "读取附件", review: "核查审阅目标", search: "检索项目资料库", source: "读取资料依据", export: "保存文档" },
   docProgress: { rolesReviewed: "已复核 {{completed}}/{{total}} 个范围判断", title: "文档处理进展", batches: "已保存 {{value}} 批", searches: "检索 {{value}} 次", include: "纳入", exclude: "排除", context: "上下文", uncertain: "待确认", decisions: "最近的范围判断", finding: "最近的审阅结果", citations: "本条依据" },
   terminal: {"activityActive": "正在执行项目命令", "activityComplete": "命令执行结果", "cwd": "工作目录", "timeout": "超时", "authority": "以当前 Windows 用户权限执行。命令可以访问项目外的文件。", "reject": "拒绝命令", "approve": "执行命令", "timedOut": "命令已超时", "cancelled": "命令已取消", "unknown": "命令结果未知，尚未确认验证通过", "exit": "退出代码：{{code}}", "truncated": "输出已截断"},
+  reviewTemplate: {
+    title: "审阅模板",
+    prompt: "请审阅上传附件中已填写的内容，结合项目资料库核对适用要求。逐项核对原文、条款及其适用条件，保留原文位置和依据摘录。判断缺项前检查相关段落、表格和引用。明确区分已确认问题、待补充材料和无法判断的事项，给出具体建议。将报告保存为“附件审阅报告.md”。",
+  },
   welcome: {
     title:
       "你好，我是 agent。",

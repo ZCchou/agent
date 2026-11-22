@@ -10,6 +10,20 @@ _TABLE_DIRECTIONS = (
                              r'|\b(?:preceding table|table above)\b', re.I)),
 )
 _CONDITION = re.compile(r'适用|类别|[A-Z]\s*类|参数(?:和剖面)?\s*[：:]|要求\s*[：:]|\b(?:category|applicability)\b', re.I)
+_STEP_HEADER = re.compile(r'(?:步骤(?:编号|序号)?|工序|阶段|steps?|phase|stage)(?:\s*(?:no\.?|number|#))?', re.I)
+_LIST_START = re.compile(r'^\s*(?:[(（][a-z\d]{1,3}[)）]|[a-z\d]{1,3}[)）、]|\d{1,3}\.\s+)', re.I)
+
+
+def checked_scope_ids(field):
+    """IDs of original attachment excerpts visible for this target, in source groups."""
+    excerpts = [(field['id'], field.get('text'))]
+    for cell in (field.get('table_context') or {}).get('cells', ()):
+        excerpts.append((cell['id'], cell.get('text')))
+    linked = field.get('referenced_table_context') or {}
+    excerpts.extend(linked.get('section_context', {}).items())
+    for table in linked.get('tables', ()):
+        excerpts.extend(table.get('cells', {}).items())
+    return list(dict.fromkeys(key for key, text in excerpts if text and text.strip()))
 
 
 def paragraph_table_references(fields, target_ids):
@@ -17,7 +31,7 @@ def paragraph_table_references(fields, target_ids):
     wanted = set(target_ids)
     result = {}
     for section, section_fields in groupby(fields, key=lambda field: field.get('section_id')):
-        if not section:
+        if section is None:
             continue
         blocks = []
         conditions = []
@@ -42,7 +56,7 @@ def paragraph_table_references(fields, target_ids):
                 conditions.append(index)
             if key in wanted:
                 directions = [name for name, pattern in _TABLE_DIRECTIONS if pattern.search(text)]
-                if directions:
+                if directions or _LIST_START.match(text):
                     refs.append((key, index, directions))
         for key, index, directions in refs:
             entry = {'direction': directions, 'tables': [], 'section_context': {}}
@@ -73,11 +87,18 @@ def paragraph_table_references(fields, target_ids):
                         break
             before = bisect_left(conditions, index)
             # Only nearby antecedent context, in source order. Its claims belong to the attachment.
-            for pos in conditions[max(0, before-4):before]:
+            for pos in conditions[max(0, before-4):before] if directions else ():
                 if index-pos <= 14:
                     field = blocks[pos][1]
                     entry['section_context'][field['id']] = field['text'][:180]
-            result[key] = entry
+            if _LIST_START.match(blocks[index][1]['text']):
+                for pos in (index - 1, index + 1):
+                    if 0 <= pos < len(blocks) and blocks[pos][0] is None:
+                        neighbor = blocks[pos][1]
+                        if _LIST_START.match(neighbor['text']):
+                            entry['section_context'][neighbor['id']] = neighbor['text'][:180]
+            if directions or entry['section_context']:
+                result[key] = entry
     return result
 
 
@@ -195,6 +216,9 @@ def table_contexts(fields, target_ids):
             cells.sort(key=lambda item: (item[0], item[1]['id']))
             rows[row] = ([column for column, _ in cells], cells)
     row_numbers = {table: sorted(rows) for table, rows in indexed.items()}
+    step_tables = {table for table, rows in indexed.items()
+                   if any(_STEP_HEADER.fullmatch(cell['text'].strip())
+                          for _, cell in rows.get(0, ([], []))[1])}
     by_table = {}
     for field, location in by_id.values():
         by_table.setdefault(location[0], []).append((field, location))
@@ -215,6 +239,8 @@ def table_contexts(fields, target_ids):
         row_position = bisect_left(numbers, target_row)
         previous = numbers[row_position - 1] if row_position else None
         row_order = list(dict.fromkeys(row for row in (target_row, previous, 0) if row in rows))
+        if table in step_tables and target_row > 0 and target_row + 1 in rows:
+            row_order.append(target_row + 1)
         nearest = neighbors[identity]
         direct_ids = list(dict.fromkeys(nearest.values()))
         for neighbor in direct_ids:

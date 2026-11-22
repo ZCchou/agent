@@ -1436,11 +1436,18 @@ export function ChatPage() {
           }
         }} />
       <ComposerDock
-        ragControl={<Button size="composer" variant={ragMode === 'required' ? 'primary' : 'secondary'} icon={<Database />} aria-pressed={ragMode === 'required'}
+        ragControl={<>{effectiveKind === "project_work" && <Button size="composer" variant="secondary" icon={<ListChecks />}
+          disabled={!coreOnline || loading || sending || stopping || !!input.trim()}
+          onClick={event => {
+            markDraftChanged();
+            setInput(tChat("reviewTemplate.prompt"));
+            event.currentTarget.closest(".chat-page")?.querySelector<HTMLTextAreaElement>(".chat-composer textarea")?.focus();
+          }}>{tChat("reviewTemplate.title")}</Button>}
+          <Button size="composer" variant={ragMode === 'required' ? 'primary' : 'secondary'} icon={<Database />} aria-pressed={ragMode === 'required'}
           disabled={!coreOnline || ragModeBusy || sending || loading}
           title={tChat('ragMode.hint')} onClick={() => void toggleRagMode()}>
           {tChat(ragMode === 'required' ? 'ragMode.required' : 'ragMode.button')}
-          </Button>}
+          </Button></>}
         value={input}
         disabled={!coreOnline}
         generating={sending || stopping}
